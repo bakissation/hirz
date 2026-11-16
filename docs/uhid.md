@@ -170,7 +170,7 @@ answers with the engine of `hirz-core` over the user's vault, asking `hirz-uv`
   `HIRZ_STATE`, else `$XDG_STATE_HOME/hirz`. The vault is opened on the first request and
   reloaded by the engine for every ceremony, so credentials created by the extension path
   or synced from another device are seen at once. Without a vault, makeCredential,
-  getAssertion and authenticatorSelection return `CTAP2_ERR_OPERATION_DENIED`, hirzd logs
+  getAssertion and authenticatorSelection return `CTAP2_ERR_NOT_ALLOWED`, hirzd logs
   "run `hirz init` first" and shows a desktop notification (`zenity --notification`, at
   most once every 10 minutes).
 - **getInfo** comes from `hirz_ctap::ctap2::get_info_response()`: versions `FIDO_2_0` and
@@ -219,7 +219,7 @@ list, the engine signs for the first credential of the list that belongs to the 
 a prompt, with flags UP=0 and UV=0 (BE and BS as usual), no hmac-secret output and no user
 name. Credentials with credProtect level 3 are skipped (they need UV). An empty allow list
 gives `CTAP2_ERR_NO_CREDENTIALS`, and a probe that also asks for UV gives
-`CTAP2_ERR_OPERATION_DENIED`. Relying parties reject assertions without UP for sign-in, so a
+`CTAP2_ERR_NOT_ALLOWED`. Relying parties reject assertions without UP for sign-in, so a
 probe result cannot log anyone in. A probe reveals to local processes whether a credential
 exists for a site, which processes of the same user can learn from the vault anyway.
 
@@ -229,7 +229,7 @@ for the RP id `make.me.blink` (`dummy_make_credentials_cmd` in
 `NoCredentials`; Chromium does the same with the RP id `.dummy` (`kDummyRpID`,
 `MakeCredentialTask::GetTouchRequest`). hirzd answers such
 requests with a presence-only prompt, as for authenticatorSelection, and then
-`CTAP2_ERR_OPERATION_DENIED`; it never stores a credential for them.
+`CTAP2_ERR_NOT_ALLOWED`; it never stores a credential for them.
 
 ## Running hirzd
 
@@ -280,3 +280,12 @@ approval method (for example the polkit action).
 9. Move the vault away (or use a fresh account): a ceremony is refused and a desktop
    notification asks to run `hirz init`.
 10. Repeat 3 and 4 in Chromium.
+
+### Refusals end the ceremony
+
+hirz answers a refused, cancelled or unavailable approval with `CTAP2_ERR_NOT_ALLOWED`, not
+`CTAP2_ERR_OPERATION_DENIED`. For an authenticator with built-in user verification, Firefox
+(authenticator-rs, `ctap2/mod.rs`, `handle_errors!`) treats `OPERATION_DENIED` and
+`PIN_AUTH_INVALID` as a failed verification and resends the request at once; a user who
+clicks Cancel would then see the prompt again forever. Timeouts use
+`CTAP2_ERR_USER_ACTION_TIMEOUT`. Both end the ceremony with `NotAllowedError` in the page.

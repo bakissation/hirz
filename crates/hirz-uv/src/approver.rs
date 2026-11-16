@@ -121,6 +121,17 @@ pub fn map_pkcheck(r: RunResult) -> Result<(), ApprovalError> {
     }
 }
 
+fn outcome(r: &Result<(), ApprovalError>) -> &'static str {
+    match r {
+        Ok(()) => "approved",
+        Err(ApprovalError::Denied) => "refused or cancelled",
+        Err(ApprovalError::Timeout) => "timed out",
+        Err(ApprovalError::Unavailable) => "not available, trying the next method",
+        Err(ApprovalError::Locked) => "locked",
+        Err(ApprovalError::Internal(_)) => "error",
+    }
+}
+
 /// Messages never contain PINs, account names or other request data.
 fn diag(msg: &str) {
     eprintln!("hirz-uv: {msg}");
@@ -343,11 +354,17 @@ impl<R: CommandRunner> HirzApprover<R> {
             }
             Method::Uv(UvMethod::Polkit) => {
                 self.ensure_context(ctx, selected, method.step(), shown, deadline)?;
-                self.run_polkit(deadline)
+                diag("asking for your password (polkit)");
+                let r = self.run_polkit(deadline);
+                diag(&format!("polkit: {}", outcome(&r)));
+                r
             }
             Method::Uv(UvMethod::Fingerprint) => {
                 self.ensure_context(ctx, selected, method.step(), shown, deadline)?;
-                self.run_fingerprint(deadline)
+                diag("waiting for your fingerprint");
+                let r = self.run_fingerprint(deadline);
+                diag(&format!("fingerprint: {}", outcome(&r)));
+                r
             }
             Method::Uv(UvMethod::Pin) => {
                 let r = self.run_pin(ctx, selected, deadline);

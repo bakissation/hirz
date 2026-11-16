@@ -29,7 +29,7 @@ use crate::session::{STATE_ENV, Session, Settings, VAULT_ENV};
 const RP_ID: &str = "example.com";
 const CLIENT_DATA_HASH: [u8; 32] = [0x5a; 32];
 const STATUS_OK: u8 = 0x00;
-const STATUS_OPERATION_DENIED: u8 = 0x27;
+const STATUS_NOT_ALLOWED: u8 = 0x30;
 
 /// Approves every request with presence and verification, choosing the first account.
 #[derive(Debug)]
@@ -381,7 +381,7 @@ pub fn run() -> io::Result<()> {
         |host| {
             let (status, _) = host.cbor(0x01, Some(&make_credential_params()))?;
             expect(
-                status == STATUS_OPERATION_DENIED,
+                status == STATUS_NOT_ALLOWED,
                 "makeCredential without a vault must be denied",
             )
         },
@@ -417,7 +417,7 @@ mod tests {
             let ctx = hid::RequestContext::new();
             assert_eq!(
                 handler.process(&request, &ctx),
-                vec![STATUS_OPERATION_DENIED]
+                vec![STATUS_NOT_ALLOWED]
             );
         }
         assert!(

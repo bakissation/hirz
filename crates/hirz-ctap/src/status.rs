@@ -68,14 +68,16 @@ impl Status {
 impl From<&ApprovalError> for Status {
     fn from(e: &ApprovalError) -> Self {
         match e {
-            ApprovalError::Denied => Status::OperationDenied,
+            // With built-in UV, Firefox treats OPERATION_DENIED (and PIN_AUTH_INVALID) as a
+            // failed verification and resends the request at once, which loops forever on a
+            // user refusal. NOT_ALLOWED ends the ceremony with NotAllowedError.
+            ApprovalError::Denied => Status::NotAllowed,
             ApprovalError::Timeout => Status::UserActionTimeout,
             // hirz has no clientPin, so PIN_BLOCKED would point the platform at a PIN it
             // cannot see; UV_BLOCKED is the built-in verification equivalent.
             ApprovalError::Locked => Status::UvBlocked,
-            // UV_INVALID makes platforms retry built-in UV in a loop; a refusal ends the
-            // ceremony with NotAllowedError, which is what the user should see.
-            ApprovalError::Unavailable => Status::OperationDenied,
+            // UV_INVALID and OPERATION_DENIED make platforms retry built-in UV in a loop.
+            ApprovalError::Unavailable => Status::NotAllowed,
             ApprovalError::Internal(_) => Status::Other,
         }
     }
@@ -87,7 +89,7 @@ impl From<&CoreError> for Status {
             CoreError::CredentialExcluded => Status::CredentialExcluded,
             CoreError::NoCredentials => Status::NoCredentials,
             CoreError::UnsupportedAlgorithm => Status::UnsupportedAlgorithm,
-            CoreError::UvRequiredUnavailable => Status::OperationDenied,
+            CoreError::UvRequiredUnavailable => Status::NotAllowed,
             CoreError::Approval(a) => Status::from(a),
             CoreError::InvalidRequest(_) => Status::InvalidParameter,
             CoreError::Vault(_) | CoreError::Crypto(_) => Status::Other,
@@ -144,10 +146,10 @@ mod tests {
                 CoreError::UnsupportedAlgorithm,
                 Status::UnsupportedAlgorithm,
             ),
-            (CoreError::UvRequiredUnavailable, Status::OperationDenied),
+            (CoreError::UvRequiredUnavailable, Status::NotAllowed),
             (
                 CoreError::Approval(ApprovalError::Denied),
-                Status::OperationDenied,
+                Status::NotAllowed,
             ),
             (
                 CoreError::Approval(ApprovalError::Timeout),
@@ -159,7 +161,7 @@ mod tests {
             ),
             (
                 CoreError::Approval(ApprovalError::Unavailable),
-                Status::OperationDenied,
+                Status::NotAllowed,
             ),
             (
                 CoreError::Approval(ApprovalError::Internal("x".into())),

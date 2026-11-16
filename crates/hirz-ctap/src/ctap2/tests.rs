@@ -728,7 +728,7 @@ fn touch_probe_waits_for_a_gesture_then_reports_no_pin() {
         );
 
         for (err, expected) in [
-            (ApprovalError::Denied, Status::OperationDenied),
+            (ApprovalError::Denied, Status::NotAllowed),
             (ApprovalError::Timeout, Status::UserActionTimeout),
         ] {
             let h = handler();
@@ -743,7 +743,7 @@ fn engine_errors_become_statuses() {
     for (err, expected) in [
         (CoreError::CredentialExcluded, Status::CredentialExcluded),
         (CoreError::NoCredentials, Status::NoCredentials),
-        (CoreError::UvRequiredUnavailable, Status::OperationDenied),
+        (CoreError::UvRequiredUnavailable, Status::NotAllowed),
         (
             CoreError::Approval(ApprovalError::Locked),
             Status::UvBlocked,
@@ -1318,7 +1318,7 @@ fn other_commands() {
     });
     assert_eq!(
         h.process(&[command::SELECTION], &ctx),
-        vec![Status::OperationDenied.code()]
+        vec![Status::NotAllowed.code()]
     );
     with_engine(&h, |f| {
         f.fail = Some(CoreError::Approval(ApprovalError::Timeout))
