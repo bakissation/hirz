@@ -63,6 +63,11 @@ pub mod client_pin {
 /// platforms may send, so their silent pre-flight probes need few round trips.
 pub const MAX_CREDENTIAL_COUNT_IN_LIST: u64 = 16;
 
+/// Advertised maxCredentialIdLength. hirz creates 32-byte ids, but imported passkeys keep
+/// their original ids (up to 1023 bytes) and browsers drop longer allow-list ids before
+/// sending them.
+pub const MAX_ACCEPTED_CREDENTIAL_ID_LEN: u64 = 1023;
+
 /// getInfo firmwareVersion: the package version as `major << 16 | minor << 8 | patch`.
 pub const FIRMWARE_VERSION: u64 = 0x00_01_00;
 
@@ -520,7 +525,7 @@ pub fn get_info_value() -> Value {
         .int(0x05, MAX_MESSAGE_SIZE as u64)
         .int(0x06, Value::Array(vec![Value::int(2), Value::int(1)]))
         .int(0x07, MAX_CREDENTIAL_COUNT_IN_LIST)
-        .int(0x08, CREDENTIAL_ID_LEN as u64)
+        .int(0x08, MAX_ACCEPTED_CREDENTIAL_ID_LEN)
         .int(0x09, text_array(&["usb"]))
         .int(
             0x0a,

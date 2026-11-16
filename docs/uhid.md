@@ -176,8 +176,8 @@ answers with the engine of `hirz-core` over the user's vault, asking `hirz-uv`
 - **getInfo** comes from `hirz_ctap::ctap2::get_info_response()`: versions `FIDO_2_0` and
   `FIDO_2_1`, extensions `credProtect` and `hmac-secret`, the hirz AAGUID, options `rk`,
   `up`, `uv` true and `plat` false, maxMsgSize 7609, PIN/UV auth protocols 2 and 1,
-  maxCredentialCountInList 16, maxCredentialIdLength 32 (every hirz credential id is 32
-  bytes, so platforms can skip longer ids without asking), transports `usb`, algorithms
+  maxCredentialCountInList 16, maxCredentialIdLength 1023 (hirz creates 32-byte ids; imported passkeys keep their
+  original ids of up to 1023 bytes, and browsers drop allow-list ids longer than this value), transports `usb`, algorithms
   ES256 and EdDSA, and firmwareVersion `0x000100` (0.1.0).
 - **Cancellation.** The approval prompt cannot be interrupted. On CTAPHID_CANCEL the
   transport answers `CTAP2_ERR_KEEPALIVE_CANCEL` at once; the open prompt stays until it is

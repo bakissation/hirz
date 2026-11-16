@@ -261,11 +261,9 @@ Every passkey is checked on its own; one bad passkey never stops the others.
 | `Item.creationAt` | creation time; missing or in the future means now |
 | unknown fields | ignored, as CXF requires |
 
-Imported passkeys with ids of other lengths work through the Firefox extension. Over the
-virtual security key, hirz reports a maximum credential id length of 32 bytes (the ids it
-creates), and browsers may leave longer ids out of the list of credentials a site allows, so
-a passkey with an id over 32 bytes may only be offered there when the site does not name
-its credentials.
+Imported passkeys keep their original credential ids (1 to 1023 bytes) and work through both
+the Firefox extension and the virtual security key, which reports a maximum credential id
+length of 1023 bytes.
 
 A passkey whose credential id is already in hirz is reported as already present when the key
 is the same, and skipped when it differs. The file may be at most 64 MiB and hold at most
