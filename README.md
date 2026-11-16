@@ -94,6 +94,6 @@ Development is **funded by [IdeaCrafters](https://ideacrafters.com)** ([@IdeaCra
 
 The project is maintainer-led: bug reports are welcome, feature pull requests by prior agreement (see [CONTRIBUTING.md](CONTRIBUTING.md)). **Feedback shapes the roadmap: [open an issue](https://github.com/bakissation/hirz/issues/new/choose) with bugs, sites that refuse hirz, or what you wish it did.** Security reports go to [SECURITY.md](SECURITY.md), never a public issue.
 
-Licensed under either the [MIT license](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.
+Licensed under either the [MIT license](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option. The bundled [Public Suffix List](crates/hirz-webauthn/data/public_suffix_list.dat) keeps its own license, the Mozilla Public License 2.0.
 
 **Status: pre-release, not independently audited.** Keep another way to sign in to important accounts while hirz is young.
