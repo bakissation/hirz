@@ -20,8 +20,8 @@
 use std::sync::Mutex;
 
 use hirz_core::{
-    AAGUID, AssertionResponse, COSE_ALG_EDDSA, COSE_ALG_ES256, CREDENTIAL_ID_LEN, CoreError,
-    CredProtect, GetAssertionRequest, GetExtensions, HmacSecretWrap, MakeCredentialRequest,
+    AAGUID, AssertionResponse, COSE_ALG_EDDSA, COSE_ALG_ES256, CoreError, CredProtect,
+    GetAssertionRequest, GetExtensions, HmacSecretWrap, MakeCredentialRequest,
     MakeCredentialResponse, MakeExtensions, RpEntity, UserEntity, UvRequirement,
 };
 use hirz_proto::auth_data::MAX_CREDENTIAL_ID_LEN;
