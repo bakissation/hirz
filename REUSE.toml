@@ -1,0 +1,36 @@
+version = 1
+SPDX-PackageName = "hirz"
+SPDX-PackageSupplier = "Abdelbaki Berkati"
+SPDX-PackageDownloadLocation = "https://github.com/bakissation/hirz"
+
+# Later entries override earlier ones for the paths they match.
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Abdelbaki Berkati"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "crates/hirz-webauthn/data/public_suffix_list.dat"
+SPDX-FileCopyrightText = "The Public Suffix List project and contributors"
+SPDX-License-Identifier = "MPL-2.0"
+
+[[annotations]]
+path = "crates/hirz-webauthn/data/test_psl.txt"
+SPDX-FileCopyrightText = "The Public Suffix List project and contributors"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = "crates/hirz-vault/data/bip39-english.txt"
+SPDX-FileCopyrightText = "The authors of BIP-39 (Marek Palatinus, Pavol Rusnak, Aaron Voisine and Sean Bowe)"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["assets/brand/*.png", "assets/brand/*.svg", "extension/icons/*.png"]
+SPDX-FileCopyrightText = "2026 Abdelbaki Berkati"
+SPDX-License-Identifier = "LicenseRef-hirz-brand"
+
+[[annotations]]
+path = "CODE_OF_CONDUCT.md"
+SPDX-FileCopyrightText = "The Contributor Covenant project (https://www.contributor-covenant.org)"
+SPDX-License-Identifier = "CC-BY-4.0"

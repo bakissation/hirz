@@ -19,6 +19,7 @@ manifest points to the same `hirz-nmh` path everywhere.
 | Firefox native manifest | `/usr/lib/mozilla/native-messaging-hosts/hirz.json` | same, plus `/usr/lib64/mozilla/native-messaging-hosts/hirz.json` (a relative symlink to it) | same as Debian | 0644 |
 | Manual pages | `/usr/share/man/man1/hirz.1`, `hirzd.1`, `hirz-nmh.1` and `/usr/share/man/man8/hirz-uhid-broker.8` (compressed by the package tools) | same | same | 0644 |
 | Preset enabling the broker socket | none | `/usr/lib/systemd/system-preset/80-hirz.preset` | none | 0644 |
+| License texts | `/usr/share/doc/hirz/copyright` (MIT and Apache-2.0 terms, per-file licenses), `MPL-2.0.txt` and `LICENSE-BIP39` next to it | `/usr/share/licenses/hirz/`: `LICENSE-MIT`, `LICENSE-APACHE`, `MPL-2.0.txt`, `LICENSE-BIP39` | same as Fedora | 0644 |
 
 All files and directories are owned by root. Nothing is installed in `/etc` (no conffiles)
 and nothing in a home directory.
@@ -36,6 +37,8 @@ and nothing in a home directory.
 | `hirz.json` | `packaging/native-messaging/hirz.json` | `@HIRZ_NMH_PATH@` replaced by `/usr/lib/hirz/hirz-nmh` |
 | `hirz.conf` | written by the build | contains `uhid` |
 | Manual pages | `docs/man/` (hand-written roff) | gzip |
+| `MPL-2.0.txt` | `LICENSES/MPL-2.0.txt` | none |
+| `LICENSE-BIP39` | `crates/hirz-vault/data/LICENSE-BIP39` | none |
 
 Every package script checks that the substitution happened and stops otherwise.
 

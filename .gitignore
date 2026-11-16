@@ -6,3 +6,12 @@
 *.xpi
 /dist
 /snap
+.env
+.env.*
+*.pem
+*.key
+.vscode/
+.idea/
+*.swp
+.DS_Store
+.claude/

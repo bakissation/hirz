@@ -19,7 +19,7 @@ description: |
       sudo snap run hirz.setup-system install
 
   Then each user runs "hirz init" and "systemctl --user enable --now hirzd".
-license: MIT OR Apache-2.0
+license: (MIT OR Apache-2.0) AND MPL-2.0
 website: https://github.com/bakissation/hirz
 source-code: https://github.com/bakissation/hirz
 issues: https://github.com/bakissation/hirz/issues
@@ -60,7 +60,8 @@ parts:
       install -Dm0644 packaging/native-messaging/hirz.json "$d/native-messaging/hirz.json.in"
       install -Dm0644 packaging/systemd/hirzd.service "$d/systemd/hirzd.service.in"
       install -Dm0755 packaging/snap/local/setup-system "$CRAFT_PART_INSTALL/bin/setup-system"
-      install -Dm0644 -t "$CRAFT_PART_INSTALL/share/doc/hirz" LICENSE-MIT LICENSE-APACHE README.md
+      install -Dm0644 -t "$CRAFT_PART_INSTALL/share/doc/hirz" LICENSE-MIT LICENSE-APACHE \
+        LICENSES/MPL-2.0.txt crates/hirz-vault/data/LICENSE-BIP39 README.md
       install -Dm0644 -t "$CRAFT_PART_INSTALL/share/man/man1" docs/man/hirz.1 docs/man/hirzd.1 docs/man/hirz-nmh.1
       install -Dm0644 -t "$CRAFT_PART_INSTALL/share/man/man8" docs/man/hirz-uhid-broker.8
 

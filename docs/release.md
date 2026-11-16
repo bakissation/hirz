@@ -20,8 +20,8 @@ feature branch --PR--> dev --PR--> main --release-plz--> release PR --merge--> m
 - `dev` is the default branch; `main` holds released code. Both take changes only through
   pull requests, merged with a merge commit (squash and rebase merging are off).
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
-  `feat:`, `fix:`, `security:`, `docs:`, `refactor:`, `perf:`, `test:`, `chore:`. release-plz
-  reads them to pick the next version and to write `CHANGELOG.md`.
+  `feat:`, `fix:`, `security:`, `docs:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`,
+  `chore:`. release-plz reads them to pick the next version and to write `CHANGELOG.md`.
 - Every commit on `dev` and `main` is signed (rule "Require signed commits"). Merge commits
   made by GitHub and commits made through the API by the release GitHub App are signed by
   GitHub.
@@ -481,7 +481,8 @@ channel, waits for the validation, and creates the add-on or the new version wit
 `PUT /api/v5/addons/addon/GUID/`. No npm or PyPI package is installed next to the AMO
 credentials. Listed versions go through Mozilla's review; the job submits and does not wait.
 `packaging/amo/metadata.json` gives the listing's category, summary, license and reviewer
-notes. `python3 scripts/amo-submit.py --self-test` checks the JWT against RFC 7515's HS256
+notes; the listing declares MIT, one of the two licenses the project is offered under
+(MIT OR Apache-2.0). `python3 scripts/amo-submit.py --self-test` checks the JWT against RFC 7515's HS256
 example and the whole flow against a local fake server, including that a version that only
 starts like the release's (`0.1` for `0.1.0`) is refused; `scripts/check.sh scripts` runs it,
 and the self-tests of `scripts/ci/verify-sums.sh` and `scripts/set-version.sh`.

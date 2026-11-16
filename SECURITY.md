@@ -4,13 +4,15 @@ hirz holds people's passkeys, so security reports get priority.
 
 ## Reporting a vulnerability
 
-Please report privately through GitHub's "Report a vulnerability" button on the repository's
-Security tab. Do not open a public issue for a vulnerability.
+Please report privately, by either of these. Do not open a public issue for a vulnerability.
 
-If the button is missing or does not work, open a public issue titled "Security contact
-request" that says nothing about the problem itself; a maintainer answers with a private
-channel and, if you want to encrypt the report, a public key. The same goes for a problem with
-a package signing key or the release pipeline: say which key or channel, not how.
+1. GitHub's "Report a vulnerability" button on the repository's Security tab.
+2. Email to security@berkati.xyz. There is no PGP key yet, so the message is not encrypted;
+   if you need an encrypted channel, send a first message that says nothing about the problem
+   and ask for one.
+
+The same goes for a problem with a package signing key or the release pipeline: say which key
+or channel, not how.
 
 Include what you found, how to reproduce it, and the version or commit you tested. You will get
 an acknowledgement within 7 days. Fixes for confirmed issues are released as soon as they are

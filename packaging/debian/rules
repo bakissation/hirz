@@ -67,7 +67,8 @@ override_dh_auto_install:
 	sed 's#@HIRZ_NMH_PATH@#$(NMH)#' packaging/native-messaging/hirz.json \
 	  > $(DEST)/usr/lib/mozilla/native-messaging-hosts/hirz.json
 	grep -q '"path": "$(NMH)"' $(DEST)/usr/lib/mozilla/native-messaging-hosts/hirz.json
-	install -Dm0644 -t $(DEST)/usr/share/doc/hirz README.md SECURITY.md docs/install.md
+	install -Dm0644 -t $(DEST)/usr/share/doc/hirz README.md SECURITY.md docs/install.md \
+	  LICENSES/MPL-2.0.txt crates/hirz-vault/data/LICENSE-BIP39
 
 # The broker socket is handled by the maintainer scripts shared with scripts/package-deb.sh
 # (packaging/deb/), which do what dh_installsystemd would. The user unit is never enabled by

@@ -1,0 +1,19 @@
+# Synthetic test data, not credentials: the key fixtures and fuzz seeds hold the RFC 8410 sample
+# key, scalar-1 keys and counting-byte placeholders. The two GPG fingerprints in release.yml are
+# public identifiers.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "synthetic key fixtures and fuzz seeds"
+paths = [
+  '''crates/hirz-cli/tests/fixtures/''',
+  '''fuzz/seeds/''',
+]
+
+[[allowlists]]
+description = "public GPG key fingerprints"
+condition = "AND"
+paths = ['''\.github/workflows/release\.yml$''']
+regexes = ['''^[0-9A-F]{40}$''']

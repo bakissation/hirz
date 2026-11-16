@@ -6,7 +6,7 @@ pkgrel=1
 pkgdesc='Passkey authenticator for Linux: a virtual security key and a Firefox extension host'
 arch=('x86_64' 'aarch64')
 url='https://github.com/bakissation/hirz'
-license=('MIT OR Apache-2.0')
+license=('MIT OR Apache-2.0' 'MPL-2.0')
 depends=('glibc' 'libgcc' 'polkit' 'zenity>=4' 'systemd')
 makedepends=('cargo' 'cmake')
 optdepends=(
@@ -88,6 +88,7 @@ package() {
   install -Dm0644 -t "$pkgdir/usr/share/man/man1" docs/man/hirz.1 docs/man/hirzd.1 docs/man/hirz-nmh.1
   install -Dm0644 -t "$pkgdir/usr/share/man/man8" docs/man/hirz-uhid-broker.8
 
-  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE-MIT LICENSE-APACHE
+  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE-MIT LICENSE-APACHE \
+    LICENSES/MPL-2.0.txt crates/hirz-vault/data/LICENSE-BIP39
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname" README.md SECURITY.md docs/install.md
 }

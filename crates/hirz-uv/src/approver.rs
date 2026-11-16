@@ -1184,7 +1184,7 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
 )]
 mod tests {
     use super::*;
-    use crate::pin::tests::{TEST_PARAMS, TempDir, crypto_ready};
+    use crate::pin::tests::{TEST_PARAMS, TempDir};
     use crate::pin::{MAX_FAILURES, Verifier, serialize_verifier};
     use crate::polkit::ProcessIdentity;
     use hirz_core::{CandidateAccount, UserEntity};
@@ -2094,10 +2094,6 @@ mod tests {
 
     #[test]
     fn pin_flow_with_real_crypto() {
-        if !crypto_ready() {
-            eprintln!("skipped: hirz-crypto placeholder");
-            return;
-        }
         let d = TempDir::new("pin-real");
         let c = one();
         let a = approver(
@@ -2412,10 +2408,6 @@ mod tests {
 
     #[test]
     fn pairing_pin_with_real_crypto() {
-        if !crypto_ready() {
-            eprintln!("skipped: hirz-crypto placeholder");
-            return;
-        }
         let d = TempDir::new("pair-pin");
         let a = approver(
             Fake::new(
@@ -3260,10 +3252,6 @@ mod tests {
 
     #[test]
     fn a_pin_checked_after_the_deadline_does_not_approve() {
-        if !crypto_ready() {
-            eprintln!("skipped: hirz-crypto placeholder");
-            return;
-        }
         fn slow(_: Duration) {
             std::thread::sleep(Duration::from_millis(500));
         }

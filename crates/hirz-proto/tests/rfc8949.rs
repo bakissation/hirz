@@ -1,5 +1,6 @@
 //! Examples from RFC 8949 Appendix A that fall inside the supported subset, plus the
-//! Appendix A items this decoder must reject.
+//! Appendix A items this decoder must reject. Copyright (c) 2020 IETF Trust and the persons
+//! identified as the document authors (https://trustee.ietf.org/license-info).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 mod common;

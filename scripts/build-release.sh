@@ -133,7 +133,8 @@ mkdir -p "$out"
 for b in "${BINS[@]}"; do
   install -m 0755 "$target_dir/release/$b" "$out/$b"
 done
-install -m 0644 LICENSE-MIT LICENSE-APACHE README.md "$out/"
+install -m 0644 LICENSE-MIT LICENSE-APACHE LICENSES/MPL-2.0.txt crates/hirz-vault/data/LICENSE-BIP39 \
+  README.md "$out/"
 
 leaks=0
 for b in "${BINS[@]}"; do

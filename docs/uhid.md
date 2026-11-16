@@ -347,7 +347,7 @@ answers with the engine of `hirz-core` over the user's vault, asking `hirz-uv`
   `up`, `uv` and `plat` false, maxMsgSize 7609, PIN/UV auth protocols 2 and 1,
   maxCredentialCountInList 16, maxCredentialIdLength 1023 (hirz creates 32-byte ids; imported passkeys keep their
   original ids of up to 1023 bytes, and browsers drop allow-list ids longer than this value), transports `usb`, algorithms
-  ES256 and EdDSA, and firmwareVersion `0x000100` (0.1.0). The `uv` option is true when at
+  ES256 and EdDSA, and firmwareVersion `0x000100` (a fixed value, not the release version). The `uv` option is true when at
   least one verifying method of the approval config (system password, fingerprint, PIN) can be
   used right now and false otherwise; hirzd re-checks it at most every 10 seconds and never
   waits for a request in progress to answer. A platform that reads `uv: false` does not ask for

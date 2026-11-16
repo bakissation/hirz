@@ -1,0 +1,14 @@
+hirz brand assets: all rights reserved
+
+Copyright (c) 2026 Abdelbaki Berkati. All rights reserved.
+
+This notice covers the hirz name, logo, wordmark and icons, in the files described in
+assets/brand/README.md. The MIT OR Apache-2.0 license of the hirz source code does not apply
+to them.
+
+No right to use, copy, modify or distribute these assets is granted, with one exception:
+distributions and packagers may include the icon files, unmodified, in their packages of hirz
+to represent hirz.
+
+For any other use, ask the copyright holder first, through an issue at
+https://github.com/bakissation/hirz/issues.

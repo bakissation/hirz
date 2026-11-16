@@ -111,12 +111,14 @@ done
 
 doc="$pkg/usr/share/doc/hirz"
 mkdir -p "$doc"
-install -m 0644 README.md SECURITY.md docs/install.md "$doc/"
+install -m 0644 README.md SECURITY.md docs/install.md LICENSES/MPL-2.0.txt \
+  crates/hirz-vault/data/LICENSE-BIP39 "$doc/"
 {
   cat <<EOF
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: hirz
-Upstream-Contact: $HOMEPAGE/security
+Upstream-Contact: security@berkati.xyz
+ $HOMEPAGE/security
 Source: $HOMEPAGE
 
 Files: *
@@ -130,14 +132,45 @@ Comment:
  cmov, ctutils, password-hash, phc, getrandom, cfg-if, zeroize, libc, serde_json,
  serde_core, itoa, memchr, zmij (MIT or Apache-2.0, some also other permissive terms).
 
+Files: crates/hirz-webauthn/data/public_suffix_list.dat
+Copyright: The Public Suffix List project and contributors
+License: MPL-2.0
+Comment:
+ The Public Suffix List, unmodified, compiled into hirz-nmh. The MPL-2.0 terms apply to
+ this file only. Source: https://publicsuffix.org/list/public_suffix_list.dat
+
+Files: crates/hirz-vault/data/bip39-english.txt
+Copyright: The authors of BIP-39 (Marek Palatinus, Pavol Rusnak, Aaron Voisine and Sean Bowe)
+License: MIT
+Comment:
+ The English word list of BIP-39, unmodified, compiled into the programs that link
+ hirz-vault. The notice is in /usr/share/doc/hirz/LICENSE-BIP39.
+ Source: https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt
+
+Files: assets/brand/*.png assets/brand/*.svg extension/icons/*.png
+Copyright: 2026 Abdelbaki Berkati
+License: hirz-brand
+Comment:
+ The hirz logo, wordmark and icons. See assets/brand/README.md.
+
 License: MIT
 EOF
-  sed -e 's/^$/./' -e 's/^/ /' LICENSE-MIT
+  sed -e '/^Copyright (c)/,/^$/d' -e 's/^$/./' -e 's/^/ /' LICENSE-MIT
   cat <<'EOF'
 
 License: Apache-2.0
  On Debian systems, the full text of the Apache License, Version 2.0 can be
  found in /usr/share/common-licenses/Apache-2.0.
+
+License: MPL-2.0
+ On Debian systems, the full text of the Mozilla Public License, Version 2.0 can be
+ found in /usr/share/common-licenses/MPL-2.0.
+
+License: hirz-brand
+ All rights reserved. The hirz name, logo, wordmark and icons are not under the license of
+ the hirz source code. Distributions and packagers may include the icon files, unmodified,
+ in their packages of hirz to represent hirz. Any other use needs permission from the
+ copyright holder.
 EOF
 } >"$doc/copyright"
 chmod 0644 "$doc/copyright"

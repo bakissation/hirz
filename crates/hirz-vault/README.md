@@ -11,3 +11,4 @@ deterministic keys", by Marek Palatinus, Pavol Rusnak, Aaron Voisine and Sean Bo
 published under the MIT License as part of the Bitcoin Improvement Proposals repository.
 It is used unchanged (SHA-256
 `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`) to display recovery keys.
+The MIT notice is in `data/LICENSE-BIP39`.

@@ -17,7 +17,7 @@ mod tests;
 #[cfg(test)]
 mod tests_line;
 #[cfg(test)]
-mod tests_review;
+mod tests_removal;
 
 pub type DeviceId = [u8; 16];
 

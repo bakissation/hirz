@@ -66,6 +66,22 @@ digests are refreshed by hand; `scripts/check.sh toolchain` fails when an image 
 by digest or when the Rust toolchain and image differ between the workflows, the docs, the
 snap draft and `rust-toolchain.toml`.
 
+## Bundled data
+
+Two data files are compiled into the shipped programs with `include_str!`, and one more is used
+by tests. They are not crates, so `cargo deny` does not see them. Each keeps its own license:
+
+| File | Used by | License | Source and notes |
+|---|---|---|---|
+| `crates/hirz-webauthn/data/public_suffix_list.dat` | `hirz-nmh` (RP ID validation) | MPL-2.0 | Public Suffix List, used unmodified; version, commit and update steps in `crates/hirz-webauthn/README.md`. Applies to that file only; the text is in `LICENSES/MPL-2.0.txt` |
+| `crates/hirz-vault/data/bip39-english.txt` | `hirz-vault` (recovery words), so every program that links it | MIT | English word list of BIP-39, used unchanged; authors and notice in `crates/hirz-vault/data/LICENSE-BIP39` |
+| `crates/hirz-webauthn/data/test_psl.txt` | tests only, not shipped | CC0-1.0 | Test vectors of the Public Suffix List project |
+
+Packages declare these in their license metadata (the RPM `License:` tag, the PKGBUILD, the snap
+and `debian/copyright`). `REUSE.toml` maps every path to its license, and `LICENSES/` holds the
+texts. The hirz name, logo, wordmark and icons are not under the project license, see
+`assets/brand/README.md`.
+
 ## Supply chain checks
 
 - `cargo deny` (licenses, bans, RustSec advisories, sources) covers the main workspace. It runs

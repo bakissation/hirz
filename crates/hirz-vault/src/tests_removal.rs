@@ -1,5 +1,5 @@
-//! Regression tests for the second review of the vault: removals stay in force when the folder
-//! is rewritten (docs/vault-format.md, 4.3, 6.1, 9.2 to 9.4, 11.1).
+//! Regression tests for device removal: a removal stays in force when the folder is rewritten
+//! (docs/vault-format.md, 4.3, 6.1, 9.2 to 9.4, 11.1).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -91,8 +91,8 @@ fn own_record_gens(vdir: &Path, id: &DeviceId) -> Vec<GenId> {
         .collect()
 }
 
-/// Review PoC 1 (M-01, D-1): the removed device deletes the removing generation's gen.info and
-/// forges a sibling that removes the honest devices.
+/// The removed device deletes the removing generation's gen.info and forges a sibling that
+/// removes the honest devices.
 #[test]
 fn a_deleted_removal_and_a_forged_removal_never_remove_the_device_that_followed_it() {
     let mut s = removed_x();
@@ -129,8 +129,8 @@ fn a_deleted_removal_and_a_forged_removal_never_remove_the_device_that_followed_
     assert!(rep.fork_detected && !rep.this_device_removed && !rep.locked_out);
 }
 
-/// Review PoC 2 (N-05): as PoC 1, but the forged sibling holds slots for the honest devices and
-/// removes nobody; the user then accepts the fork.
+/// As above, but the forged sibling holds slots for the honest devices and removes nobody; the
+/// user then accepts the fork.
 #[test]
 fn accepting_a_fork_keeps_every_removal_the_line_made() {
     let mut s = removed_x();
@@ -191,8 +191,7 @@ fn accepting_a_fork_keeps_every_removal_the_line_made() {
     assert!(reopened.get(&[3; 32]).is_some());
 }
 
-/// Review PoC 3 (N-02): a device approved by the removed device is kept, and is listed so the
-/// user can remove it too.
+/// A device approved by the removed device is kept, and is listed so the user can remove it too.
 #[test]
 fn devices_approved_by_a_removed_device_are_listed_when_it_is_removed() {
     let t = TempDir::new("approved");
@@ -234,7 +233,7 @@ fn devices_approved_by_a_removed_device_are_listed_when_it_is_removed() {
     assert!(a.devices_resting_on(&x.device_id()).is_empty());
 }
 
-/// Review PoC 4 (N-06): a device that joins with the phrase during a conflict settles it.
+/// A device that joins with the phrase during a conflict settles it.
 #[test]
 fn a_recovery_join_during_a_conflict_can_settle_it() {
     let mut s = removed_x();
@@ -265,8 +264,8 @@ fn a_recovery_join_during_a_conflict_can_settle_it() {
     assert!(s.a.get(&[4; 32]).is_some());
 }
 
-/// Review PoC 5 (M-02): one event numbered 2^32 - 1 by a member must not stop pairing or make a
-/// recovery join land on an older generation.
+/// One event numbered 2^32 - 1 by a member must not stop pairing or make a recovery join land on
+/// an older generation.
 #[test]
 fn a_counter_at_the_window_edge_does_not_stop_joining() {
     let t = TempDir::new("edge");
@@ -319,7 +318,7 @@ fn a_counter_at_the_window_edge_does_not_stop_joining() {
     assert!(d.get(&[2; 32]).is_some());
 }
 
-/// Review PoC 6 (I-28): a short file with the genesis prefix does not block pairing.
+/// A short file with the genesis prefix does not block pairing.
 #[test]
 fn a_planted_genesis_prefix_does_not_block_pairing() {
     let t = TempDir::new("prefix");
@@ -362,9 +361,8 @@ fn a_planted_genesis_prefix_does_not_block_pairing() {
     assert_eq!(a.pairing_words(&req).unwrap(), pending.words());
 }
 
-/// Review PoC 7 (N-01): the removed device makes a device that has not seen its removal rotate
-/// a generation that still holds a slot for it. The device that removed it must never write
-/// into that generation.
+/// The removed device makes a device that has not seen its removal rotate a generation that
+/// still holds a slot for it. The device that removed it must never write into that generation.
 #[test]
 fn a_lagging_device_cannot_hand_new_passkeys_to_a_removed_device() {
     let t = TempDir::new("lagging");
@@ -528,8 +526,7 @@ fn a_device_planted_by_a_removed_device_is_not_carried_forward() {
     ));
 }
 
-/// N-11: a directory swapped for a symlink after it was opened does not redirect writes or
-/// deletions.
+/// A directory swapped for a symlink after it was opened does not redirect writes or deletions.
 #[test]
 fn a_directory_swapped_after_it_was_opened_does_not_redirect_writes() {
     let t = TempDir::new("pinned");
@@ -603,7 +600,7 @@ fn converge(vs: &mut [&mut Vault]) {
     }
 }
 
-/// Lagging-device PoC, removal: the removed device makes a device that has not seen its removal
+/// Lagging device, removal: the removed device makes a device that has not seen its removal
 /// remove another device. Once the lagging device catches up, that removal is void everywhere and
 /// the device keeps its access.
 #[test]
@@ -663,7 +660,7 @@ fn a_removed_device_cannot_remove_another_device_through_a_lagging_one() {
     assert_eq!(reopened.current_gen(), a.current_gen());
 }
 
-/// Lagging-device PoC, passkeys: the removed device changes and deletes passkeys through a
+/// Lagging device, passkeys: the removed device changes and deletes passkeys through a
 /// device that has not seen its removal, adds one with a backdated counter, and signs an event in
 /// another device's name. None of it survives once that device catches up.
 #[test]

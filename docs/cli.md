@@ -381,7 +381,7 @@ state directory; rules in [approval.md](approval.md)).
 ### `hirz export --cxf FILE [--plain]`
 
 Writes every passkey as a FIDO Credential Exchange Format 1.0 document
-([sync.md](sync.md#exporting-and-importing-passkeys)). FILE must not exist; it is created
+([sync.md](sync.md#7-exporting-and-importing-passkeys)). FILE must not exist; it is created
 with mode 0600.
 
 - An export hands out every private key, so it needs user verification like approving or

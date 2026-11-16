@@ -244,7 +244,7 @@ test("background: nothing reaches the host before a suggestion request", async (
   assert.equal(page.received.length, 0);
 });
 
-test("background: list is only asked for the active tab of the focused window (M-04)", async () => {
+test("background: list is only asked for the active tab of the focused window", async () => {
   for (const [label, set] of [
     ["background tab", (t) => (t.active = false)],
     ["unfocused window", (t) => (t.windowFocused = false)],
@@ -273,7 +273,7 @@ test("background: every failure of list is an empty list, not an error", async (
   }
 });
 
-test("background: list requests are limited per document and across documents (L-09)", async () => {
+test("background: list requests are limited per document and across documents", async () => {
   const bg = makeBackground();
   const page = bg.connectPage();
   await page.post({ kind: "suggest", rid: 1, options: getOptions() });
@@ -301,7 +301,7 @@ test("background: list requests are limited per document and across documents (L
   assert.ok(asked <= 12, `second document is capped by its own budget (${asked})`);
 });
 
-test("background: the frames of one tab share a minimum gap between lists (N-07)", async () => {
+test("background: the frames of one tab share a minimum gap between lists", async () => {
   const bg = makeBackground();
   const lists = () => bg.host.sent.filter((m) => m.type === "list").length;
   const first = bg.connectPage();
@@ -375,7 +375,7 @@ test("background: a refused prompt keeps the list usable, a NotHandled makes it 
   assert.deepEqual(page.replies(1).at(-1), { v: 1, rid: 1, phase: "stale" });
 });
 
-test("background: a cancel that arrives before the host call stops the request (L-06)", async () => {
+test("background: a cancel that arrives before the host call stops the request", async () => {
   for (const kind of ["get", "create"]) {
     const bg = makeBackground();
     let release;
@@ -404,7 +404,7 @@ test("background: a cancel while the host works reaches the host", async () => {
   assert.deepEqual(bg.host.sent.at(-1), { v: 1, id: get.id, type: "cancel" });
 });
 
-test("background: options the host's strict reader would reject never leave (I-22)", async () => {
+test("background: options the host's strict reader would reject never leave", async () => {
   let deep = "x";
   for (let i = 0; i < 40; i++) deep = { a: deep };
   const bad = [
@@ -424,7 +424,7 @@ test("background: options the host's strict reader would reject never leave (I-2
   }
 });
 
-test("background: a host reply with a null id restarts the host and fails what was pending (I-22)", async () => {
+test("background: a host reply with a null id restarts the host and fails what was pending", async () => {
   const bg = makeBackground();
   bg.host.script = (m) => (m.type === "get" ? undefined : defaultHost(bg.host)(m));
   const page = bg.connectPage();
@@ -436,7 +436,7 @@ test("background: a host reply with a null id restarts the host and fails what w
   assert.ok(bg.host.ports[0].disconnected);
 });
 
-test("background: ceremonies are limited per document and then go to Firefox (L-09)", async () => {
+test("background: ceremonies are limited per document and then go to Firefox", async () => {
   const bg = makeBackground();
   const page = bg.connectPage();
   for (let rid = 1; rid <= 25; rid++) await page.post({ kind: "get", rid, options: getOptions() });
@@ -445,7 +445,7 @@ test("background: ceremonies are limited per document and then go to Firefox (L-
   assert.deepEqual(page.replies(25), [{ v: 1, rid: 25, ok: false, error: "NotHandled" }]);
 });
 
-test("background: capabilities failures are remembered briefly and requests share one call (L-09)", async () => {
+test("background: capabilities failures are remembered briefly and requests share one call", async () => {
   const bg = makeBackground();
   let answers = 0;
   bg.host.script = (m) => {
@@ -468,7 +468,7 @@ test("background: capabilities failures are remembered briefly and requests shar
   assert.equal(answers, 2, "a good answer is kept for 60 s");
 });
 
-test("background: only the expected members of a credential are passed on (I-37 26)", async () => {
+test("background: only the expected members of a credential are passed on", async () => {
   const bg = makeBackground();
   bg.host.script = (m) => {
     if (m.type !== "get") return defaultHost(bg.host)(m);
@@ -901,7 +901,7 @@ function conditionalArgs(page, extra = {}) {
   return { options, counts };
 }
 
-test("page: a conditional get starts Firefox's own request at once and asks nothing of the host (M-04)", async () => {
+test("page: a conditional get starts Firefox's own request at once and asks nothing of the host", async () => {
   for (const hasAccounts of [true, false]) {
     const page = makePage({ background: { accounts: hasAccounts ? [ACCOUNT_A] : [], hostAvailable: hasAccounts } });
     nativeConditional(page);
@@ -917,7 +917,7 @@ test("page: a conditional get starts Firefox's own request at once and asks noth
   }
 });
 
-test("page: hirz with a passkey and hirz without look the same to the page until the user touches a field (M-04)", async () => {
+test("page: hirz with a passkey and hirz without look the same to the page until the user touches a field", async () => {
   const traces = [];
   for (const accounts of [[ACCOUNT_A], []]) {
     const page = makePage({ background: { accounts } });
@@ -964,7 +964,7 @@ test("page: touching the field shows hirz's list, choosing a row settles with th
   assert.equal(page.list(), undefined, "the list is gone");
 });
 
-test("page: a click on a row right after the list appeared is ignored (I-24)", async () => {
+test("page: a click on a row right after the list appeared is ignored", async () => {
   const page = makePage();
   nativeConditional(page);
   void page.container.get(conditionalArgs(page).options);
@@ -981,7 +981,7 @@ test("page: a click on a row right after the list appeared is ignored (I-24)", a
   assert.equal(page.bg.host.sent.filter((m) => m.type === "get").length, 1);
 });
 
-test("page: the list host element pins the properties a page could use to hide it (I-24)", async () => {
+test("page: the list host element pins the properties a page could use to hide it", async () => {
   const page = makePage();
   nativeConditional(page);
   void page.container.get(conditionalArgs(page).options);
@@ -1031,7 +1031,7 @@ test("page: a Tab into the field opens the list, a synthetic event does not", as
   assert.equal(page.rows().length, 1);
 });
 
-test("page: focus() alone asks nothing, even right after a Tab press (N-07)", async () => {
+test("page: focus() alone asks nothing, even right after a Tab press", async () => {
   const page = makePage();
   nativeConditional(page);
   void page.container.get(conditionalArgs(page).options);
@@ -1043,7 +1043,7 @@ test("page: focus() alone asks nothing, even right after a Tab press (N-07)", as
   assert.equal(page.list(), undefined);
 });
 
-test("page: one Tab press tests one credential list, not several (N-07)", async () => {
+test("page: one Tab press tests one credential list, not several", async () => {
   const page = makePage();
   nativeConditional(page);
   const lists = () => page.bg.host.sent.filter((m) => m.type === "list");
@@ -1183,7 +1183,7 @@ test("page: a modal get with NotHandled still goes to Firefox once the tab has f
   assert.equal(seen[0], options, "unchanged options object");
 });
 
-test("page: challenges and credential ids outside the host's limits go to Firefox without a host call (I-37 25)", async () => {
+test("page: challenges and credential ids outside the host's limits go to Firefox without a host call", async () => {
   const page = makePage();
   const seen = [];
   page.native.impl = (opts) => {
@@ -1216,7 +1216,7 @@ test("page: a modal get is answered by the host with a credential object", async
   assert.equal(page.bg.host.sent.find((m) => m.type === "get").origin, ORIGIN);
 });
 
-test("page: aborting a modal get at once never reaches the host (L-06)", async () => {
+test("page: aborting a modal get at once never reaches the host", async () => {
   const page = makePage();
   const controller = new AbortController();
   const options = { publicKey: { challenge: new Uint8Array(32), rpId: "example.com" }, signal: controller.signal };

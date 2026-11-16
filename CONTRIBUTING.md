@@ -4,7 +4,8 @@ hirz is maintainer-led. Bug reports, sites that refuse hirz, and ideas are welco
 [issues](https://github.com/bakissation/hirz/issues/new/choose). Pull requests for bug fixes
 are welcome; for features, open an issue first and wait for agreement before writing code.
 
-Security problems never go in a public issue: follow [SECURITY.md](SECURITY.md).
+Security problems never go in a public issue: follow [SECURITY.md](SECURITY.md). Everyone
+taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## Ground rules
 
@@ -28,8 +29,13 @@ It runs formatting, clippy, the tests, the `unsafe` and dependency checks, `carg
 `cargo vet` and the extension lint. Pull requests must pass it. Fuzz targets are described in
 [docs/fuzzing.md](docs/fuzzing.md).
 
-Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`fix:`,
-`feat:`, `docs:`, `ci:`, `security:`), because release notes are generated from them.
+New features and bug fixes come with automated tests in the same pull request; a change that
+alters behaviour without a test is not merged.
+
+Open pull requests against `dev`, not `main`. Commit messages follow
+[Conventional Commits](https://www.conventionalcommits.org/), with the types listed in
+[docs/release.md](docs/release.md#branches-and-repository-settings), because release notes are
+generated from them.
 
 ## License
 

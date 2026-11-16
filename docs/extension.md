@@ -445,7 +445,7 @@ Example:
 Success:
 
 ```json
-{"v":1,"id":1,"ok":true,"version":"0.1.0-dev"}
+{"v":1,"id":1,"ok":true,"version":"X.Y.Z"}
 {"v":1,"id":2,"ok":true,"capabilities":{"userVerifyingPlatformAuthenticator":true,"passkeyPlatformAuthenticator":true}}
 {"v":1,"id":3,"ok":true,"credential":{ RegistrationResponseJSON }}
 {"v":1,"id":4,"ok":true,"credential":{ AuthenticationResponseJSON }}
@@ -660,7 +660,7 @@ Treat it as experimental.
    Add-on" and select `extension/manifest.json`. Click "Inspect" on the hirz
    entry to open the background console.
 4. Open https://webauthn.io and register. Expected: the background console
-   logs `hirz: native host ready, version 0.1.0-dev`, and a hirz prompt (not
+   logs `hirz: native host ready, version X.Y.Z`, and a hirz prompt (not
    Firefox's own dialog) shows `webauthn.io` and "Requested by
    https://webauthn.io". Without a vault (`hirz init` not run) Firefox's own
    security key prompt appears instead.

@@ -1,11 +1,40 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: hirz
-Upstream-Contact: https://github.com/bakissation/hirz/security
+Upstream-Contact: security@berkati.xyz
+ https://github.com/bakissation/hirz/security
 Source: https://github.com/bakissation/hirz
 
 Files: *
 Copyright: 2026 Abdelbaki Berkati
 License: MIT or Apache-2.0
+
+Files: crates/hirz-webauthn/data/public_suffix_list.dat
+Copyright: The Public Suffix List project and contributors
+License: MPL-2.0
+Comment:
+ The Public Suffix List, unmodified, compiled into hirz-nmh. The MPL-2.0 terms apply to
+ this file only. Source: https://publicsuffix.org/list/public_suffix_list.dat
+
+Files: crates/hirz-webauthn/data/test_psl.txt
+Copyright: The Public Suffix List project and contributors
+License: CC0-1.0
+Comment:
+ Test data of the Public Suffix List project, used by tests only.
+
+Files: crates/hirz-vault/data/bip39-english.txt
+Copyright: The authors of BIP-39 (Marek Palatinus, Pavol Rusnak, Aaron Voisine and Sean Bowe)
+License: MIT
+Comment:
+ The English word list of BIP-39, unmodified, compiled into the programs that link
+ hirz-vault. The notice is in crates/hirz-vault/data/LICENSE-BIP39 (installed as
+ /usr/share/doc/hirz/LICENSE-BIP39).
+ Source: https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt
+
+Files: assets/brand/*.png assets/brand/*.svg extension/icons/*.png
+Copyright: 2026 Abdelbaki Berkati
+License: hirz-brand
+Comment:
+ The hirz logo, wordmark and icons. See assets/brand/README.md.
 
 Files: vendor/*
 Copyright: The authors of each crate, as listed in its Cargo.toml and license files
@@ -20,8 +49,6 @@ Comment:
 
 License: MIT
  MIT License
- .
- Copyright (c) 2026 Abdelbaki Berkati
  .
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
@@ -44,3 +71,17 @@ License: MIT
 License: Apache-2.0
  On Debian systems, the full text of the Apache License, Version 2.0 can be
  found in /usr/share/common-licenses/Apache-2.0.
+
+License: MPL-2.0
+ On Debian systems, the full text of the Mozilla Public License, Version 2.0 can be
+ found in /usr/share/common-licenses/MPL-2.0.
+
+License: CC0-1.0
+ On Debian systems, the full text of the CC0 1.0 Universal license can be found in
+ /usr/share/common-licenses/CC0-1.0.
+
+License: hirz-brand
+ All rights reserved. The hirz name, logo, wordmark and icons are not under the license of
+ the hirz source code. Distributions and packagers may include the icon files, unmodified,
+ in their packages of hirz to represent hirz. Any other use needs permission from the
+ copyright holder.

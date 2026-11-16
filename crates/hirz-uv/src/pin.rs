@@ -406,13 +406,6 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn crypto_ready() -> bool {
-        let mut b = [0u8; 4];
-        hirz_crypto::random_fill(&mut b).is_ok()
-            && kdf::argon2id(b"1234", &[0u8; 16], TEST_PARAMS).is_ok()
-            && hirz_crypto::ct_eq(b"ab", b"ab")
-    }
-
     fn no_sleep(_: Duration) {}
 
     fn sample(failures: u32) -> Verifier {
@@ -655,10 +648,6 @@ pub(crate) mod tests {
 
     #[test]
     fn set_verify_change_with_real_crypto() {
-        if !crypto_ready() {
-            eprintln!("skipped: hirz-crypto placeholder");
-            return;
-        }
         let d = TempDir::new("real");
         let s = store(&d);
         s.set_pin(b"1234").unwrap();
@@ -737,9 +726,6 @@ pub(crate) mod tests {
 
     #[test]
     fn a_correct_pin_resets_the_counter_under_the_lock() {
-        if !crypto_ready() {
-            return;
-        }
         let d = TempDir::new("changed");
         let s = store(&d);
         s.set_pin(b"1234").unwrap();

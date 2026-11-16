@@ -17,8 +17,9 @@ Release:        1%{?dist}
 Summary:        Passkey authenticator for Linux
 
 # hirz is MIT OR Apache-2.0. The binaries statically link Rust crates: AWS-LC (aws-lc-sys)
-# adds ISC, Apache-2.0, MIT and BSD-3-Clause parts, memchr is MIT OR Unlicense.
-License:        (MIT OR Apache-2.0) AND Apache-2.0 AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)
+# adds ISC, Apache-2.0, MIT and BSD-3-Clause parts, memchr is MIT OR Unlicense. They also embed
+# the Public Suffix List (MPL-2.0) and the BIP-39 word list (MIT).
+License:        (MIT OR Apache-2.0) AND Apache-2.0 AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense) AND MPL-2.0
 URL:            https://github.com/bakissation/hirz
 Source0:        %{url}/releases/download/v%{upstream_version}/hirz-%{upstream_version}.tar.gz
 Source1:        %{url}/releases/download/v%{upstream_version}/hirz-%{upstream_version}-vendor.tar.xz
@@ -142,7 +143,7 @@ fi
 %udev_rules_update
 
 %files
-%license LICENSE-MIT LICENSE-APACHE
+%license LICENSE-MIT LICENSE-APACHE LICENSES/MPL-2.0.txt crates/hirz-vault/data/LICENSE-BIP39
 %doc README.md SECURITY.md docs/install.md
 %{_bindir}/hirz
 %{_bindir}/hirzd

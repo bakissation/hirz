@@ -1,5 +1,6 @@
 //! Test vectors from W3C Web Authentication Level 3, section 16 "Test Vectors"
-//! (16.2 to 16.6 and 16.11), as hex strings.
+//! (16.2 to 16.6 and 16.11), as hex strings. Copyright (c) World Wide Web Consortium, used
+//! under the W3C permissive document license (https://www.w3.org/copyright/software-license/).
 
 pub const NONE_ES256_REG_CHALLENGE: &str =
     "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130";
