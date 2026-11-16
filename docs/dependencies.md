@@ -14,7 +14,7 @@ Adding a dependency requires a line in this file and a passing `cargo deny check
 |---|---|---|---|
 | `aws-lc-rs` (+ `aws-lc-sys`) | hirz-crypto | ES256, Ed25519, SHA-256, HMAC, HKDF, AES-GCM, AES-CBC, X25519, P-256 ECDH, RNG | AWS-LC has a FIPS 140-3 validated module and formally verified parts of P-256 and Ed25519. Bundled C library built from source |
 | `argon2` (+ `blake2`, `base64ct`, `digest`, `crypto-common`, `block-buffer`, `hybrid-array`, `typenum`, `cpufeatures`, `cmov`, `ctutils`) | hirz-crypto | Argon2id for the PIN verifier and passphrase-protected exports | RustCrypto. Not yet in a cargo-vet import set: audited by this project, tested against RFC 9106 vectors |
-| `zeroize` | hirz-crypto, hirz-vault | Wipes secrets on drop | Audited by several cargo-vet import sets |
+| `zeroize` | hirz-crypto (re-exported to other crates) | Wipes secrets on drop | Audited by several cargo-vet import sets |
 | `libc` | hirz-sys | prctl, setrlimit, mlockall, SO_PEERCRED, uhid I/O | rust-lang owned |
 
 ## Build only
