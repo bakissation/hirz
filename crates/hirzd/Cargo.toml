@@ -1,0 +1,20 @@
+[package]
+name = "hirzd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hirz-proto = { workspace = true }
+hirz-crypto = { workspace = true }
+hirz-sys = { workspace = true }
+hirz-vault = { workspace = true }
+hirz-ctap = { workspace = true }
+hirz-core = { workspace = true }
+hirz-uv = { workspace = true }
+
+[lints]
+workspace = true
