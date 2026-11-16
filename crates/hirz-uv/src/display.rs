@@ -314,6 +314,9 @@ pub fn list_args(
 pub fn parse_list_selection(stdout: &[u8], count: usize) -> Option<usize> {
     let s = core::str::from_utf8(stdout).ok()?;
     let s = s.strip_suffix('\n').unwrap_or(s);
+    // zenity 4 may append more fields after "|" even with --print-column=1 (it printed
+    // "1|1" on GNOME 50); the first field is always the "#" column hirz asked for.
+    let s = s.split('|').next().unwrap_or(s);
     if s.is_empty() || s.len() > 6 || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -500,7 +503,9 @@ mod tests {
         assert_eq!(parse_list_selection(b"0\n", 2), None);
         assert_eq!(parse_list_selection(b"\n", 2), None);
         assert_eq!(parse_list_selection(b"", 2), None);
-        assert_eq!(parse_list_selection(b"1|2\n", 2), None);
+        assert_eq!(parse_list_selection(b"1|1\n", 2), Some(0));
+        assert_eq!(parse_list_selection(b"2|alice\n", 2), Some(1));
+        assert_eq!(parse_list_selection(b"|1\n", 2), None);
         assert_eq!(parse_list_selection(b"+1\n", 2), None);
         assert_eq!(parse_list_selection(b"1\n\n", 2), None);
         assert_eq!(parse_list_selection(b"99999999999999999999", 2), None);
