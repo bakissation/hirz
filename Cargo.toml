@@ -39,6 +39,8 @@ aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sy
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 libc = { version = "0.2", default-features = false }
+# Tool only: hirz-cli reads and writes FIDO CXF files. Never a dependency of hirzd or hirz-nmh.
+serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

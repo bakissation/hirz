@@ -26,7 +26,7 @@ pulled by `aws-lc-sys` to compile AWS-LC. They do not end up in the binaries.
 
 | Crate | Used by | Why |
 |---|---|---|
-| `serde_json` (planned) | hirz-cli import/export | Reading and writing FIDO CXF files. Never linked into hirzd or hirz-nmh |
+| `serde_json` (+ `serde_core`, `itoa`, `memchr`, `zmij`) | hirz-cli import/export | Reading and writing FIDO CXF files (JSON). Default features off except `std`; no `serde` derive, no proc macros. Never linked into hirzd or hirz-nmh |
 
 ## Not used, on purpose
 
