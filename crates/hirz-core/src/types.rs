@@ -168,6 +168,14 @@ pub enum ApprovalError {
     Internal(String),
 }
 
+/// CTAP path only: encrypts the hmac-secret output for the platform (PIN/UV auth protocol
+/// shared secret) so the engine can embed it in authData extensions before signing.
+/// When `None` is passed (extension path), the engine leaves authData without the
+/// hmac-secret extension and returns the raw output in `AssertionResponse`.
+pub trait HmacSecretWrap {
+    fn wrap(&self, output: &[u8]) -> Result<Vec<u8>, CoreError>;
+}
+
 /// Implemented by hirz-uv. The engine never signs unless `approve` returns `Ok`.
 pub trait Approver {
     fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError>;
