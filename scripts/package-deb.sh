@@ -90,6 +90,8 @@ put 0644 packaging/udev/70-hirz.rules /usr/lib/udev/rules.d/70-hirz.rules
 put 0644 packaging/udev/72-hirz.rules /usr/lib/udev/rules.d/72-hirz.rules
 put 0644 packaging/polkit/dev.hirz.authenticate.policy \
   /usr/share/polkit-1/actions/dev.hirz.authenticate.policy
+put 0644 assets/brand/hirz-app-icon.svg /usr/share/icons/hicolor/scalable/apps/hirz.svg
+put 0644 assets/brand/app-icon-256.png /usr/share/icons/hicolor/256x256/apps/hirz.png
 mkdir -p "$pkg/usr/lib/modules-load.d"
 printf 'uhid\n' >"$pkg/usr/lib/modules-load.d/hirz.conf"
 
