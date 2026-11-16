@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Checked by hirz with pkcheck before it signs a passkey request with user verification.
+  auth_self (not auth_self_keep): every request asks again, nothing is cached.
+  Install to /usr/share/polkit-1/actions/ owned by root, mode 0644.
+-->
+<policyconfig>
+  <vendor>hirz</vendor>
+  <action id="dev.hirz.authenticate">
+    <description>Use a hirz passkey</description>
+    <message>Confirm it is you to use a passkey</message>
+    <icon_name>dialog-password</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

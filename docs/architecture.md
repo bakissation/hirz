@@ -94,7 +94,7 @@ pub struct ApprovalContext<'a> {
     pub candidates: &'a [CandidateAccount],       // for Get: accounts to choose from
     pub new_account: Option<&'a UserEntity>,      // for Create
     pub uv_required: bool,
-    pub origin_hint: Option<&'a str>,             // extension path only, for display
+    pub origin: Option<&'a str>,                  // extension path only, for display
 }
 pub struct Approval { pub user_present: bool, pub user_verified: bool, pub selected: Option<usize> }
 ```
