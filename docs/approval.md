@@ -186,3 +186,16 @@ protect against malware running as your user, which can read the unlocked vault 
 - A PIN verifier file can be read or replaced by programs running as you.
 - Programs running as you can draw look-alike dialogs. hirz's dialog shows the site so you
   can notice requests you did not start.
+
+## zenity 4 behaviour hirz relies on
+
+Found on a real GNOME desktop with zenity 4.2.1; the unit tests use a scripted runner, so
+these are the facts the scripts encode:
+
+- `--list` does not treat `--` as the end of options: it becomes the first table cell and
+  shifts every column. hirz passes no `--`; instead no table cell may start with `-` (a
+  leading dash in a site-supplied name becomes U+2010 HYPHEN, empty fields show `(none)`).
+- A hidden print column is not reliable. The account number column stays visible and is
+  printed with `--print-column=1`; hirz reads the first `|`-separated field.
+- Every value that comes from a site is passed with `--no-markup` and as `--option=value`,
+  never as a separate argument that could be read as an option.
