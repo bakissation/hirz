@@ -1,6 +1,69 @@
 
 # cargo-vet imports lock
 
+[[publisher.itoa]]
+version = "1.0.19"
+when = "2026-11-09"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.proc-macro2]]
+version = "1.0.107"
+when = "2026-07-19"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.serde]]
+version = "1.0.229"
+when = "2026-07-18"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.serde_core]]
+version = "1.0.229"
+when = "2026-07-18"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.serde_derive]]
+version = "1.0.229"
+when = "2026-07-18"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.serde_json]]
+version = "1.0.154"
+when = "2026-10-11"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.syn]]
+version = "3.0.10"
+when = "2026-11-09"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.unicode-ident]]
+version = "1.0.27"
+when = "2026-10-12"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
+[[publisher.zmij]]
+version = "1.0.23"
+when = "2026-07-13"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
 [[audits.bytecode-alliance.audits.pkg-config]]
 who = "Pat Hickey <phickey@fastly.com>"
 criteria = "safe-to-deploy"

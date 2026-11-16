@@ -104,11 +104,6 @@ version = "0.4.15"
 criteria = "safe-to-deploy"
 notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
 
-[[exemptions.itoa]]
-version = "1.0.19"
-criteria = "safe-to-deploy"
-notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
-
 [[exemptions.jobserver]]
 version = "0.1.35"
 criteria = "safe-to-deploy"
@@ -134,52 +129,12 @@ version = "0.6.1"
 criteria = "safe-to-deploy"
 notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
 
-[[exemptions.proc-macro2]]
-version = "1.0.107"
-criteria = "safe-to-deploy"
-notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
-
 [[exemptions.r-efi]]
 version = "6.0.0"
 criteria = "safe-to-deploy"
 notes = "UEFI target only (getrandom); never compiled for Linux. No cargo-vet audit recorded here."
 
-[[exemptions.serde]]
-version = "1.0.229"
-criteria = "safe-to-deploy"
-notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
-
-[[exemptions.serde_core]]
-version = "1.0.229"
-criteria = "safe-to-deploy"
-notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
-
-[[exemptions.serde_derive]]
-version = "1.0.229"
-criteria = "safe-to-deploy"
-notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
-
-[[exemptions.serde_json]]
-version = "1.0.154"
-criteria = "safe-to-deploy"
-notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
-
-[[exemptions.syn]]
-version = "3.0.10"
-criteria = "safe-to-deploy"
-notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
-
 [[exemptions.typenum]]
 version = "1.20.1"
 criteria = "safe-to-deploy"
 notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
-
-[[exemptions.unicode-ident]]
-version = "1.0.27"
-criteria = "safe-to-deploy"
-notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
-
-[[exemptions.zmij]]
-version = "1.0.23"
-criteria = "safe-to-deploy"
-notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
