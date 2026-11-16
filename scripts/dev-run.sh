@@ -9,7 +9,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 REL=target/release
 
 if [ "${1:-}" = "undo" ]; then
-  sudo rm -f /etc/udev/rules.d/70-hirz.rules /usr/share/polkit-1/actions/dev.hirz.authenticate.policy
+  sudo rm -f /etc/udev/rules.d/70-hirz.rules /etc/udev/rules.d/72-hirz.rules \
+    /usr/share/polkit-1/actions/dev.hirz.authenticate.policy
   sudo udevadm control --reload
   sudo rm -f /run/hirz/uhid.sock
   sudo rmdir /run/hirz 2>/dev/null || true
@@ -26,10 +27,14 @@ if ! "$REL/hirz" status >/dev/null 2>&1; then
 fi
 
 sudo -v
-if ! cmp -s packaging/udev/70-hirz.rules /etc/udev/rules.d/70-hirz.rules 2>/dev/null; then
-  sudo install -m 0644 packaging/udev/70-hirz.rules /etc/udev/rules.d/70-hirz.rules
-  sudo udevadm control --reload
-fi
+rules_changed=0
+for r in 70-hirz.rules 72-hirz.rules; do
+  if ! cmp -s "packaging/udev/$r" "/etc/udev/rules.d/$r" 2>/dev/null; then
+    sudo install -m 0644 "packaging/udev/$r" "/etc/udev/rules.d/$r"
+    rules_changed=1
+  fi
+done
+[ "$rules_changed" = 0 ] || sudo udevadm control --reload
 if ! cmp -s packaging/polkit/dev.hirz.authenticate.policy /usr/share/polkit-1/actions/dev.hirz.authenticate.policy 2>/dev/null; then
   sudo install -o root -g root -m 0644 packaging/polkit/dev.hirz.authenticate.policy /usr/share/polkit-1/actions/
 fi

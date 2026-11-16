@@ -1,0 +1,28 @@
+Source: hirz
+Section: utils
+Priority: optional
+Maintainer: Abdelbaki Berkati <bakissation@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               cargo (>= 1.88),
+               rustc (>= 1.88),
+               cmake
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/bakissation/hirz
+Vcs-Browser: https://github.com/bakissation/hirz
+Vcs-Git: https://github.com/bakissation/hirz.git
+
+Package: hirz
+Architecture: amd64 arm64
+Depends: ${misc:Depends}, ${shlibs:Depends}, polkitd, zenity
+Recommends: fprintd
+Suggests: xdg-native-messaging-proxy
+Description: passkey authenticator for Linux
+ hirz keeps your passkeys (WebAuthn / FIDO2) in an encrypted vault folder that
+ your own folder sync can copy between your computers. It appears to browsers
+ as a USB security key, so it works in Firefox and Chromium, and offers a
+ Firefox extension as a second path. Every signature needs your approval:
+ your account password through polkit, your fingerprint through fprintd, or a
+ hirz PIN.
+ .
+ Each user turns the daemon on with: systemctl --user enable --now hirzd

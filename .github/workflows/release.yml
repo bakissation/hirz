@@ -1,0 +1,462 @@
+name: release
+
+# Runs for a tag vX.Y.Z (created by release-plz when the release PR is merged into main) or
+# vX.Y.Z-rc.N (pushed by a maintainer, on main). Builds every package twice where it can and
+# requires identical bytes, writes SHA256SUMS, GitHub artifact attestations and Sigstore
+# (cosign) bundles, and publishes the GitHub Release. Stable tags then update each package
+# channel whose secrets exist; rc tags only make a GitHub pre-release. See docs/release.md.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+  # Re-run for an existing tag: "gh workflow run release.yml --ref vX.Y.Z".
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: check the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag, version and branch
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::run this workflow on a tag (gh workflow run release.yml --ref vX.Y.Z)"
+            exit 1
+          fi
+          tag=$GITHUB_REF_NAME
+          if [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            prerelease=false
+          elif [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+)$ ]]; then
+            prerelease=true
+          else
+            echo "::error::$tag is neither vX.Y.Z nor vX.Y.Z-rc.N"
+            exit 1
+          fi
+          version=${tag#v}
+
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$tag does not point to a commit on main"
+            exit 1
+          fi
+
+          cargo=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ "$prerelease" = false ]; then
+            if [ "$cargo" != "$version" ]; then
+              echo "::error::Cargo.toml says $cargo, the tag says $version"
+              exit 1
+            fi
+            scripts/set-version.sh --check
+          else
+            echo "pre-release: the build stamps $version over Cargo.toml's $cargo"
+          fi
+
+          # Signed tags show as verified; release-plz signs them when RELEASE_TAG_SSH_KEY is set.
+          obj=$(gh api "repos/$REPO/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha')
+          if [ "${obj%% *}" = tag ] &&
+            [ "$(gh api "repos/$REPO/git/tags/${obj#* }" --jq .verification.verified)" = true ]; then
+            echo "$tag is a signed, verified tag"
+          else
+            echo "::warning::$tag is not a verified signed tag"
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >>"$GITHUB_OUTPUT"
+
+  build:
+    name: build
+    needs: meta
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      verify-reproducible: true
+      rpm-check: true
+      retention-days: 7
+
+  publish:
+    name: sign and publish the GitHub Release
+    needs: [meta, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS
+        run: |
+          cd dist
+          ls -l
+          sha256sum -- * >SHA256SUMS
+          cat SHA256SUMS
+
+      - name: GitHub artifact attestations (SLSA build provenance)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Sigstore bundles (cosign keyless)
+        run: |
+          for f in dist/*; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f" >/dev/null
+          done
+          ls -l dist
+
+      - name: Release notes
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            {
+              echo "Pre-release $TAG for testing. It is not published to any package channel."
+              echo
+              echo "Verify downloads as described in docs/release.md before installing."
+            } >notes.md
+          else
+            # The section of CHANGELOG.md for this version, written by release-plz.
+            awk -v v="$VERSION" '
+              /^## / { if (p) exit; if (index($0, "[" v "]") || index($0, " " v " ")) { p = 1; next } }
+              p { print }
+            ' CHANGELOG.md >notes.md
+            [ -s notes.md ] || echo "See CHANGELOG.md." >notes.md
+          fi
+          {
+            echo
+            echo "Verify downloads with gh attestation verify FILE --repo $GITHUB_REPOSITORY"
+            echo "and cosign verify-blob, as described in docs/release.md."
+          } >>notes.md
+          cat notes.md
+
+      - name: Upload assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # release-plz leaves a draft release for stable tags; rc tags have none.
+          if gh release view "$TAG" --json isDraft --jq .isDraft >is_draft 2>/dev/null; then
+            gh release upload "$TAG" dist/* --clobber
+            if [ "$PRERELEASE" = true ]; then
+              gh release edit "$TAG" --draft=false --prerelease
+            else
+              gh release edit "$TAG" --draft=false --latest
+            fi
+          elif [ "$PRERELEASE" = true ]; then
+            gh release create "$TAG" --verify-tag --prerelease --title "hirz $TAG" \
+              --notes-file notes.md dist/*
+          else
+            gh release create "$TAG" --verify-tag --latest --title "hirz $TAG" \
+              --notes-file notes.md dist/*
+          fi
+
+  # Which package channels this release updates: stable tags only, and only channels whose
+  # secrets exist. Each channel job below is skipped otherwise.
+  channels:
+    name: package channels
+    needs: [meta, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ppa: ${{ steps.gate.outputs.ppa }}
+      copr: ${{ steps.gate.outputs.copr }}
+      aur: ${{ steps.gate.outputs.aur }}
+      pkgrepo: ${{ steps.gate.outputs.pkgrepo }}
+      amo: ${{ steps.gate.outputs.amo }}
+      snap: ${{ steps.gate.outputs.snap }}
+    steps:
+      - id: gate
+        env:
+          STABLE: ${{ needs.meta.outputs.prerelease == 'false' }}
+          PPA: ${{ secrets.PPA_GPG_PRIVATE_KEY != '' && vars.PPA_NAME != '' }}
+          COPR: ${{ secrets.COPR_CONFIG != '' && vars.COPR_PROJECT != '' }}
+          AUR: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' && vars.AUR_KNOWN_HOSTS != '' }}
+          PKGREPO: ${{ secrets.REPO_GPG_PRIVATE_KEY != '' }}
+          AMO: ${{ secrets.AMO_JWT_ISSUER != '' && secrets.AMO_JWT_SECRET != '' }}
+          SNAP: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS != '' }}
+        run: |
+          for c in PPA COPR AUR PKGREPO AMO SNAP; do
+            on=false
+            if [ "$STABLE" = true ] && [ "${!c}" = true ]; then on=true; fi
+            lc=$(echo "$c" | tr '[:upper:]' '[:lower:]')
+            echo "$lc=$on" >>"$GITHUB_OUTPUT"
+            echo "$lc: $on"
+          done
+
+  ppa:
+    name: Ubuntu PPA (Launchpad)
+    needs: [meta, channels]
+    if: needs.channels.outputs.ppa == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SERIES: ${{ vars.PPA_SERIES || 'resolute noble' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: dist/rpm/SOURCES
+
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends dpkg-dev devscripts dput xz-utils
+
+      - name: Import the signing key
+        id: key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
+        run: scripts/ci/import-gpg-key.sh >/dev/null
+
+      - name: Source packages, signed, uploaded
+        env:
+          FPR: ${{ steps.key.outputs.fingerprint }}
+          PPA: ${{ vars.PPA_NAME }}
+        run: |
+          for s in $SERIES; do
+            scripts/package-debsrc.sh --series "$s" --sign "$FPR"
+            dput "ppa:$PPA" dist/debsrc/"$s"/hirz_*_source.changes
+          done
+
+  copr:
+    name: Fedora COPR
+    needs: [meta, channels]
+    if: needs.channels.outputs.copr == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rpm-x86_64
+          path: rpm
+
+      - name: copr-cli
+        run: python3 -m pip install --user --quiet copr-cli==2.9
+
+      - name: Build the signed SRPM in COPR
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+          PROJECT: ${{ vars.COPR_PROJECT }}
+        run: |
+          mkdir -p ~/.config
+          printf '%s\n' "$COPR_CONFIG" >~/.config/copr
+          chmod 0600 ~/.config/copr
+          srpm=$(ls rpm/*.src.rpm)
+          ~/.local/bin/copr-cli build "$PROJECT" "$srpm"
+          rm -f ~/.config/copr
+
+  aur:
+    name: AUR
+    needs: [meta, channels]
+    if: needs.channels.outputs.aur == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container:
+      # archlinux:base, index digest as of 2026-11-16.
+      image: docker.io/library/archlinux:base@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+    steps:
+      - name: Tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git openssh
+          useradd -m builder
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: source
+
+      - name: Update and push the AUR package
+        env:
+          AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_KNOWN_HOSTS: ${{ vars.AUR_KNOWN_HOSTS }}
+          GIT_NAME: ${{ vars.AUR_GIT_NAME || 'hirz release automation' }}
+          GIT_EMAIL: ${{ vars.AUR_GIT_EMAIL }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$AUR_KEY" >~/.ssh/aur
+          printf '%s\n' "$AUR_KNOWN_HOSTS" >~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/aur ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          git clone ssh://aur@aur.archlinux.org/hirz.git aur
+          git -C aur config user.name "$GIT_NAME"
+          git -C aur config user.email "${GIT_EMAIL:-noreply@users.noreply.github.com}"
+          BUILD_USER=builder scripts/ci/update-aur.sh aur source "$VERSION"
+          git -C aur push origin HEAD:master
+          rm -f ~/.ssh/aur
+
+  pkgrepo:
+    name: apt and dnf repository (GitHub Pages)
+    needs: [meta, channels]
+    if: needs.channels.outputs.pkgrepo == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    container:
+      # debian:trixie-slim, index digest as of 2026-11-16.
+      image: docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+    concurrency:
+      group: pkgrepo
+      cancel-in-progress: false
+    steps:
+      - name: Tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git gnupg reprepro createrepo-c rpm
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{binaries,rpm}-*"
+          path: packages
+          merge-multiple: true
+
+      - name: Import the signing key
+        id: key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.REPO_GPG_PASSPHRASE }}
+        run: scripts/ci/import-gpg-key.sh >/dev/null
+
+      - name: Update the gh-pages branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FPR: ${{ steps.key.outputs.fingerprint }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          BASE_URL: ${{ vars.PKGREPO_BASE_URL }}
+        run: |
+          git config --global --add safe.directory '*'
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          url="https://github.com/$GITHUB_REPOSITORY.git"
+          if git -c http.extraheader="$auth" ls-remote --exit-code "$url" gh-pages >/dev/null; then
+            git -c http.extraheader="$auth" clone --branch gh-pages --single-branch "$url" site
+          else
+            git init -q -b gh-pages site
+          fi
+          base=${BASE_URL:-https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}}
+          scripts/ci/publish-pkgrepo.sh site packages "$FPR" "$base"
+          cd site
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "hirz $VERSION"
+          git -c http.extraheader="$auth" push "$url" HEAD:gh-pages
+
+  amo:
+    name: Firefox add-on (addons.mozilla.org, listed)
+    needs: [meta, channels]
+    if: needs.channels.outputs.amo == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Sign and submit
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          npx --yes web-ext@10.8.0 sign \
+            --channel=listed \
+            --source-dir=extension \
+            --artifacts-dir=dist/amo \
+            --amo-metadata=packaging/amo/metadata.json \
+            --approval-timeout=0
+
+  snap:
+    name: snap (edge, ${{ matrix.arch }})
+    needs: [meta, channels]
+    if: needs.channels.outputs.snap == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: snapcraft
+        run: sudo snap install snapcraft --classic --channel=8.x/stable
+
+      - name: Pack (core24 base, on the Ubuntu 24.04 runner itself)
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          mkdir -p snap
+          cp packaging/snap/snapcraft.yaml snap/
+          cp -r packaging/snap/hooks snap/
+          sudo snapcraft pack --destructive-mode --output "hirz_${VERSION}_${ARCH}.snap"
+
+      - name: Upload to the edge channel
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: snapcraft upload --release=edge "hirz_${VERSION}_${ARCH}.snap"

@@ -1,0 +1,19 @@
+# hirz virtual security key, part 2 of 2 (part 1 is 70-hirz.rules).
+#
+# 70-uaccess.rules tags every node with ID_SECURITY_TOKEN as "uaccess". Remove that tag from
+# hirz nodes, so 73-seat-late.rules gives the active seat user no ACL on them and logind
+# never moves an ACL to another user on a seat switch. The node stays owned by its creator
+# with mode 0600 (set in 70-hirz.rules).
+#
+# The file name must sort after 70-uaccess.rules and 71-seat.rules and before
+# 73-seat-late.rules.
+
+ACTION=="remove", GOTO="hirz_late_end"
+SUBSYSTEM!="hidraw", GOTO="hirz_late_end"
+DEVPATH!="/devices/virtual/misc/uhid/0003:1209:0007.*", GOTO="hirz_late_end"
+# HID_PHYS was imported from the parent device by 70-hirz.rules.
+ENV{HID_PHYS}!="[1-9]*", GOTO="hirz_late_end"
+
+TAG-="uaccess"
+
+LABEL="hirz_late_end"

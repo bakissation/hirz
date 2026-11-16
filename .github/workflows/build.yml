@@ -1,0 +1,206 @@
+name: build
+
+# Builds every package: source tarballs with vendored crates, the XPI, the binaries and .deb
+# per architecture in the pinned Rust container, and the .rpm per architecture in a Fedora
+# container with Fedora's Rust. Called by ci.yml (every push and pull request) and by
+# release.yml (tags). See docs/release.md.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version stamped into the tree before building (empty keeps Cargo.toml's)
+        type: string
+        default: ""
+      verify-reproducible:
+        description: Build the binaries a second time from scratch and require identical bytes
+        type: boolean
+        default: false
+      rpm-check:
+        description: Run the test suite inside rpmbuild (%check)
+        type: boolean
+        default: false
+      retention-days:
+        type: number
+        default: 7
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same toolchain as rust-toolchain.toml, named explicitly so rustup never fetches anything.
+  RUSTUP_TOOLCHAIN: "1.99.1"
+  CARGO_AUDITABLE: cargo-auditable@0.7.7
+
+jobs:
+  source:
+    name: source tarballs and XPI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      # rust:1.99.1-trixie (Debian 13), multi-arch index digest as of 2026-11-16. Refresh with
+      # "docker buildx imagetools inspect rust:1.99.1-trixie"; keep both copies in this file and
+      # the one in docs/release.md equal. A new digest changes the build environment.
+      image: docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the container
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends zip xz-utils
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Stamp the version
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/set-version.sh "$VERSION"
+
+      - name: Source tarball and vendored crates
+        run: scripts/package-rpm.sh --sources-only
+
+      - name: Firefox extension
+        run: scripts/build-xpi.sh
+
+      - name: Collect
+        run: |
+          mkdir -p out
+          mv dist/rpm/SOURCES/hirz-*.tar.gz dist/rpm/SOURCES/hirz-*-vendor.tar.xz dist/hirz-*.xpi out/
+          ls -l out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source
+          path: out/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error
+
+  binaries:
+    name: binaries and .deb (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    container:
+      image: docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: ${{ env.CARGO_AUDITABLE }}
+
+      - name: Stamp the version
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/set-version.sh "$VERSION"
+
+      - name: Build (cargo auditable, locked, remapped paths)
+        run: scripts/build-release.sh --auditable
+
+      - name: Rebuild from scratch and compare
+        if: inputs.verify-reproducible
+        run: |
+          cp dist/hirz-*-linux.sha256 first.sha256
+          rm -rf target dist/hirz-*-linux dist/hirz-*-linux.tar.gz dist/hirz-*-linux.sha256
+          scripts/build-release.sh --auditable
+          if diff -u first.sha256 dist/hirz-*-linux.sha256; then
+            echo "reproducible: both builds produced identical binaries and tarball"
+          else
+            echo "::error::the second build differs from the first"
+            exit 1
+          fi
+
+      - name: Check the embedded dependency lists
+        run: |
+          for b in dist/hirz-*-linux/hirz*; do
+            objdump -h "$b" | grep -q '\.dep-v0' || { echo "::error::$b has no .dep-v0 section"; exit 1; }
+          done
+
+      - name: .deb
+        run: scripts/package-deb.sh --no-build
+
+      - name: Collect
+        run: |
+          mkdir -p out
+          mv dist/hirz-*-linux.tar.gz dist/hirz_*.deb out/
+          ls -l out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: out/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error
+
+  rpm:
+    name: .rpm (${{ matrix.arch }})
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    container:
+      # fedora:45, multi-arch index digest as of 2026-11-16.
+      image: docker.io/library/fedora:45@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c
+    steps:
+      - name: Install build tools
+        run: dnf -y -q install rpm-build cargo rust gcc cmake systemd-rpm-macros tar gzip xz
+
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: ${{ env.CARGO_AUDITABLE }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: source
+
+      - name: rpmbuild
+        env:
+          ARCH: ${{ matrix.arch }}
+          NOCHECK: ${{ !inputs.rpm-check && '--nocheck' || '' }}
+        run: |
+          vendor=$(ls source/hirz-*-vendor.tar.xz)
+          version=$(basename "$vendor" -vendor.tar.xz)
+          version=${version#hirz-}
+          top=$PWD/rpmbuild
+          mkdir -p "$top/SOURCES"
+          cp "source/hirz-$version.tar.gz" "$vendor" "$top/SOURCES/"
+          # The spec inside the tarball carries the stamped version.
+          tar -xzf "source/hirz-$version.tar.gz" -O "hirz-$version/packaging/rpm/hirz.spec" >hirz.spec
+          # shellcheck disable=SC2086
+          rpmbuild --define "_topdir $top" --with auditable $NOCHECK -ba hirz.spec
+          mkdir -p out
+          cp "$top"/RPMS/*/*.rpm out/
+          if [ "$ARCH" = x86_64 ]; then cp "$top"/SRPMS/*.src.rpm out/; fi
+          ls -l out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rpm-${{ matrix.arch }}
+          path: out/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

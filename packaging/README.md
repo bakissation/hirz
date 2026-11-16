@@ -12,7 +12,7 @@ manifest points to the same `hirz-nmh` path everywhere.
 | uhid broker (root) | `/usr/libexec/hirz/hirz-uhid-broker` | `/usr/libexec/hirz/hirz-uhid-broker` | `/usr/lib/hirz/hirz-uhid-broker` | 0755 |
 | Broker units | `/usr/lib/systemd/system/hirz-uhid-broker.{socket,service}` | same | same | 0644 |
 | User unit | `/usr/lib/systemd/user/hirzd.service` | same | same | 0644 |
-| udev rule | `/usr/lib/udev/rules.d/70-hirz.rules` | same | same | 0644 |
+| udev rules | `/usr/lib/udev/rules.d/70-hirz.rules` and `72-hirz.rules` | same | same | 0644 |
 | polkit action | `/usr/share/polkit-1/actions/dev.hirz.authenticate.policy` | same | same | 0644 |
 | Module list (`uhid`) | `/usr/lib/modules-load.d/hirz.conf` | same | same | 0644 |
 | Firefox native manifest | `/usr/lib/mozilla/native-messaging-hosts/hirz.json` | same, plus `/usr/lib64/mozilla/native-messaging-hosts/hirz.json` (a relative symlink to it) | same as Debian | 0644 |
@@ -28,7 +28,7 @@ and nothing in a home directory.
 | `hirz-uhid-broker.service` | `packaging/systemd/hirz-uhid-broker.service` | `ExecStart` path set to the distribution's broker path |
 | `hirz-uhid-broker.socket` | `packaging/systemd/hirz-uhid-broker.socket` | none |
 | `hirzd.service` | `packaging/systemd/hirzd.service` | `ExecStart` path set to `/usr/bin/hirzd` |
-| `70-hirz.rules` | `packaging/udev/70-hirz.rules` | none |
+| `70-hirz.rules`, `72-hirz.rules` | `packaging/udev/` | none |
 | `dev.hirz.authenticate.policy` | `packaging/polkit/dev.hirz.authenticate.policy` | none |
 | `hirz.json` | `packaging/native-messaging/hirz.json` | `@HIRZ_NMH_PATH@` replaced by `/usr/lib/hirz/hirz-nmh` |
 | `hirz.conf` | written by the build | contains `uhid` |
@@ -74,12 +74,15 @@ scripts/build-release.sh --verify-reproducible  # two clean builds, compares the
 scripts/package-deb.sh                          # dist/hirz_VERSION_ARCH.deb (needs dpkg-deb)
 scripts/package-rpm.sh                          # RPM when rpmbuild exists, otherwise prints what to do
 scripts/build-xpi.sh                            # dist/hirz-VERSION.xpi, deterministic zip
+scripts/package-debsrc.sh                       # Debian source package, from the two tarballs
+scripts/set-version.sh --check                  # every file carries the Cargo.toml version
 ```
 
-Arch: `cd packaging/arch && makepkg -si` once a `v$pkgver` tag exists (`makepkg` downloads
-the tag tarball). To build before a tag exists, put a tarball named `hirz-$pkgver.tar.gz` (top
-directory `hirz-$pkgver/`) next to the `PKGBUILD`: `makepkg` uses an existing source file
-instead of downloading it.
+Arch: `cd packaging/arch && makepkg -si` once release `v$pkgver` exists (`makepkg` downloads
+its source tarball and vendored crates). To build before a release exists, run
+`scripts/package-rpm.sh --sources-only` and copy `dist/rpm/SOURCES/hirz-*.tar.*` next to the
+`PKGBUILD`: `makepkg` uses existing source files instead of downloading them (the sums in
+the repository are `SKIP`; the AUR copy carries the real ones).
 
 Release builds pass `--locked`, remap the source and Cargo paths
 (`--remap-path-prefix`, and `-ffile-prefix-map` for the C code of AWS-LC), take
@@ -88,10 +91,17 @@ local path is still found in a binary.
 
 ## Directories
 
-- `deb/`: maintainer scripts (`postinst`, `prerm`, `postrm`) used by `scripts/package-deb.sh`.
+- `deb/`: maintainer scripts (`postinst`, `prerm`, `postrm`) used by `scripts/package-deb.sh`
+  and by the Debian source package.
+- `debian/`: Debian source package for the Ubuntu PPA. It builds offline from the release
+  source tarball and the vendored crates tarball with the distribution's Rust compiler;
+  `scripts/package-debsrc.sh` assembles and checks it (see `docs/release.md`).
 - `rpm/`: `hirz.spec`, and `hirz.rpmlintrc` with the filters for rpmlint's false positives
   (`rpmlint -r packaging/rpm/hirz.rpmlintrc hirz.spec *.rpm`).
 - `arch/`: `PKGBUILD` and `hirz.install`.
 - `flatpak/`: how hirz works with Firefox installed as a Flatpak. hirz itself is not a
   Flatpak.
+- `snap/`: a draft `snapcraft.yaml` and why hirz needs classic confinement as a snap.
+- `amo/`: listing metadata for the first submission of the Firefox extension to
+  addons.mozilla.org.
 - `systemd/`, `udev/`, `polkit/`, `native-messaging/`: the source files above.

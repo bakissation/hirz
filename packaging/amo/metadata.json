@@ -1,0 +1,16 @@
+{
+  "categories": ["privacy-security"],
+  "summary": {
+    "en-US": "Passkeys on Linux: hands WebAuthn requests to the local hirz authenticator."
+  },
+  "homepage": {
+    "en-US": "https://github.com/bakissation/hirz"
+  },
+  "support_url": {
+    "en-US": "https://github.com/bakissation/hirz/issues"
+  },
+  "version": {
+    "license": "MIT",
+    "approval_notes": "The extension only works together with the hirz native messaging host (packages at https://github.com/bakissation/hirz/releases). It contains no remote code, no minified or generated code, and collects no data. The MAIN-world content script page/shim.js wraps navigator.credentials so that WebAuthn requests reach the background script, which forwards them over native messaging to the local authenticator. Without the native host every request falls back to the browser's own WebAuthn."
+  }
+}

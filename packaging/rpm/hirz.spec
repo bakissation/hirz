@@ -1,15 +1,18 @@
-# hirz for Fedora. Builds offline from the release tarball plus a tarball of vendored crates:
+# hirz for Fedora. Builds offline from the two source tarballs attached to each GitHub
+# Release (signed and attested, see docs/release.md): the sources and the vendored crates.
+# scripts/package-rpm.sh writes the same two tarballs from a checkout and runs rpmbuild.
 #
-#   git archive --prefix=hirz-VERSION/ -o hirz-VERSION.tar.gz HEAD
-#   cargo vendor --locked vendor && tar -cJf hirz-VERSION-vendor.tar.xz vendor
-#
-# scripts/package-rpm.sh does both and runs rpmbuild.
+#   rpmbuild -ba hirz.spec                   plain cargo build (COPR, local)
+#   rpmbuild -ba --with auditable hirz.spec  cargo auditable build (release workflow)
 
 %global upstream_version 0.1.0-dev
 # AWS-LC is C code built by aws-lc-sys; Fedora's LTO flags are not meant for it.
 %global _lto_cflags %{nil}
 # The release profile strips the binaries, so there is no debug information to package.
 %global debug_package %{nil}
+# cargo-auditable embeds the dependency list in each binary; it is not packaged in Fedora,
+# so it is off unless the build machine has it.
+%bcond auditable 0
 
 Name:           hirz
 Version:        %{lua: print((string.gsub(rpm.expand("%{upstream_version}"), "-", "~")))}
@@ -20,8 +23,8 @@ Summary:        Passkey authenticator for Linux
 # adds ISC, Apache-2.0, MIT and BSD-3-Clause parts, memchr is MIT OR Unlicense.
 License:        (MIT OR Apache-2.0) AND Apache-2.0 AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)
 URL:            https://github.com/bakissation/hirz
-Source0:        %{url}/archive/v%{upstream_version}/hirz-%{upstream_version}.tar.gz
-Source1:        hirz-%{upstream_version}-vendor.tar.xz
+Source0:        %{url}/releases/download/v%{upstream_version}/hirz-%{upstream_version}.tar.gz
+Source1:        %{url}/releases/download/v%{upstream_version}/hirz-%{upstream_version}-vendor.tar.xz
 
 ExclusiveArch:  x86_64 aarch64
 
@@ -63,8 +66,13 @@ export CARGO_HOME=$PWD/.cargo-home
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_RELEASE_STRIP=symbols
 export RUSTFLAGS="--remap-path-prefix=$PWD=/build/hirz"
+%if %{with auditable}
+cargo auditable build --release --locked --frozen --offline \
+  -p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker
+%else
 cargo build --release --locked --frozen --offline \
   -p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker
+%endif
 
 %install
 install -Dm0755 target/release/hirz %{buildroot}%{_bindir}/hirz
@@ -87,6 +95,7 @@ install -d %{buildroot}%{_presetdir}
 echo 'enable hirz-uhid-broker.socket' > %{buildroot}%{_presetdir}/80-hirz.preset
 
 install -Dm0644 packaging/udev/70-hirz.rules %{buildroot}%{_udevrulesdir}/70-hirz.rules
+install -Dm0644 packaging/udev/72-hirz.rules %{buildroot}%{_udevrulesdir}/72-hirz.rules
 install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
   %{buildroot}%{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
 install -d %{buildroot}%{_modulesloaddir}
@@ -144,6 +153,7 @@ fi
 %{_userunitdir}/hirzd.service
 %{_presetdir}/80-hirz.preset
 %{_udevrulesdir}/70-hirz.rules
+%{_udevrulesdir}/72-hirz.rules
 %{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
 %{_modulesloaddir}/hirz.conf
 %{_prefix}/lib/mozilla/native-messaging-hosts/hirz.json

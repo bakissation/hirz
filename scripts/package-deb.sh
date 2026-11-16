@@ -87,6 +87,7 @@ grep -Eq '^ExecStart=/usr/bin/hirzd( |$)' "$pkg/usr/lib/systemd/user/hirzd.servi
   die "hirzd.service must start /usr/bin/hirzd"
 
 put 0644 packaging/udev/70-hirz.rules /usr/lib/udev/rules.d/70-hirz.rules
+put 0644 packaging/udev/72-hirz.rules /usr/lib/udev/rules.d/72-hirz.rules
 put 0644 packaging/polkit/dev.hirz.authenticate.policy \
   /usr/share/polkit-1/actions/dev.hirz.authenticate.policy
 mkdir -p "$pkg/usr/lib/modules-load.d"

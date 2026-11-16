@@ -5,3 +5,4 @@
 /extension/web-ext-artifacts
 *.xpi
 /dist
+/snap

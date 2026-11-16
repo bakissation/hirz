@@ -16,14 +16,26 @@ optdepends=(
 install=hirz.install
 # AWS-LC (C code built by aws-lc-sys) is not built with makepkg's LTO flags.
 options=('!lto' '!debug')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-# No release tag exists yet. Replace SKIP with the real sum (updpkgsums) once v$pkgver is tagged.
-sha256sums=('SKIP')
+# The release's source tarball and its vendored crates (both signed and attested, see
+# docs/release.md), so the build needs no network.
+source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz"
+        "$url/releases/download/v$pkgver/$pkgname-$pkgver-vendor.tar.xz")
+noextract=("$pkgname-$pkgver-vendor.tar.xz")
+# The release workflow writes the real sums into the AUR copy of this file.
+sha256sums=('SKIP'
+            'SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
-  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+  tar -xJf "$srcdir/$pkgname-$pkgver-vendor.tar.xz"
+  mkdir -p .cargo
+  cat > .cargo/config.toml <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+EOF
 }
 
 build() {
@@ -31,13 +43,13 @@ build() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   export CARGO_PROFILE_RELEASE_STRIP=symbols
-  cargo build --frozen --release -p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker
+  cargo build --frozen --offline --release -p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker
 }
 
 check() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
-  cargo test --frozen --release --workspace
+  cargo test --frozen --offline --release --workspace
 }
 
 package() {
@@ -59,7 +71,7 @@ package() {
     packaging/systemd/hirzd.service > "$pkgdir/usr/lib/systemd/user/hirzd.service"
   grep -Eq '^ExecStart=/usr/bin/hirzd( |$)' "$pkgdir/usr/lib/systemd/user/hirzd.service"
 
-  install -Dm0644 packaging/udev/70-hirz.rules "$pkgdir/usr/lib/udev/rules.d/70-hirz.rules"
+  install -Dm0644 -t "$pkgdir/usr/lib/udev/rules.d" packaging/udev/70-hirz.rules packaging/udev/72-hirz.rules
   install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
     "$pkgdir/usr/share/polkit-1/actions/dev.hirz.authenticate.policy"
   install -d "$pkgdir/usr/lib/modules-load.d"

@@ -4,21 +4,25 @@
 #
 #   scripts/build-release.sh                        build into target/, copy to dist/
 #   scripts/build-release.sh --verify-reproducible  build twice from scratch and compare
+#   scripts/build-release.sh --auditable            build with cargo-auditable (either mode)
 #
 # Output: dist/hirz-VERSION-ARCH-linux/ (binaries and licenses), a .tar.gz of that folder and
-# a .sha256 file next to it.
+# a .sha256 file next to it. --auditable embeds the dependency list (crate names, versions,
+# sources) in a .dep-v0 section of each binary; read it with cargo audit bin or rust-audit-info.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 
 usage() {
-  sed -n '2,9s/^# \{0,1\}//p' "$0"
+  sed -n '2,11s/^# \{0,1\}//p' "$0"
 }
 
 verify=0
+auditable=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --verify-reproducible) verify=1 ;;
+    --auditable) auditable=1 ;;
     -h | --help)
       usage
       exit 0
@@ -38,6 +42,11 @@ die() {
 
 command -v cargo >/dev/null 2>&1 || die "cargo not found"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum not found"
+CARGO_BUILD=(cargo build)
+if [ "$auditable" = 1 ]; then
+  cargo auditable --version >/dev/null 2>&1 || die "cargo-auditable not found (cargo install --locked cargo-auditable)"
+  CARGO_BUILD=(cargo auditable build)
+fi
 
 BINS=(hirz hirzd hirz-nmh hirz-uhid-broker)
 PKGS=(-p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker)
@@ -73,7 +82,7 @@ export CFLAGS="${CFLAGS:+$CFLAGS }$prefix_map"
 export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$prefix_map"
 
 build() {
-  cargo build --release --locked "${PKGS[@]}" --target-dir "$1"
+  "${CARGO_BUILD[@]}" --release --locked "${PKGS[@]}" --target-dir "$1"
 }
 
 hashes() {
@@ -111,7 +120,7 @@ if [ "$verify" = 1 ]; then
 fi
 
 target_dir=${CARGO_TARGET_DIR:-$ROOT/target}
-echo "== cargo build --release --locked (SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
+echo "== ${CARGO_BUILD[*]} --release --locked (SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
 build "$target_dir"
 
 out="$ROOT/dist/$name"

@@ -104,17 +104,48 @@ The default path in systemd (`60-fido-id.rules` and `70-uaccess.rules`):
    itself stays `root:root 0600`.
 
 So without any hirz rule the device is reachable by the seat user, which is the creator on a
-single-user laptop. `packaging/udev/70-hirz.rules` makes the binding exact:
+single-user laptop. The two hirz rule files make the binding exact:
 
-- it matches only hidraw nodes under `/devices/virtual/misc/uhid/` with ids `1209:0007`
-  and `ID_SECURITY_TOKEN=1`, so real hardware is never affected;
-- it imports `HID_PHYS` (the creator's uid, written by the broker) from the parent HID
-  device, sets `OWNER` to it with mode 0600, and clears `ID_SECURITY_TOKEN` before
-  `70-uaccess.rules` runs, so no seat ACL is added and none follows a seat switch;
-- it adds the snap tags described below.
+- `packaging/udev/70-hirz.rules` matches only hidraw nodes under `/devices/virtual/misc/uhid/`
+  with ids `1209:0007` and `ID_SECURITY_TOKEN=1`, so real hardware is never affected. It
+  imports `HID_PHYS` (the creator's uid, written by the broker) from the parent HID device and
+  sets `OWNER:=` to it, `GROUP:="root"` and `MODE:="0600"`. The `:=` form makes the values
+  final, so no later rule file can widen them. It also adds the snap tags described below.
+- `packaging/udev/72-hirz.rules` removes the `uaccess` tag from the same nodes with
+  `TAG-="uaccess"`, so `73-seat-late.rules` adds no seat ACL and logind never moves one to
+  another user on a seat switch.
 
-The file name sorts after `60-fido-id.rules` and before `70-snap.*.rules` and
-`70-uaccess.rules`; both orderings matter.
+`ID_SECURITY_TOKEN` itself stays set, because snapd uses it to let snap browsers reach the
+node (next section). Earlier versions of the rule cleared it instead, which also stopped the
+`uaccess` tag but hid the device from every snap that hirz did not tag by name.
+
+Ordering, by file name across `/usr/lib/udev/rules.d` and `/etc/udev/rules.d`:
+
+| File | What it does to a hirz node |
+|---|---|
+| `60-fido-id.rules` (systemd) | `fido_id` sets `ID_SECURITY_TOKEN=1` and the tag `security-device` |
+| `70-hirz.rules` | owner, group and mode (final); snap tags for older snapd |
+| `70-snap.<snap>.rules` (snapd) | tags the node for each snap with `u2f-devices` connected and runs `snap-device-helper` on the tag |
+| `70-uaccess.rules` (systemd) | `ENV{ID_SECURITY_TOKEN}=="?*"` adds `uaccess` |
+| `71-seat.rules` (systemd) | tags every hidraw node `seat` (unchanged by hirz) |
+| `72-hirz.rules` | removes `uaccess` |
+| `73-seat-late.rules` (systemd) | `TAG=="uaccess"` would apply the seat ACL; no longer matches |
+
+`70-hirz.rules` must sort after `60-fido-id.rules` and before `70-snap.*.rules`, and
+`72-hirz.rules` after `71-seat.rules` and before `73-seat-late.rules`. Removing a tag within
+the event that added it is safe with sticky tags (systemd 247 and newer): a tag is only
+remembered once the event's database entry is written, and the entry never contains
+`uaccess`.
+
+To check on a running system, while `hirzd` runs:
+
+```sh
+dev=$(ls /sys/devices/virtual/misc/uhid/0003:1209:0007.*/hidraw | head -1)
+udevadm info --query=property --name="/dev/$dev" | grep -E 'ID_SECURITY_TOKEN|HID_PHYS|TAGS'
+getfacl "/dev/$dev"    # owner only, no user: entry for the seat user
+```
+
+`TAGS` must not contain `:uaccess:`; `ID_SECURITY_TOKEN=1` must be present.
 
 Every process of the same user can still open the node and speak CTAP to it, as with a
 hardware key. That is inherent to the design; every signature with the user-present flag
@@ -125,16 +156,26 @@ below).
 
 - **Snap.** Strictly confined browsers reach hidraw nodes only through the `u2f-devices`
   interface. Its AppArmor rule allows `/dev/hidraw*`, and the device cgroup decides: snapd
-  writes `/etc/udev/rules.d/70-snap.<snap>.rules`, which tags a fixed list of known security
-  key vendor and product ids (the list on snapd 2.77 has no generic `ID_SECURITY_TOKEN`
-  match), and `snap-device-helper` adds tagged nodes to the snap's device cgroup. The hirz
-  ids are not on that list, so `70-hirz.rules` adds `snap_firefox_firefox` and
-  `snap_chromium_chromium` itself. The rule must sort before the snap rule files, whose
-  `RUN` line fires on the tag. Check with `snap connections firefox` that `u2f-devices` is
-  connected. The AppArmor profile allows reading `report_descriptor` in sysfs only below
+  writes `/etc/udev/rules.d/70-snap.<snap>.rules`, and `snap-device-helper` adds every node
+  tagged `snap_<snap>_<app>` to that snap's device cgroup.
+  - snapd 2.78 and newer on systemd 244 and newer tag every hidraw node with
+    `ENV{ID_SECURITY_TOKEN}=="1"`. Because `70-hirz.rules` keeps that property, every snap
+    with `u2f-devices` connected gets the hirz node: Firefox, Chromium, Brave, Opera,
+    Vivaldi, Discord and others.
+  - Older snapd tags only a fixed list of USB vendor and product ids, matched with
+    `ATTRS{idVendor}`; a uhid device has no USB parent, so it never matches. For those
+    versions `70-hirz.rules` adds `snap_firefox_firefox` and `snap_chromium_chromium`
+    itself, which is why it must sort before the snap rule files, whose `RUN` line fires on
+    the tag. Other snaps need snapd 2.78.
+
+  The node is still owned by its creator with mode 0600, so a snap of another user cannot
+  open it even though it is in that snap's device cgroup. Check with
+  `snap connections <snap>` that `u2f-devices` is connected, and with `snap version` which
+  snapd runs. The AppArmor profile allows reading `report_descriptor` in sysfs only below
   `usb*` and `i2c*` paths, not below `virtual/misc/uhid`; a browser that reads the
-  descriptor from sysfs instead of with the `HIDIOCGRDESC` ioctl would not recognize the
-  device inside a snap. The spike checks Firefox; Chromium as a snap is untested.
+  descriptor from sysfs (Chromium does) instead of with the `HIDIOCGRDESC` ioctl (Firefox
+  does) does not recognize the device inside a snap unless `hardware-observe` is also
+  connected. Chromium as a snap is untested.
 - **Flatpak.** Firefox and Chromium on Flathub have `--device=all` and run as the same
   uid, so the owner-only node is reachable without further setup.
 

@@ -1,15 +1,22 @@
-# hirz virtual security key.
+# hirz virtual security key, part 1 of 2 (part 2 is 72-hirz.rules).
 #
-# systemd's 60-fido-id.rules marks the hidraw node of any FIDO device with
-# ID_SECURITY_TOKEN=1, and 70-uaccess.rules then grants the user of the active seat an ACL
-# on it. For a virtual device created by hirz-uhid-broker that is the wrong user whenever
-# the seat user differs from the user whose hirzd created the device (fast user switching,
-# or another local user connecting to the broker). This rule binds the node to its creator
-# instead: the broker writes the creating uid into the HID "phys" field (HID_PHYS), and the
-# node becomes owned by that uid with mode 0600 and no seat ACL.
+# systemd's 60-fido-id.rules sets ID_SECURITY_TOKEN=1 on the hidraw node of any FIDO device,
+# and two later rule sets read it:
 #
-# The file name must sort after 60-fido-id.rules and before 70-snap.*.rules and
-# 70-uaccess.rules.
+# - 70-snap.<snap>.rules from snapd 2.78 or newer (with systemd 244 or newer) tag the node
+#   for every snap whose u2f-devices interface is connected, so snap browsers and apps can
+#   open it. hirz wants this, so ID_SECURITY_TOKEN stays set.
+# - 70-uaccess.rules tags the node "uaccess", and 73-seat-late.rules then gives the user of
+#   the active seat an ACL on it. For a device created through hirz-uhid-broker that is the
+#   wrong user whenever the seat user differs from the user whose hirzd created the device
+#   (fast user switching, or another local user connecting to the broker). 72-hirz.rules
+#   removes that tag again before 73-seat-late.rules runs.
+#
+# This file binds the node to its creator: the broker writes the creating uid into the HID
+# "phys" field (HID_PHYS), and the node becomes owned by that uid with mode 0600. The ":="
+# assignments keep later rules from changing owner, group or mode.
+#
+# The file name must sort after 60-fido-id.rules and before 70-snap.*.rules.
 
 ACTION=="remove", GOTO="hirz_end"
 SUBSYSTEM!="hidraw", GOTO="hirz_end"
@@ -19,11 +26,11 @@ ENV{ID_SECURITY_TOKEN}!="1", GOTO="hirz_end"
 IMPORT{parent}="HID_PHYS"
 ENV{HID_PHYS}!="[1-9]*", GOTO="hirz_end"
 
-ENV{ID_SECURITY_TOKEN}="", OWNER="$env{HID_PHYS}", GROUP="root", MODE="0600"
+OWNER:="$env{HID_PHYS}", GROUP:="root", MODE:="0600"
 
-# Strictly confined snap browsers only reach hidraw nodes that snapd tags for them, and the
-# u2f-devices interface tags a fixed list of vendor and product ids. Tag the hirz node for
-# the browser snaps so snap-device-helper adds it to their device cgroup.
+# snapd before 2.78 tags only a fixed list of USB vendor and product ids, which a uhid
+# device never matches. Tag the two browser snaps by name for those versions; newer snapd
+# adds the same tags itself, and adding a tag twice changes nothing.
 TAG+="snap_firefox_firefox", TAG+="snap_chromium_chromium"
 
 LABEL="hirz_end"

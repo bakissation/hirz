@@ -1,0 +1,87 @@
+# DRAFT. Read packaging/snap/README.md first: hirz needs classic confinement as a snap, and
+# classic needs a manual Snap Store review before any upload is accepted.
+#
+# The release workflow copies this file to snap/snapcraft.yaml and the hooks to snap/hooks/
+# at the repository root, then runs "snapcraft pack --destructive-mode" on an Ubuntu 24.04
+# runner (the core24 base). Locally: the same, or "snapcraft pack" with LXD.
+name: hirz
+title: hirz
+version: '0.1.0-dev'
+summary: Passkey authenticator for Linux, seen by browsers as a USB security key
+description: |
+  hirz keeps your passkeys (WebAuthn / FIDO2) in an encrypted vault folder that your own
+  folder sync can copy between your computers. It appears to browsers as a USB security key,
+  so it works in Firefox and Chromium, and offers a Firefox extension as a second path. Every
+  signature needs your approval: your account password through polkit, your fingerprint
+  through fprintd, or a hirz PIN.
+
+  After installing the snap, an administrator runs once:
+
+      sudo snap run hirz.setup-system install
+
+  Then each user runs "hirz init" and "systemctl --user enable --now hirzd".
+license: MIT OR Apache-2.0
+website: https://github.com/bakissation/hirz
+source-code: https://github.com/bakissation/hirz
+issues: https://github.com/bakissation/hirz/issues
+base: core24
+grade: devel
+confinement: classic
+
+platforms:
+  amd64:
+  arm64:
+
+parts:
+  hirz:
+    plugin: rust
+    source: .
+    rust-channel: '1.99.1'
+    rust-path:
+      - crates/hirz-cli
+      - crates/hirzd
+      - crates/hirz-nmh
+      - crates/hirz-uhid-broker
+    build-packages:
+      - cmake
+      - gcc
+    # Classic snaps run on the host's root file system; point the binaries at the core24
+    # loader and libc instead of whatever the host has.
+    build-attributes:
+      - enable-patchelf
+
+  host-files:
+    plugin: nil
+    source: .
+    override-build: |
+      d="$CRAFT_PART_INSTALL/share/hirz"
+      install -Dm0644 -t "$d/udev" packaging/udev/70-hirz.rules packaging/udev/72-hirz.rules
+      install -Dm0644 -t "$d/polkit" packaging/polkit/dev.hirz.authenticate.policy
+      install -Dm0644 packaging/native-messaging/hirz.json "$d/native-messaging/hirz.json.in"
+      install -Dm0644 packaging/systemd/hirzd.service "$d/systemd/hirzd.service.in"
+      install -Dm0755 packaging/snap/local/setup-system "$CRAFT_PART_INSTALL/bin/setup-system"
+      install -Dm0644 -t "$CRAFT_PART_INSTALL/share/doc/hirz" LICENSE-MIT LICENSE-APACHE README.md
+
+apps:
+  hirz:
+    command: bin/hirz
+    environment:
+      HIRZ_BROKER_SOCKET: $SNAP_COMMON/uhid.sock
+  hirzd:
+    command: bin/hirzd
+    environment:
+      HIRZ_BROKER_SOCKET: $SNAP_COMMON/uhid.sock
+  nmh:
+    command: bin/hirz-nmh
+  # The root broker, socket-activated by snapd. snapd requires the socket below $SNAP_DATA,
+  # $SNAP_COMMON or $XDG_RUNTIME_DIR, so it is not /run/hirz/uhid.sock as in the packages.
+  uhid-broker:
+    command: bin/hirz-uhid-broker
+    daemon: simple
+    restart-condition: on-failure
+    sockets:
+      uhid:
+        listen-stream: $SNAP_COMMON/uhid.sock
+        socket-mode: 0666
+  setup-system:
+    command: bin/setup-system

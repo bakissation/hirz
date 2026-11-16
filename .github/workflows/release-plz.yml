@@ -1,0 +1,208 @@
+name: release-plz
+
+# On every push to main:
+# 1. "release": if the push is the merge of the release PR, tag vX.Y.Z (signed when
+#    RELEASE_TAG_SSH_KEY exists) and create the draft GitHub Release. The tag starts
+#    release.yml, which builds, signs and publishes.
+# 2. "release-pr": open or update the "chore: release vX.Y.Z" PR against main with the next
+#    version and the CHANGELOG.md entry from the Conventional Commits since the last tag.
+# 3. "sync-versions": add the version to the files release-plz does not know about
+#    (scripts/set-version.sh) as a verified commit on the release PR branch.
+# 4. "backmerge": after a release, open and auto-merge main into dev.
+# See docs/release.md for the GitHub App and secrets this needs.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-plz
+  cancel-in-progress: false
+
+env:
+  RELEASE_PLZ_VERSION: "0.4.3"
+
+jobs:
+  release:
+    name: tag and draft the release
+    if: ${{ !github.event.repository.fork }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: write
+    env:
+      HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
+      HAS_TAG_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY != '' }}
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      releases: ${{ steps.release-plz.outputs.releases }}
+    steps:
+      # A tag or pull request made with GITHUB_TOKEN starts no workflow. The App token makes
+      # the tag start release.yml and lets CI run on the release PR.
+      - name: GitHub App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      # release-plz creates the tag with the git CLI when tag.gpgSign is true (the GitHub API
+      # cannot create signed tags), so git needs the key and push access for this step only.
+      - name: Tag signing
+        if: env.HAS_TAG_KEY == 'true'
+        env:
+          TAG_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
+          TAGGER_NAME: ${{ vars.RELEASE_TAGGER_NAME }}
+          TAGGER_EMAIL: ${{ vars.RELEASE_TAGGER_EMAIL }}
+          TOKEN: ${{ steps.app.outputs.token || github.token }}
+        run: |
+          key="$RUNNER_TEMP/tag-signing-key"
+          (umask 077 && printf '%s\n' "$TAG_KEY" >"$key")
+          git config user.name "${TAGGER_NAME:?set the RELEASE_TAGGER_NAME variable}"
+          git config user.email "${TAGGER_EMAIL:?set the RELEASE_TAGGER_EMAIL variable}"
+          git config gpg.format ssh
+          git config user.signingkey "$key"
+          git config tag.gpgSign true
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          git config "http.https://github.com/.extraheader" "AUTHORIZATION: basic $auth"
+
+      - name: release-plz release
+        id: release-plz
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
+        with:
+          command: release
+          version: ${{ env.RELEASE_PLZ_VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token || github.token }}
+
+      - name: Forget the signing key and token
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/tag-signing-key"
+          git config --unset-all "http.https://github.com/.extraheader" || true
+
+      # Without the App, the tag was pushed with GITHUB_TOKEN and starts nothing; dispatch
+      # the release workflow on the tag instead (workflow_dispatch is allowed).
+      - name: Start release.yml
+        if: steps.release-plz.outputs.releases_created == 'true' && env.HAS_APP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag=$(jq -r '.[0].tag' <<<"$RELEASES")
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+
+  release-pr:
+    name: open or update the release PR
+    needs: release
+    if: ${{ !github.event.repository.fork }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
+    outputs:
+      pr: ${{ steps.release-plz.outputs.pr }}
+    steps:
+      - name: GitHub App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      # The commit is made through the GraphQL API, so it is verified (signed by GitHub).
+      - name: release-plz release-pr
+        id: release-plz
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
+        with:
+          command: release-pr
+          version: ${{ env.RELEASE_PLZ_VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token || github.token }}
+
+      - name: Without the App, CI does not start on the release PR
+        if: env.HAS_APP != 'true' && steps.release-plz.outputs.pr != '' && steps.release-plz.outputs.pr != '{}'
+        run: |
+          echo "::warning::the release PR was made with GITHUB_TOKEN, so the required ci check will not run on it; configure the release GitHub App (docs/release.md)"
+
+  sync-versions:
+    name: stamp the version on the release PR
+    needs: release-pr
+    if: needs.release-pr.outputs.pr != '' && needs.release-pr.outputs.pr != '{}'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
+      BRANCH: ${{ fromJSON(needs.release-pr.outputs.pr).head_branch }}
+      VERSION: ${{ fromJSON(needs.release-pr.outputs.pr).releases[0].version }}
+    steps:
+      - name: GitHub App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BRANCH }}
+          persist-credentials: false
+
+      - name: Stamp and commit
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::no release GitHub App: run scripts/set-version.sh $VERSION on $BRANCH by hand"
+            exit 0
+          fi
+          scripts/set-version.sh "$VERSION"
+          mapfile -t files < <(git diff --name-only)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "every file already carries $VERSION"
+            exit 0
+          fi
+          scripts/ci/commit-via-api.sh "$GITHUB_REPOSITORY" "$BRANCH" \
+            "chore: set version $VERSION in packaging files" "${files[@]}"
+
+  backmerge:
+    name: back-merge main into dev
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/backmerge.yml
+    secrets: inherit

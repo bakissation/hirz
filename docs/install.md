@@ -8,11 +8,102 @@ or Chromium. Commands that start with `sudo` ask for your password.
 
 ## 1. Install the package
 
-Packages are attached to each release on
-[github.com/bakissation/hirz/releases](https://github.com/bakissation/hirz/releases). To
-build one yourself instead, see [Building the package yourself](#building-the-package-yourself).
+Pick one route. The package repositories below are available from the first release; until
+then, build the package yourself (see
+[Building the package yourself](#building-the-package-yourself)).
 
-### Ubuntu and Debian
+| Route | Updates | Distributions |
+|---|---|---|
+| [hirz apt repository](#apt-repository-debian-and-ubuntu) | with `apt upgrade` | Debian 13, Ubuntu 24.04 and newer, amd64 and arm64 |
+| [Ubuntu PPA](#ubuntu-ppa) | with `apt upgrade` | Ubuntu 24.04 and 26.04 |
+| [hirz dnf repository](#dnf-repository-fedora) | with `dnf upgrade` | Fedora, x86_64 and aarch64 |
+| [Fedora COPR](#fedora-copr) | with `dnf upgrade` | the Fedora releases the COPR project builds for |
+| [AUR](#arch-linux) | with your AUR helper | Arch Linux |
+| [Download from GitHub Releases](#download-from-github-releases) | by hand | Debian, Ubuntu, Fedora |
+
+Every route installs the same files. hirz is not offered as a snap or a Flatpak (see
+`packaging/snap/README.md`); browsers installed as snaps or Flatpaks work with the
+packages.
+
+### apt repository (Debian and Ubuntu)
+
+Available from the first release. The repository and its packages are signed with the hirz
+archive key.
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://bakissation.github.io/hirz/hirz-archive-keyring.gpg |
+  sudo tee /etc/apt/keyrings/hirz-archive-keyring.gpg >/dev/null
+gpg --show-keys /etc/apt/keyrings/hirz-archive-keyring.gpg   # compare with the fingerprint below
+sudo tee /etc/apt/sources.list.d/hirz.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://bakissation.github.io/hirz/apt
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/hirz-archive-keyring.gpg
+EOF
+sudo apt update
+sudo apt install hirz
+```
+
+The one-line format works too:
+`deb [signed-by=/etc/apt/keyrings/hirz-archive-keyring.gpg] https://bakissation.github.io/hirz/apt stable main`
+in `/etc/apt/sources.list.d/hirz.list`.
+
+Archive key fingerprint: published here with the first release.
+
+### Ubuntu PPA
+
+Available from the first release. Built by Launchpad from the release sources, for Ubuntu
+24.04 (noble) and 26.04 (resolute):
+
+```sh
+sudo add-apt-repository ppa:bakissation/hirz
+sudo apt install hirz
+```
+
+### dnf repository (Fedora)
+
+Available from the first release. The repository metadata and the packages are signed;
+dnf checks both.
+
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/hirz.repo https://bakissation.github.io/hirz/hirz.repo
+sudo dnf install hirz
+```
+
+The file contains:
+
+```ini
+[hirz]
+name=hirz
+baseurl=https://bakissation.github.io/hirz/rpm/$basearch
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://bakissation.github.io/hirz/hirz-archive-keyring.asc
+```
+
+dnf shows the key fingerprint the first time and asks before importing it; compare it with
+the fingerprint in the apt section above.
+
+### Fedora COPR
+
+Available from the first release. Built by COPR from the release sources:
+
+```sh
+sudo dnf copr enable bakissation/hirz
+sudo dnf install hirz
+```
+
+### Download from GitHub Releases
+
+Packages are attached to each release on
+[github.com/bakissation/hirz/releases](https://github.com/bakissation/hirz/releases),
+available from the first release. Each file has a GitHub attestation and a Sigstore
+signature; [release.md](release.md#verifying-a-release) shows how to check them.
+
+#### Ubuntu and Debian
 
 1. Download the `.deb` file for your computer (`amd64` on most PCs) into your Downloads
    folder.
@@ -26,7 +117,7 @@ build one yourself instead, see [Building the package yourself](#building-the-pa
    apt also installs what hirz needs (polkit and zenity) and suggests fprintd for
    fingerprints.
 
-### Fedora
+#### Fedora
 
 1. Download the `.rpm` file (`x86_64` on most PCs) into your Downloads folder.
 2. Install it:
@@ -38,7 +129,7 @@ build one yourself instead, see [Building the package yourself](#building-the-pa
 
 ### Arch Linux
 
-1. Install the `hirz` package from the AUR (published with the first release) with your
+1. Install the `hirz` package from the AUR (available from the first release) with your
    AUR helper, or by hand:
 
    ```sh
@@ -100,7 +191,11 @@ for your password, your fingerprint or your hirz PIN (see [approval.md](approval
 The extension lets Firefox use hirz as a passkey provider instead of a security key, so
 sites see a regular passkey prompt. The virtual security key works without it.
 
-The extension is not yet signed by Mozilla, so regular Firefox only loads it until the next
+Once Mozilla has reviewed it (submitted with each release, available from the first
+release), install it from addons.mozilla.org: search for "hirz" in Firefox's add-ons
+manager. Check that the developer link points to github.com/bakissation/hirz.
+
+Until then the extension is unsigned, so regular Firefox only loads it until the next
 restart:
 
 1. Download `hirz-*.xpi` from the release, or use the `extension` folder of the source.

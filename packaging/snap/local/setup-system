@@ -1,0 +1,97 @@
+#!/bin/sh
+# DRAFT, part of the hirz snap (classic confinement). Installs or removes the host files that
+# a snap cannot ship through snapd: the udev rules, the polkit action, the Firefox native
+# messaging manifest, the systemd user unit for hirzd and the uhid module list. Each file is
+# the same one the .deb, .rpm and AUR packages install (packaging/README.md).
+#
+#   sudo snap run hirz.setup-system install
+#   sudo snap run hirz.setup-system remove      (the snap's remove hook also runs this)
+#   snap run hirz.setup-system status
+set -eu
+
+: "${SNAP:?run through snap run hirz.setup-system}"
+share="$SNAP/share/hirz"
+# Every host file this script writes is listed here, so "remove" deletes exactly those.
+LIST="${SNAP_COMMON:?}/host-files"
+NMH="/snap/hirz/current/bin/hirz-nmh"
+
+UDEV_DIR=/etc/udev/rules.d
+UNIT=/etc/systemd/user/hirzd.service
+MODULES=/etc/modules-load.d/hirz.conf
+MANIFEST=/usr/lib/mozilla/native-messaging-hosts/hirz.json
+POLICY_NAME=dev.hirz.authenticate.policy
+
+die() {
+  echo "hirz.setup-system: $*" >&2
+  exit 1
+}
+
+# polkit 126 and newer also read actions from /etc; older versions only from /usr/share.
+policy_dir() {
+  v=$(pkaction --version 2>/dev/null | sed -n 's/^pkaction version \([0-9]*\).*/\1/p')
+  if [ -n "$v" ] && [ "$v" -ge 126 ]; then
+    echo /etc/polkit-1/actions
+  else
+    echo /usr/share/polkit-1/actions
+  fi
+}
+
+put() { # mode source destination
+  install -d "$(dirname "$3")"
+  install -m "$1" "$2" "$3"
+  grep -qxF "$3" "$LIST" 2>/dev/null || echo "$3" >>"$LIST"
+}
+
+do_install() {
+  [ "$(id -u)" = 0 ] || die "run as root: sudo snap run hirz.setup-system install"
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  put 0644 "$share/udev/70-hirz.rules" "$UDEV_DIR/70-hirz.rules"
+  put 0644 "$share/udev/72-hirz.rules" "$UDEV_DIR/72-hirz.rules"
+  put 0644 "$share/polkit/$POLICY_NAME" "$(policy_dir)/$POLICY_NAME"
+  sed -E 's#^ExecStart=[^ ]*/hirzd( |$)#ExecStart=/snap/bin/hirz.hirzd\1#' \
+    "$share/systemd/hirzd.service.in" >"$tmp/hirzd.service"
+  grep -q '^ExecStart=/snap/bin/hirz.hirzd' "$tmp/hirzd.service" || die "could not set ExecStart"
+  put 0644 "$tmp/hirzd.service" "$UNIT"
+  echo uhid >"$tmp/hirz.conf"
+  put 0644 "$tmp/hirz.conf" "$MODULES"
+  sed "s#@HIRZ_NMH_PATH@#$NMH#" "$share/native-messaging/hirz.json.in" >"$tmp/hirz.json"
+  if ! (put 0644 "$tmp/hirz.json" "$MANIFEST") 2>/dev/null; then
+    echo "hirz.setup-system: cannot write $MANIFEST (read-only /usr?); the Firefox extension path is unavailable" >&2
+  fi
+  udevadm control --reload 2>/dev/null || true
+  modprobe uhid 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+  echo "hirz host files installed. Each user now runs:"
+  echo "    hirz init"
+  echo "    systemctl --user enable --now hirzd"
+}
+
+do_remove() {
+  [ "$(id -u)" = 0 ] || die "run as root: sudo snap run hirz.setup-system remove"
+  if [ -f "$LIST" ]; then
+    while IFS= read -r f; do
+      rm -f "$f"
+    done <"$LIST"
+    rm -f "$LIST"
+  fi
+  udevadm control --reload 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+}
+
+do_status() {
+  for f in "$UDEV_DIR/70-hirz.rules" "$UDEV_DIR/72-hirz.rules" "$UNIT" "$MODULES" "$MANIFEST" \
+    "/etc/polkit-1/actions/$POLICY_NAME" "/usr/share/polkit-1/actions/$POLICY_NAME"; do
+    if [ -e "$f" ]; then echo "present  $f"; else echo "missing  $f"; fi
+  done
+}
+
+case "${1:-}" in
+  install) do_install ;;
+  remove) do_remove ;;
+  status) do_status ;;
+  *)
+    sed -n '2,9s/^# \{0,1\}//p' "$0"
+    exit 2
+    ;;
+esac

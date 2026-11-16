@@ -1,0 +1,56 @@
+name: backmerge
+
+# After a release, dev must contain the release commit from main (version bump and
+# CHANGELOG.md), or the next release PR conflicts. Opens a pull request main -> dev and
+# enables auto-merge with a merge commit; it merges once the required "ci" check passes.
+# Called by release-plz.yml after a release; can also be started by hand.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backmerge:
+    name: main into dev
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
+    steps:
+      # A pull request opened with GITHUB_TOKEN starts no workflow, so the required check
+      # would never run on it. The release GitHub App is required here.
+      - name: GitHub App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open and auto-merge the pull request
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::no release GitHub App: open a pull request main -> dev by hand"
+            exit 0
+          fi
+          ahead=$(gh api "repos/$REPO/compare/dev...main" --jq .ahead_by)
+          if [ "$ahead" = 0 ]; then
+            echo "dev already contains main"
+            exit 0
+          fi
+          url=$(gh pr list --repo "$REPO" --base dev --head main --state open --json url --jq '.[0].url')
+          if [ -z "$url" ]; then
+            url=$(gh pr create --repo "$REPO" --base dev --head main \
+              --title "chore: back-merge main into dev" \
+              --body "Automated after a release: brings the release commit (version and CHANGELOG.md) from main into dev. No other change.")
+          fi
+          gh pr merge "$url" --repo "$REPO" --auto --merge
+          echo "auto-merge enabled: $url"

@@ -28,6 +28,32 @@ pulled by `aws-lc-sys` to compile AWS-LC. They do not end up in the binaries.
 |---|---|---|
 | `serde_json` (+ `serde_core`, `itoa`, `memchr`, `zmij`) | hirz-cli import/export | Reading and writing FIDO CXF files (JSON). Default features off except `std`; no `serde` derive, no proc macros. Never linked into hirzd or hirz-nmh |
 
+## Build and release tools
+
+Programs used to build, check and publish hirz. None of them is linked into a binary; each
+is pinned to a version in the workflow that uses it (see [release.md](release.md)).
+
+| Tool | Version | Used by | Why |
+|---|---|---|---|
+| `cargo-auditable` | 0.7.7 | `scripts/build-release.sh --auditable`, `build.yml`, the RPM spec (`--with auditable`) | Wraps `cargo build` and embeds the dependency list (names, versions, sources from `Cargo.lock`) in a `.dep-v0` section of each binary, so `cargo audit bin`, Trivy or Syft can check a shipped binary against RustSec without the source. Changes no code |
+| `cargo-deny` | 0.20.2 | `scripts/check.sh deny`, CI | Licenses, bans, RustSec advisories, sources (`deny.toml`) |
+| `cargo-vet` | 0.10.3 | `scripts/check.sh vet`, CI | Audit records for every crate (`supply-chain/`) |
+| `cargo-fuzz` | 0.13.2 | `scripts/fuzz.sh`, nightly CI | libFuzzer targets in `fuzz/` (nightly toolchain) |
+| `release-plz` | 0.4.3 | `release-plz.yml` | Release PR, version bump, `CHANGELOG.md`, tags (git-only, nothing published to crates.io) |
+| `cosign` | 3.1.4 | `release.yml` | Keyless Sigstore signatures of every release file |
+| `actions/attest-build-provenance` | 4.2.2 | `release.yml` | GitHub artifact attestations (SLSA provenance) |
+| `web-ext` | 10.8.0 | `release.yml` | Signs and submits the extension to addons.mozilla.org |
+| `copr-cli` | 2.9 | `release.yml` | Starts the COPR build from the release's source RPM |
+| `reprepro`, `createrepo_c`, `rpmsign`, `gnupg` | Debian 13 packages | `scripts/ci/publish-pkgrepo.sh` | The signed apt and dnf repository |
+| `dpkg-dev`, `devscripts`, `dput` | Ubuntu packages | `scripts/package-debsrc.sh`, `release.yml` | Debian source package for the PPA, signing and upload |
+| `snapcraft` | 8.x | `release.yml` | The draft snap (`packaging/snap/`) |
+
+Build containers are pinned by digest in `.github/workflows/build.yml` and `release.yml`:
+`rust:1.99.1-trixie` (binaries, `.deb`, source tarballs), `fedora:45` (`.rpm`),
+`debian:trixie-slim` (package repository) and `archlinux:base` (AUR metadata). Third-party
+GitHub Actions are pinned by full commit SHA with the version in a comment, and Dependabot
+proposes updates.
+
 ## Not used, on purpose
 
 - No async runtime, no TLS stack, no HTTP client: hirz never talks to the network.

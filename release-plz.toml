@@ -1,0 +1,60 @@
+# release-plz: opens the "chore: release vX.Y.Z" pull request against main and, once it is
+# merged, tags vX.Y.Z and drafts the GitHub Release. See docs/release.md.
+#
+# Every crate inherits [workspace.package] version, so the whole workspace moves as one
+# version: release-plz looks at the commits of every crate, and the largest bump wins. Only
+# hirz-cli writes CHANGELOG.md (including the commits of every other crate), gets the tag
+# vX.Y.Z and the GitHub Release. Nothing is published to crates.io: every crate has
+# publish = false, and git_only finds the last release from the vX.Y.Z tags instead of a
+# registry. Pre-release tags (vX.Y.Z-rc.N) do not match the tag pattern, so they never
+# count as a release here.
+
+[workspace]
+git_only = true
+git_tag_name = "v{{ version }}"
+release_always = false
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+semver_check = false
+dependencies_update = false
+pr_name = "chore: release v{{ version }}"
+pr_labels = ["release"]
+
+[[package]]
+name = "hirz-cli"
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+changelog_include = [
+  "hirz-proto",
+  "hirz-crypto",
+  "hirz-sys",
+  "hirz-vault",
+  "hirz-ctap",
+  "hirz-webauthn",
+  "hirz-core",
+  "hirz-uv",
+  "hirzd",
+  "hirz-uhid-broker",
+  "hirz-nmh",
+]
+git_tag_enable = true
+git_release_enable = true
+git_release_name = "hirz v{{ version }}"
+# The release workflow attaches the packages and signatures, then publishes the draft.
+git_release_draft = true
+git_release_type = "auto"
+
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+  { message = "^feat", group = "added" },
+  { message = "^fix", group = "fixed" },
+  { message = "^security", group = "security" },
+  { message = "^perf", group = "performance" },
+  { message = "^refactor", group = "changed" },
+  { message = "^docs", group = "documentation" },
+  { message = "^chore: release", skip = true },
+  { message = "^Merge ", skip = true },
+  { message = "^.*", group = "other" },
+]
