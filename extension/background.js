@@ -1,6 +1,7 @@
 // Background event page. The only part of the extension that talks to the
 // native host, and the only place the request origin comes from: Firefox sets
 // MessageSender.origin in the parent process, so page scripts cannot forge it.
+// The frame ancestry of subframes comes from webNavigation, also parent-side.
 
 const HOST_NAME = "hirz";
 const PROTOCOL_VERSION = 1;
@@ -16,6 +17,11 @@ const MIN_TIMEOUT_MS = 30000;
 const MAX_TIMEOUT_MS = 600000;
 const MAX_OPTIONS_CHARS = 64 * 1024;
 const MAX_B64_CHARS = 1400 * 1024;
+const LIST_TIMEOUT_MS = 10000;
+const MAX_ACCOUNTS = 64;
+const MAX_ID_CHARS = 1364;
+const MAX_NAME_CHARS = 1024;
+const MAX_FRAME_DEPTH = 32;
 
 const PASSTHROUGH = "NotHandled";
 const HOST_ERRORS = new Set([
@@ -215,6 +221,49 @@ function cleanCredential(kind, c) {
   return out;
 }
 
+// Accounts for the conditional mediation overlay. Only ids and names, capped.
+function cleanAccounts(list) {
+  const out = [];
+  if (!Array.isArray(list)) return out;
+  const seen = new Set();
+  for (const a of list) {
+    if (out.length >= MAX_ACCOUNTS) break;
+    if (!isObject(a) || !isB64u(a.id) || a.id.length === 0 || a.id.length > MAX_ID_CHARS) continue;
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);
+    out.push({
+      id: a.id,
+      name: typeof a.name === "string" ? a.name.slice(0, MAX_NAME_CHARS) : "",
+      displayName: typeof a.displayName === "string" ? a.displayName.slice(0, MAX_NAME_CHARS) : "",
+    });
+  }
+  return out;
+}
+
+function canonicalB64u(s) {
+  try {
+    return Uint8Array.fromBase64(s, { alphabet: "base64url" }).toBase64({ alphabet: "base64url", omitPadding: true });
+  } catch {
+    return null;
+  }
+}
+
+// The request a conditional selection turns into: the page's own options with the
+// allow list narrowed to the chosen credential.
+function narrowOptions(options, id) {
+  const out = { ...options, allowCredentials: [{ type: "public-key", id }] };
+  const ext = out.extensions;
+  if (isObject(ext) && isObject(ext.prf) && isObject(ext.prf.evalByCredential)) {
+    const want = canonicalB64u(id);
+    const kept = {};
+    for (const [key, value] of Object.entries(ext.prf.evalByCredential)) {
+      if (canonicalB64u(key) === want) kept[key] = value;
+    }
+    out.extensions = { ...ext, prf: { ...ext.prf, evalByCredential: kept } };
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Pages.
 
@@ -235,13 +284,54 @@ function originAllowed(origin) {
   return url.protocol === "http:" && name === "localhost";
 }
 
-// Everything here comes from Firefox, not from the page.
-function pageContext(sender) {
+// Origin of a frame URL as reported by webNavigation, or null when the URL does not
+// carry one (about:blank, about:srcdoc, blob:, data:).
+function urlOrigin(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" || u.protocol === "http:" ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+// Everything here comes from Firefox, not from the page. The caller's origin is
+// sender.origin (parent process). For a subframe, the ancestors come from the frame
+// tree webNavigation keeps in the parent process; the frame counts as same-origin only
+// when every ancestor's URL has exactly its origin. Ancestors without an origin in their
+// URL count as cross-origin.
+async function frameContext(sender) {
   if (!sender || sender.id !== browser.runtime.id) return null;
-  if (!sender.tab || !Number.isInteger(sender.tab.id) || sender.tab.id < 0) return null;
-  if (sender.frameId !== 0) return null;
-  if (!originAllowed(sender.origin)) return null;
-  return { tabId: sender.tab.id, origin: sender.origin };
+  const tab = sender.tab;
+  if (!tab || !Number.isInteger(tab.id) || tab.id < 0) return null;
+  if (!Number.isInteger(sender.frameId) || sender.frameId < 0) return null;
+  const origin = sender.origin;
+  if (!originAllowed(origin)) return null;
+  const ctx = { tabId: tab.id, frameId: sender.frameId, origin, topOrigin: origin, crossOrigin: false };
+  if (sender.frameId === 0) return ctx;
+  let frames;
+  try {
+    frames = await browser.webNavigation.getAllFrames({ tabId: tab.id });
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(frames)) return null;
+  const byId = new Map();
+  for (const f of frames) {
+    if (isObject(f) && Number.isInteger(f.frameId)) byId.set(f.frameId, f);
+  }
+  let frame = byId.get(sender.frameId);
+  if (!frame) return null;
+  const own = urlOrigin(frame.url);
+  if (own !== null && own !== origin) return null;
+  for (let depth = 0; frame.frameId !== 0; depth++) {
+    if (depth >= MAX_FRAME_DEPTH) return null;
+    frame = byId.get(frame.parentFrameId);
+    if (!frame) return null;
+    if (urlOrigin(frame.url) !== origin) ctx.crossOrigin = true;
+  }
+  ctx.topOrigin = urlOrigin(frame.url) ?? "null";
+  return ctx;
 }
 
 function clampTimeout(v) {
@@ -268,10 +358,20 @@ function reply(state, rid, body) {
   }
 }
 
+function optionsOk(options) {
+  return isObject(options) && JSON.stringify(options).length <= MAX_OPTIONS_CHARS;
+}
+
+// Cross-origin frames go to Firefox, which applies Permissions Policy.
+async function sameOriginContext(state) {
+  const ctx = await frameContext(state.port.sender);
+  return ctx && !ctx.crossOrigin ? ctx : null;
+}
+
 async function ceremony(state, kind, rid, options) {
-  const ctx = state.ctx;
-  if (!ctx || !isObject(options)) return { ok: false, error: PASSTHROUGH };
-  if (JSON.stringify(options).length > MAX_OPTIONS_CHARS) return { ok: false, error: PASSTHROUGH };
+  if (!optionsOk(options)) return { ok: false, error: PASSTHROUGH };
+  const ctx = await sameOriginContext(state);
+  if (!ctx) return { ok: false, error: PASSTHROUGH };
   if (busyTabs.has(ctx.tabId)) return { ok: false, error: "NotAllowedError" };
   busyTabs.add(ctx.tabId);
   try {
@@ -286,7 +386,7 @@ async function ceremony(state, kind, rid, options) {
       {
         type: kind,
         origin: ctx.origin,
-        topOrigin: ctx.origin,
+        topOrigin: ctx.topOrigin,
         crossOrigin: false,
         options,
       },
@@ -312,18 +412,88 @@ async function ceremony(state, kind, rid, options) {
   }
 }
 
+// Conditional mediation: one pending request per document. The account list goes to
+// the relay, which draws the suggestions; it is never passed on to the page. Returns
+// the final reply, or null when the request stays pending.
+async function startConditional(state, rid, options) {
+  const pass = { ok: false, error: PASSTHROUGH };
+  if (!optionsOk(options)) return pass;
+  const ctx = await sameOriginContext(state);
+  if (!ctx) return pass;
+  state.latestConditional = rid;
+  const previous = state.conditional;
+  if (previous) {
+    state.conditional = null;
+    const entry = state.active.get(previous.rid);
+    if (entry) cancelHostCall(entry.h, entry.id);
+    reply(state, previous.rid, { ok: false, error: "AbortError" });
+  }
+  const query = {};
+  if (typeof options.rpId === "string") query.rpId = options.rpId;
+  if (Array.isArray(options.allowCredentials)) query.allowCredentials = options.allowCredentials;
+  const h = await openHost();
+  if (!h) return pass;
+  let r;
+  try {
+    r = await hostCall(
+      h,
+      { type: "list", origin: ctx.origin, topOrigin: ctx.topOrigin, crossOrigin: false, options: query },
+      LIST_TIMEOUT_MS,
+    ).promise;
+  } catch {
+    return pass;
+  }
+  if (state.closed || state.aborted.has(rid)) return null;
+  const accounts = r.ok === true ? cleanAccounts(r.accounts) : [];
+  if (accounts.length === 0) return pass;
+  if (state.latestConditional !== rid) return { ok: false, error: "AbortError" };
+  state.conditional = { rid, options, ids: new Set(accounts.map((a) => a.id)), busy: false };
+  reply(state, rid, { phase: "accounts", accounts });
+  return null;
+}
+
+async function selectAccount(state, rid, id) {
+  const c = state.conditional;
+  if (!c || c.rid !== rid || c.busy || typeof id !== "string" || !c.ids.has(id)) return;
+  c.busy = true;
+  const result = await ceremony(state, "get", rid, narrowOptions(c.options, id));
+  if (state.conditional !== c) return;
+  c.busy = false;
+  if (result.ok === true || result.error === PASSTHROUGH) {
+    state.conditional = null;
+    reply(state, rid, result);
+    return;
+  }
+  // The user cancelled the prompt or it failed: the request stays pending, as a
+  // conditional request does when the user dismisses the browser's own suggestions.
+  reply(state, rid, { phase: "retry" });
+}
+
 async function onPageMessage(state, msg) {
   if (!isObject(msg) || msg.v !== PROTOCOL_VERSION || !Number.isSafeInteger(msg.rid)) return;
   const rid = msg.rid;
   switch (msg.kind) {
     case "capabilities": {
-      const caps = state.ctx ? await hostCapabilities() : null;
+      const caps = (await sameOriginContext(state)) ? await hostCapabilities() : null;
       reply(state, rid, caps ? { ok: true, capabilities: caps } : { ok: false, error: PASSTHROUGH });
       return;
     }
     case "cancel": {
+      state.aborted.add(rid);
+      if (state.conditional && state.conditional.rid === rid) state.conditional = null;
       const entry = state.active.get(rid);
       if (entry) cancelHostCall(entry.h, entry.id);
+      return;
+    }
+    case "conditional": {
+      if (state.rids.has(rid)) return;
+      state.rids.add(rid);
+      const result = await startConditional(state, rid, msg.options);
+      if (result) reply(state, rid, result);
+      return;
+    }
+    case "select": {
+      await selectAccount(state, rid, msg.id);
       return;
     }
     case "create":
@@ -346,9 +516,11 @@ browser.runtime.onConnect.addListener((port) => {
   }
   const state = {
     port,
-    ctx: pageContext(port.sender),
     active: new Map(),
     rids: new Set(),
+    aborted: new Set(),
+    conditional: null,
+    latestConditional: null,
     closed: false,
   };
   port.onMessage.addListener((msg) => {
@@ -356,6 +528,7 @@ browser.runtime.onConnect.addListener((port) => {
   });
   port.onDisconnect.addListener(() => {
     state.closed = true;
+    state.conditional = null;
     for (const entry of state.active.values()) cancelHostCall(entry.h, entry.id);
     state.active.clear();
   });

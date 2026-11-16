@@ -1,10 +1,14 @@
 //! The message envelope shared with the Firefox extension, and the pure entry point the
 //! native host calls for every request.
 //!
-//! Request: `{"v":1,"id":n,"type":"create"|"get"|"hello"|"capabilities","origin":s,
+//! Request: `{"v":1,"id":n,"type":"create"|"get"|"list"|"hello"|"capabilities","origin":s,
 //! "topOrigin"?:s|null,"crossOrigin"?:bool,"options":{...}}`.
-//! Success: `{"v":1,"id":n,"ok":true,...}` with `credential`, `version` or
+//! Success: `{"v":1,"id":n,"ok":true,...}` with `credential`, `accounts`, `version` or
 //! `capabilities`. Failure: `{"v":1,"id":n|null,"ok":false,"error":name,"message":s}`.
+//!
+//! `list` backs the extension's conditional mediation suggestions: `options` is
+//! `{rpId?, allowCredentials?}`, validated like `get`, and the reply carries
+//! `accounts: [{id, name, displayName}]`. It never returns key material.
 //!
 //! Decisions:
 //! - An unknown `v` gets `NotHandled`: a newer extension then falls back to Firefox
@@ -15,15 +19,17 @@
 //!   only used to refuse frames: any request not same-origin with its top-level
 //!   document gets `NotHandled`.
 
+use crate::common::{MAX_DESCRIPTORS, MAX_NAME_CHARS};
 use crate::create::prepare_create;
 use crate::error::Error;
-use crate::get::prepare_get;
+use crate::get::{prepare_get, prepare_list};
 use crate::origin::Origin;
 use crate::response::{authentication_response, registration_response};
 use hirz_core::{
-    AssertionResponse, CoreError, GetAssertionRequest, MakeCredentialRequest,
+    AssertionResponse, CandidateAccount, CoreError, GetAssertionRequest, MakeCredentialRequest,
     MakeCredentialResponse,
 };
+use hirz_proto::base64url;
 use hirz_proto::json::Json;
 
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -51,6 +57,19 @@ pub trait Engine {
     /// True when a host-verified method (polkit, fprintd, PIN) is configured, so that
     /// `userVerifyingPlatformAuthenticator` is reported honestly.
     fn user_verification_available(&self) -> bool;
+
+    /// The accounts a `get` for `rp_id` could offer without user verification: with an
+    /// empty `allow_list` the discoverable credentials of the RP, otherwise the listed
+    /// ones that belong to the RP; credProtect 3 never, credProtect 2 only when listed.
+    /// No prompt, no signature. The default lists nothing, so Firefox keeps the request.
+    fn list_accounts(
+        &mut self,
+        rp_id: &str,
+        allow_list: &[Vec<u8>],
+    ) -> Result<Vec<CandidateAccount>, CoreError> {
+        let _ = (rp_id, allow_list);
+        Ok(Vec::new())
+    }
 }
 
 fn reply(id: Option<u64>, ok: bool, body: Vec<(&str, Json)>) -> Json {
@@ -88,6 +107,36 @@ fn capabilities(engine: &dyn Engine) -> Json {
         .into_iter()
         .map(|(k, v)| (k.to_owned(), Json::Bool(v)))
         .collect(),
+    )
+}
+
+fn truncated(s: Option<&str>) -> Json {
+    let s = s.unwrap_or("");
+    match s.char_indices().nth(MAX_NAME_CHARS) {
+        Some((end, _)) => Json::from(s.get(..end).unwrap_or("")),
+        None => Json::from(s),
+    }
+}
+
+/// At most `MAX_DESCRIPTORS` accounts, names capped like page-supplied names.
+fn accounts(list: &[CandidateAccount]) -> Json {
+    Json::Array(
+        list.iter()
+            .take(MAX_DESCRIPTORS)
+            .map(|a| {
+                Json::Object(vec![
+                    (
+                        "id".to_owned(),
+                        Json::from(base64url::encode(&a.credential_id)),
+                    ),
+                    ("name".to_owned(), truncated(a.user_name.as_deref())),
+                    (
+                        "displayName".to_owned(),
+                        truncated(a.user_display_name.as_deref()),
+                    ),
+                ])
+            })
+            .collect(),
     )
 }
 
@@ -131,6 +180,12 @@ fn dispatch(
             let plan = prepare_get(options, &origin)?;
             let resp = engine.get_assertion(&plan.request, origin.as_str())?;
             Ok(vec![("credential", authentication_response(&plan, &resp)?)])
+        }
+        Some("list") => {
+            let (origin, options) = ceremony_input(request)?;
+            let plan = prepare_list(options, &origin)?;
+            let found = engine.list_accounts(&plan.rp_id, &plan.allow_list)?;
+            Ok(vec![("accounts", accounts(&found))])
         }
         _ => Err(Error::BadEnvelope("unknown request type")),
     }

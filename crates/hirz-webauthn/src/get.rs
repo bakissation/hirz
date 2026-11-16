@@ -1,5 +1,6 @@
 //! `navigator.credentials.get()`: PublicKeyCredentialRequestOptionsJSON to a
-//! getAssertion request (WebAuthn Level 3 section 5.1.4).
+//! getAssertion request (WebAuthn Level 3 section 5.1.4), and the account list behind
+//! the extension's conditional mediation suggestions.
 
 use crate::common::{
     CHALLENGE_MAX, CHALLENGE_MIN, CREDENTIAL_ID_MAX, MAX_DESCRIPTORS, MAX_RP_ID_CHARS,
@@ -122,4 +123,25 @@ pub fn prepare_get(options: &Json, origin: &Origin) -> core::result::Result<GetP
         client_data_json,
         prf,
     })
+}
+
+/// A validated account lookup for conditional mediation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListPlan {
+    pub rp_id: String,
+    pub allow_list: Vec<Vec<u8>>,
+}
+
+/// Validates `{rpId?, allowCredentials?}` for a top-level, same-origin call from
+/// `origin`, with the same RP ID rules as [`prepare_get`]. Other members are ignored.
+pub fn prepare_list(options: &Json, origin: &Origin) -> core::result::Result<ListPlan, Error> {
+    let o = Obj::new(options, "options")?;
+    let rp_id = o.opt_str("rpId", MAX_RP_ID_CHARS)?;
+    let (allow_list, listed) = descriptors(&o, "allowCredentials")?;
+    let rp_id = validate_rp_id(rp_id, origin)?;
+    not_handled_if(
+        listed > 0 && allow_list.is_empty(),
+        "no allowed credential of a supported type",
+    )?;
+    Ok(ListPlan { rp_id, allow_list })
 }

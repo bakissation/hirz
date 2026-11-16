@@ -21,7 +21,7 @@ pub use common::prf_salt;
 pub use create::{CreatePlan, prepare_create};
 pub use envelope::{Engine, PROTOCOL_VERSION, handle};
 pub use error::{Error, ErrorName, core_error_name};
-pub use get::{GetPlan, prepare_get};
+pub use get::{GetPlan, ListPlan, prepare_get, prepare_list};
 pub use origin::{Origin, OriginError};
 pub use response::{authentication_response, registration_response};
 pub use rp_id::{RpIdError, validate_rp_id};

@@ -8,10 +8,11 @@
 )]
 
 use crate::envelope::{Engine, handle};
-use crate::{ErrorName, Origin, prepare_create, prepare_get, prf_salt};
+use crate::{ErrorName, Origin, prepare_create, prepare_get, prepare_list, prf_salt};
 use hirz_core::{
-    AAGUID, ApprovalError, AssertionResponse, CoreError, CredProtect, GetAssertionRequest,
-    HmacSecretSalts, MakeCredentialRequest, MakeCredentialResponse, UvRequirement,
+    AAGUID, ApprovalError, AssertionResponse, CandidateAccount, CoreError, CredProtect,
+    GetAssertionRequest, HmacSecretSalts, MakeCredentialRequest, MakeCredentialResponse,
+    UvRequirement,
 };
 use hirz_crypto::sha256;
 use hirz_proto::auth_data::{AttestedCredentialData, AuthenticatorData, FLAG_BE, FLAG_UP, FLAG_UV};
@@ -140,6 +141,8 @@ struct Fake {
     user_handle: Vec<u8>,
     made: Option<(MakeCredentialRequest, String)>,
     got: Option<(GetAssertionRequest, String)>,
+    accounts: Vec<CandidateAccount>,
+    listed: Option<(String, Vec<Vec<u8>>)>,
 }
 
 impl Default for Fake {
@@ -154,6 +157,8 @@ impl Default for Fake {
             user_handle: b"user-0001".to_vec(),
             made: None,
             got: None,
+            accounts: Vec::new(),
+            listed: None,
         }
     }
 }
@@ -226,6 +231,18 @@ impl Engine for Fake {
 
     fn user_verification_available(&self) -> bool {
         true
+    }
+
+    fn list_accounts(
+        &mut self,
+        rp_id: &str,
+        allow_list: &[Vec<u8>],
+    ) -> Result<Vec<CandidateAccount>, CoreError> {
+        self.listed = Some((rp_id.to_owned(), allow_list.to_vec()));
+        if let Some(e) = self.fail.clone() {
+            return Err(e);
+        }
+        Ok(self.accounts.clone())
     }
 }
 
@@ -1112,4 +1129,221 @@ fn envelope_handling() {
         reply.get("id").and_then(Json::as_u64),
         Some(9_007_199_254_740_991)
     );
+}
+
+fn account(id: &[u8], name: Option<&str>, display: Option<&str>) -> CandidateAccount {
+    CandidateAccount {
+        credential_id: id.to_vec(),
+        user_name: name.map(str::to_owned),
+        user_display_name: display.map(str::to_owned),
+    }
+}
+
+fn list_options() -> Json {
+    j(&format!(
+        r#"{{"rpId": "example.com", "allowCredentials": [
+            {{"type": "public-key", "id": "{id}", "transports": ["internal"]}},
+            {{"type": "future-type", "id": "{other}"}}
+        ], "challenge": "ignored", "mediation": "conditional"}}"#,
+        id = b64(&CRED_ID),
+        other = b64(&OTHER_ID),
+    ))
+}
+
+#[test]
+fn list_round_trip() {
+    let mut fake = Fake {
+        accounts: vec![
+            account(&CRED_ID, Some("alice"), Some("Alice")),
+            account(&OTHER_ID, None, None),
+        ],
+        ..Fake::default()
+    };
+    let reply = run(&envelope("list", ORIGIN, list_options()), &mut fake);
+    let expected = format!(
+        r#"{{"v":1,"id":7,"ok":true,"accounts":[
+            {{"id":"{a}","name":"alice","displayName":"Alice"}},
+            {{"id":"{b}","name":"","displayName":""}}]}}"#,
+        a = b64(&CRED_ID),
+        b = b64(&OTHER_ID),
+    );
+    assert_eq!(reply, j(&expected));
+    assert_eq!(
+        fake.listed,
+        Some(("example.com".to_owned(), vec![CRED_ID.to_vec()]))
+    );
+    assert!(fake.made.is_none() && fake.got.is_none());
+}
+
+#[test]
+fn list_defaults_and_empty_result() {
+    let mut fake = Fake::default();
+    let reply = run(&envelope("list", ORIGIN, j("{}")), &mut fake);
+    assert_eq!(reply, j(r#"{"v":1,"id":7,"ok":true,"accounts":[]}"#));
+    assert_eq!(
+        fake.listed,
+        Some(("login.example.com".to_owned(), Vec::new()))
+    );
+
+    let plan = prepare_list(
+        &j(r#"{"rpId":"example.com","allowCredentials":[]}"#),
+        &Origin::parse(ORIGIN).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan.rp_id, "example.com");
+    assert!(plan.allow_list.is_empty());
+
+    let mut req = envelope("list", "http://localhost:8080", j("{}"));
+    set(
+        &mut req,
+        &["topOrigin"],
+        Some(Json::from("http://localhost:8080")),
+    );
+    set(&mut req, &["crossOrigin"], Some(Json::Bool(false)));
+    assert_eq!(run(&req, &mut fake).get("ok"), Some(&Json::Bool(true)));
+    assert_eq!(fake.listed.unwrap().0, "localhost");
+}
+
+#[test]
+fn list_caps_names_and_count() {
+    let long = "\u{1F511}".repeat(2000);
+    let mut fake = Fake {
+        accounts: (0..100u8)
+            .map(|n| account(&[n; 16], Some(&long), Some("x")))
+            .collect(),
+        ..Fake::default()
+    };
+    let reply = run(&envelope("list", ORIGIN, j("{}")), &mut fake);
+    let list = reply.get("accounts").and_then(Json::as_array).unwrap();
+    assert_eq!(list.len(), 64);
+    let name = list[0].get("name").and_then(Json::as_str).unwrap();
+    assert_eq!(name.chars().count(), 1024);
+    assert!(name.chars().all(|c| c == '\u{1F511}'));
+    for a in list {
+        let keys: Vec<&str> = a
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(keys, ["id", "name", "displayName"]);
+    }
+}
+
+#[test]
+fn list_origin_and_rp_id_failures() {
+    for (origin, rp_id, name) in [
+        ("null", None, "NotAllowedError"),
+        ("http://example.com", None, "SecurityError"),
+        ("https://127.0.0.1", None, "SecurityError"),
+        ("https://example.com/path", None, "SecurityError"),
+        (ORIGIN, Some("com"), "SecurityError"),
+        (ORIGIN, Some(""), "SecurityError"),
+        (ORIGIN, Some("example.com."), "SecurityError"),
+        (ORIGIN, Some("example.org"), "NotHandled"),
+        (ORIGIN, Some("EXAMPLE.com"), "NotHandled"),
+        (
+            "https://alice.github.io",
+            Some("github.io"),
+            "SecurityError",
+        ),
+    ] {
+        let mut fake = Fake {
+            accounts: vec![account(&CRED_ID, Some("alice"), None)],
+            ..Fake::default()
+        };
+        let mut options = j("{}");
+        set(&mut options, &["rpId"], rp_id.map(Json::from));
+        let reply = run(&envelope("list", origin, options), &mut fake);
+        assert_eq!(error_of(&reply), name, "{origin} {rp_id:?}");
+        assert!(reply.get("accounts").is_none());
+        assert!(fake.listed.is_none(), "{origin} {rp_id:?}");
+    }
+}
+
+#[test]
+fn list_refuses_frames_and_bad_options() {
+    let mut fake = Fake {
+        accounts: vec![account(&CRED_ID, Some("alice"), None)],
+        ..Fake::default()
+    };
+    for (top, cross) in [
+        (Some(Json::from("https://top.example")), None),
+        (None, Some(true)),
+        (Some(Json::from(ORIGIN)), Some(true)),
+    ] {
+        let mut req = envelope("list", ORIGIN, list_options());
+        set(&mut req, &["topOrigin"], top);
+        set(&mut req, &["crossOrigin"], cross.map(Json::Bool));
+        assert_eq!(error_of(&run(&req, &mut fake)), "NotHandled");
+    }
+    for options in [
+        r#"{"rpId": 5}"#,
+        r#"{"allowCredentials": {}}"#,
+        r#"{"allowCredentials": [{"type": "public-key"}]}"#,
+        r#"{"allowCredentials": [{"type": "public-key", "id": "not base64url!"}]}"#,
+        r#"{"allowCredentials": [{"type": "public-key", "id": ""}]}"#,
+        r#"{"allowCredentials": [{"type": "future-type", "id": "AAAA"}]}"#,
+    ] {
+        let reply = run(&envelope("list", ORIGIN, j(options)), &mut fake);
+        assert_eq!(error_of(&reply), "NotHandled", "{options}");
+    }
+    let many: Vec<String> = (0..65)
+        .map(|n| format!(r#"{{"type":"public-key","id":"{}"}}"#, b64(&[n; 16])))
+        .collect();
+    let options = j(&format!(r#"{{"allowCredentials":[{}]}}"#, many.join(",")));
+    assert_eq!(
+        error_of(&run(&envelope("list", ORIGIN, options), &mut fake)),
+        "NotHandled"
+    );
+    let mut req = envelope("list", ORIGIN, j("{}"));
+    set(&mut req, &["options"], None);
+    assert_eq!(error_of(&run(&req, &mut fake)), "UnknownError");
+    assert!(fake.listed.is_none());
+}
+
+#[test]
+fn list_engine_errors() {
+    for (err, name) in [
+        (CoreError::Vault("broken".into()), "UnknownError"),
+        (CoreError::NoCredentials, "NotAllowedError"),
+    ] {
+        let mut fake = Fake {
+            fail: Some(err),
+            ..Fake::default()
+        };
+        let reply = run(&envelope("list", ORIGIN, list_options()), &mut fake);
+        assert_eq!(error_of(&reply), name);
+    }
+}
+
+/// An engine that keeps the default `list_accounts`.
+struct NoList;
+
+impl Engine for NoList {
+    fn make_credential(
+        &mut self,
+        _: &MakeCredentialRequest,
+        _: &str,
+    ) -> Result<MakeCredentialResponse, CoreError> {
+        Err(CoreError::NoCredentials)
+    }
+
+    fn get_assertion(
+        &mut self,
+        _: &GetAssertionRequest,
+        _: &str,
+    ) -> Result<AssertionResponse, CoreError> {
+        Err(CoreError::NoCredentials)
+    }
+
+    fn user_verification_available(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn list_default_is_empty() {
+    let reply = handle(&envelope("list", ORIGIN, list_options()), &mut NoList);
+    assert_eq!(reply, j(r#"{"v":1,"id":7,"ok":true,"accounts":[]}"#));
 }

@@ -1,15 +1,16 @@
-// ISOLATED world, document_start, top frame only.
+// ISOLATED world, document_start, every frame.
 // A dumb pipe between page/shim.js and the background. It adds no identity:
 // the background reads the origin from the sender that Firefox reports.
+// For conditional requests it also hands the account list to content/autofill.js,
+// which draws the suggestions; the list never goes back to the page.
 "use strict";
 
 (() => {
-  if (window.top !== window) return;
-
+  const autofill = globalThis.hirzAutofill;
   const BOOT = "hirz-bootstrap";
   const PORT_NAME = "hirz-page";
   const MAX_REQUEST_CHARS = 72 * 1024;
-  const KINDS = new Set(["create", "get", "capabilities", "cancel"]);
+  const KINDS = new Set(["create", "get", "conditional", "capabilities", "cancel"]);
 
   let secret = null;
   let port = null;
@@ -21,21 +22,49 @@
     window.dispatchEvent(new CustomEvent(type, { detail }));
   }
 
+  // Only the members the shim reads; anything else the background might add stays here.
   function respond(msg) {
     if (secret === null) return;
-    emit("hirz-res-" + secret, JSON.stringify(msg));
+    const out = { v: 1, rid: msg.rid, ok: msg.ok === true };
+    if (out.ok && isObject(msg.credential)) out.credential = msg.credential;
+    if (out.ok && isObject(msg.capabilities)) out.capabilities = msg.capabilities;
+    if (!out.ok) out.error = typeof msg.error === "string" ? msg.error : "UnknownError";
+    emit("hirz-res-" + secret, JSON.stringify(out));
+  }
+
+  function select(rid, id) {
+    if (pending.get(rid) !== "conditional" || port === null) return;
+    try {
+      port.postMessage({ v: 1, kind: "select", rid, id });
+    } catch {
+      onPortDisconnect();
+    }
   }
 
   function onPortMessage(msg) {
     if (!isObject(msg) || msg.v !== 1 || !pending.has(msg.rid)) return;
-    pending.delete(msg.rid);
+    const rid = msg.rid;
+    if (pending.get(rid) === "conditional") {
+      if (msg.phase === "accounts") {
+        if (autofill) autofill.start(rid, msg.accounts, (id) => select(rid, id));
+        else respond({ rid, ok: false, error: "NotHandled" });
+        return;
+      }
+      if (msg.phase === "retry") {
+        if (autofill) autofill.resume(rid);
+        return;
+      }
+      if (autofill) autofill.stop(rid);
+    }
+    pending.delete(rid);
     respond(msg);
   }
 
   function onPortDisconnect() {
     port = null;
     for (const [rid, kind] of pending) {
-      const error = kind === "capabilities" ? "NotHandled" : "NotAllowedError";
+      if (kind === "conditional" && autofill) autofill.stop(rid);
+      const error = kind === "capabilities" || kind === "conditional" ? "NotHandled" : "NotAllowedError";
       respond({ v: 1, rid, ok: false, error });
     }
     pending.clear();
@@ -65,10 +94,16 @@
     if (!Number.isSafeInteger(rid) || rid < 0) return;
     const out = { v: 1, kind: msg.kind, rid };
     if (msg.kind === "cancel") {
-      if (!pending.has(rid) || port === null) return;
+      if (!pending.has(rid)) return;
+      // The shim has already settled a cancelled conditional request.
+      if (pending.get(rid) === "conditional") {
+        if (autofill) autofill.stop(rid);
+        pending.delete(rid);
+      }
+      if (port === null) return;
     } else {
       if (pending.has(rid)) return;
-      if (msg.kind === "create" || msg.kind === "get") {
+      if (msg.kind === "create" || msg.kind === "get" || msg.kind === "conditional") {
         if (!isObject(msg.options)) {
           respond({ v: 1, rid, ok: false, error: "NotHandled" });
           return;

@@ -1,12 +1,26 @@
-// MAIN world, document_start, top frame only.
+// MAIN world, document_start, every frame.
 // Everything in this file runs with the page's privileges and is visible to it.
 // It decides nothing that matters for security: the background takes the origin
-// from Firefox and the native host re-validates every field.
+// and the frame ancestry from Firefox and the native host re-validates every field.
 "use strict";
 
 (() => {
   const w = window;
-  if (w.top !== w || !w.isSecureContext) return;
+  if (!w.isSecureContext) return;
+
+  // Frames that are not same-origin with all their ancestors keep Firefox's API
+  // untouched (Permissions Policy, user activation). Only a shortcut: the background
+  // decides again from the frame tree.
+  try {
+    const own = w.origin;
+    let cur = w;
+    for (let depth = 0; cur.parent !== cur; depth++) {
+      cur = cur.parent;
+      if (depth >= 32 || cur.origin !== own) return;
+    }
+  } catch {
+    return;
+  }
 
   const PKC = w.PublicKeyCredential;
   const CC = w.CredentialsContainer;
@@ -70,8 +84,12 @@
   const nativeGet = CC.prototype.get;
   const nativeUvpaa = PKC.isUserVerifyingPlatformAuthenticatorAvailable;
   const nativeCaps = PKC.getClientCapabilities;
+  const nativeCma = PKC.isConditionalMediationAvailable;
   const crypto = w.crypto;
   const doc = w.document;
+  // Same-origin with all ancestors here, so the top document is reachable. Its
+  // hasFocus() is true while the tab has focus, whichever frame holds it.
+  const topDoc = w.top === w ? doc : w.top.document;
   const loc = w.location;
   if (typeof toBase64 !== "function" || typeof fromBase64 !== "function") return;
 
@@ -491,14 +509,15 @@
     if (publicKey === undefined || publicKey === null) return null;
     if (digital !== undefined || identity !== undefined || otp !== undefined || password !== undefined) return null;
     const mediationText = mediation === undefined ? "optional" : text(mediation, 32);
-    if (mediationText === "conditional" || mediationText === "silent") return null;
+    const conditional = mediationText === "conditional";
+    if (mediationText === "silent" || (conditional && kind !== "get")) return null;
     if (signal !== undefined) {
       if (call(signalAborted, signal)) return null;
     }
     const pk = dict(publicKey);
     const snap = kind === "create" ? snapshotCreate(pk) : snapshotGet(pk);
     if (snap.json.length > MAX_OPTIONS_CHARS) return null;
-    return { json: snap.json, timeout: snap.timeout, signal };
+    return { json: snap.json, timeout: snap.timeout, signal, conditional };
   }
 
   // ---- result objects that look like the native ones ----
@@ -675,18 +694,22 @@
 
   function waitForFocus() {
     return new P((resolve) => {
-      if (call(hasFocus, doc)) {
-        resolve();
-        return;
-      }
-      call(addListener, w, "focus", () => resolve(), { once: true, capture: true });
+      const check = () => {
+        if (call(hasFocus, topDoc)) resolve();
+        else setTimer(check, 250);
+      };
+      check();
     });
   }
 
+  // A conditional request has no timeout: it stays pending until the user picks a
+  // suggestion, the signal aborts it, or the document goes away. When hirz has no
+  // account for the site, Firefox's own conditional request takes over at once.
   function ceremony(kind, plan, fallback) {
     return new P((resolve, reject) => {
       const rid = nextRid++;
       const signal = plan.signal;
+      const conditional = plan.conditional === true;
       let settled = false;
       let guard = null;
 
@@ -715,6 +738,10 @@
           }
           return;
         }
+        if (msg.error === "NotHandled" && conditional) {
+          if (finish()) resolve(fallback());
+          return;
+        }
         if (msg.error === "NotHandled") {
           delete pending[rid];
           if (guard !== null) clearTimer(guard);
@@ -730,14 +757,16 @@
       };
 
       if (signal !== undefined) call(addListener, signal, "abort", onAbort, { once: true });
-      const limit = (plan.timeout === undefined ? MAX_TIMEOUT_MS : plan.timeout) + GUARD_EXTRA_MS;
-      guard = setTimer(() => {
-        guard = null;
-        if (!finish()) return;
-        send("cancel", rid, undefined);
-        reject(toError("NotAllowedError"));
-      }, limit);
-      send(kind, rid, plan.json);
+      if (!conditional) {
+        const limit = (plan.timeout === undefined ? MAX_TIMEOUT_MS : plan.timeout) + GUARD_EXTRA_MS;
+        guard = setTimer(() => {
+          guard = null;
+          if (!finish()) return;
+          send("cancel", rid, undefined);
+          reject(toError("NotAllowedError"));
+        }, limit);
+      }
+      send(conditional ? "conditional" : kind, rid, plan.json);
     });
   }
 
@@ -824,7 +853,14 @@
       for (let i = 0; i < names.length; i++) out[names[i]] = base[names[i]];
       if (caps.uvpaa) out.userVerifyingPlatformAuthenticator = true;
       if (caps.passkey) out.passkeyPlatformAuthenticator = true;
+      out.conditionalGet = true;
       return out;
+    },
+    // With the host reachable, hirz offers its own suggestions, and falls back to
+    // Firefox's conditional request when it has none for the site.
+    async isConditionalMediationAvailable() {
+      if (await hostCapabilities()) return true;
+      return apply(nativeCma, PKC, []);
     },
   };
 
@@ -835,5 +871,8 @@
   }
   if (typeof nativeCaps === "function") {
     replace(PKC, "getClientCapabilities", statics.getClientCapabilities);
+  }
+  if (typeof nativeCma === "function") {
+    replace(PKC, "isConditionalMediationAvailable", statics.isConditionalMediationAvailable);
   }
 })();
