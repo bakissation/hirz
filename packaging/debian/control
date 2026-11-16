@@ -14,7 +14,7 @@ Vcs-Git: https://github.com/bakissation/hirz.git
 
 Package: hirz
 Architecture: amd64 arm64
-Depends: ${misc:Depends}, ${shlibs:Depends}, polkitd, zenity
+Depends: ${misc:Depends}, ${shlibs:Depends}, polkitd, zenity (>= 4)
 Recommends: fprintd
 Suggests: xdg-native-messaging-proxy
 Description: passkey authenticator for Linux

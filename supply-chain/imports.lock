@@ -1,12 +1,44 @@
 
 # cargo-vet imports lock
 
+[[publisher.cfg-if]]
+version = "1.0.5"
+when = "2026-09-16"
+user-id = 55123
+user-login = "rust-lang-owner"
+
+[[publisher.cmake]]
+version = "0.1.58"
+when = "2026-03-26"
+user-id = 55123
+user-login = "rust-lang-owner"
+
+[[publisher.find-msvc-tools]]
+version = "0.1.0"
+when = "2025-08-29"
+user-id = 539
+user-login = "cuviper"
+user-name = "Josh Stone"
+
 [[publisher.itoa]]
 version = "1.0.19"
 when = "2026-11-09"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
+
+[[publisher.jobserver]]
+version = "0.1.35"
+when = "2026-07-06"
+user-id = 55123
+user-login = "rust-lang-owner"
+
+[[publisher.memchr]]
+version = "2.8.3"
+when = "2026-07-08"
+user-id = 189
+user-login = "BurntSushi"
+user-name = "Andrew Gallant"
 
 [[publisher.proc-macro2]]
 version = "1.0.107"
@@ -63,6 +95,12 @@ when = "2026-07-13"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
+
+[[audits.bytecode-alliance.audits.find-msvc-tools]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.0 -> 0.1.4"
+notes = "Nothing out of the ordinary for a crate finding MSVC tooling."
 
 [[audits.bytecode-alliance.audits.pkg-config]]
 who = "Pat Hickey <phickey@fastly.com>"
@@ -154,6 +192,25 @@ version = "0.3.1"
 notes = """
 No dependencies aside from libc, and no use of std. Unsafe code is minimal and necessary.
 """
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.find-msvc-tools]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.4 -> 0.1.8"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.find-msvc-tools]]
+who = "Emilio Cobos Álvarez <emilio@crisal.io>"
+criteria = "safe-to-deploy"
+delta = "0.1.8 -> 0.1.12"
+notes = "Pretty minor changes, no new unsafe code."
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.find-msvc-tools]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.12 -> 0.1.15"
 aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.pkg-config]]

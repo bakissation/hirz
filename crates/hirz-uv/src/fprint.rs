@@ -1,5 +1,10 @@
 //! Fingerprint through the fprintd command line tools (no D-Bus library).
 
+use std::io::Read;
+use std::path::PathBuf;
+
+use crate::pin::{ensure_private_dir, write_atomic};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyOutcome {
     Match,
@@ -103,7 +108,74 @@ pub fn has_enrolled_fingers(code: Option<i32>, stdout: &[u8]) -> bool {
     })
 }
 
+/// Fingerprints in a row that were not recognised, over all requests and processes, after which
+/// the reader is paused. Three misses end one request (docs/approval.md); this counts across them.
+pub const MAX_MISSES: u32 = 9;
+/// How long the reader stays paused after the last miss, unless another method approves first.
+pub const PAUSE_SECS: u64 = 15 * 60;
+const MISS_FILE: &str = "fingerprint-misses";
+const MISS_FILE_MAX: u64 = 64;
+
+/// The miss counter in the state directory: `<count> <unix time of the last miss>`. It is not
+/// locked: two processes missing at the same moment can lose one count. A damaged file counts as
+/// paused until a verified approval by any method removes it.
+#[derive(Debug, Clone)]
+pub struct MissCounter {
+    dir: PathBuf,
+}
+
+impl MissCounter {
+    pub fn new(state_dir: impl Into<PathBuf>) -> Self {
+        MissCounter {
+            dir: state_dir.into(),
+        }
+    }
+
+    fn read(&self) -> (u32, u64) {
+        let file = match std::fs::File::open(self.dir.join(MISS_FILE)) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (0, 0),
+            Err(_) => return (MAX_MISSES, u64::MAX),
+        };
+        let mut text = String::new();
+        let parsed = file
+            .take(MISS_FILE_MAX)
+            .read_to_string(&mut text)
+            .ok()
+            .and_then(|_| {
+                let (n, t) = text.strip_suffix('\n')?.split_once(' ')?;
+                Some((n.parse::<u32>().ok()?, t.parse::<u64>().ok()?))
+            });
+        parsed.unwrap_or((MAX_MISSES, u64::MAX))
+    }
+
+    /// True while the reader must not be offered.
+    pub fn paused(&self, now: u64) -> bool {
+        let (count, last) = self.read();
+        count >= MAX_MISSES && now < last.saturating_add(PAUSE_SECS)
+    }
+
+    /// Best effort: a state directory that cannot be written leaves the reader unpaused.
+    pub fn record_miss(&self, now: u64) {
+        let (count, last) = self.read();
+        let count = if count >= MAX_MISSES && now >= last.saturating_add(PAUSE_SECS) {
+            0
+        } else {
+            count
+        };
+        let text = format!("{} {now}\n", count.saturating_add(1).min(MAX_MISSES));
+        if ensure_private_dir(&self.dir).is_ok() {
+            let _ = write_atomic(&self.dir, MISS_FILE, &text);
+        }
+    }
+
+    pub fn clear(&self) {
+        let _ = std::fs::remove_file(self.dir.join(MISS_FILE));
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 mod tests {
     use super::*;
 
@@ -231,5 +303,51 @@ mod tests {
         assert!(!has_enrolled_fingers(Some(0), denied));
         assert!(!has_enrolled_fingers(Some(0), b" - #x: finger\n - #0: \n"));
         assert!(!has_enrolled_fingers(Some(0), b"No devices available\n"));
+    }
+
+    #[test]
+    fn misses_pause_the_reader_until_the_pause_ends_or_another_method_approves() {
+        let d = crate::pin::tests::TempDir::new("misses");
+        let m = MissCounter::new(d.0.join("state"));
+        assert!(!m.paused(1_000));
+        for i in 0..MAX_MISSES - 1 {
+            m.record_miss(1_000 + u64::from(i));
+            assert!(!m.paused(1_010), "after {} misses", i + 1);
+        }
+        m.record_miss(1_010);
+        assert!(m.paused(1_010));
+        assert!(m.paused(1_010 + PAUSE_SECS - 1));
+        assert!(!m.paused(1_010 + PAUSE_SECS));
+        m.record_miss(1_010 + PAUSE_SECS);
+        assert!(!m.paused(1_010 + PAUSE_SECS));
+        m.clear();
+        for _ in 0..MAX_MISSES {
+            m.record_miss(5_000);
+        }
+        assert!(m.paused(5_001));
+        m.clear();
+        assert!(!m.paused(5_001));
+    }
+
+    #[test]
+    fn a_damaged_counter_pauses_the_reader() {
+        let d = crate::pin::tests::TempDir::new("misses-bad");
+        let state = d.0.join("state");
+        assert!(std::fs::create_dir_all(&state).is_ok());
+        for bad in [
+            "",
+            "x\n",
+            "3\n",
+            "3 4",
+            "3 4 5\n",
+            "-1 5\n",
+            "99999999999 5\n",
+        ] {
+            assert!(std::fs::write(state.join(MISS_FILE), bad).is_ok());
+            let m = MissCounter::new(&state);
+            assert!(m.paused(10), "{bad:?}");
+            m.clear();
+            assert!(!m.paused(10));
+        }
     }
 }

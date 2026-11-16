@@ -1,12 +1,20 @@
 // ISOLATED world, document_start, every frame, before content/relay.js. The suggestion list for
 // conditional mediation is only a hint: the native host still asks the user before anything is
-// signed. What the page can and cannot see: docs/extension.md, "Conditional mediation".
+// signed. Nothing is asked of the host before the user touches a `webauthn` field, and one touch
+// asks once: a trusted click in the field, a trusted Tab key release that lands in it, or an arrow
+// key in it. Focus alone, which a page can cause with `focus()`, asks nothing, so a page cannot
+// learn from this whether hirz holds a passkey, or test several credential lists with one touch.
+// What the page can and cannot see: docs/extension.md, "Conditional mediation".
 "use strict";
 
 globalThis.hirzAutofill = (() => {
   const MAX_ACCOUNTS = 64;
   const MAX_LABEL = 64;
-  const TAB_FOCUS_MS = 1000;
+  // A list answer stays usable this long; an ask that got no answer is repeated after ASK_TIMEOUT_MS.
+  const ACCOUNTS_TTL_MS = 5000;
+  const ASK_TIMEOUT_MS = 12000;
+  // Clicks on a row are ignored this long after the list appeared or moved.
+  const ROW_CLICK_DELAY_MS = 500;
   const MIN_WIDTH = 240;
   const GAP = 2;
   // Bidi controls and other invisible formatting characters are page-chosen data.
@@ -25,6 +33,17 @@ globalThis.hirzAutofill = (() => {
     ["max-height", "none"],
     ["z-index", "2147483647"],
     ["color-scheme", "light dark"],
+    ["opacity", "1"],
+    ["visibility", "visible"],
+    ["pointer-events", "auto"],
+    ["transform", "none"],
+    ["translate", "none"],
+    ["rotate", "none"],
+    ["scale", "none"],
+    ["filter", "none"],
+    ["clip-path", "none"],
+    ["mask", "none"],
+    ["mix-blend-mode", "normal"],
   ];
 
   const SHEET = `
@@ -51,7 +70,6 @@ globalThis.hirzAutofill = (() => {
 
   let req = null;
   let ui = null;
-  let lastTabAt = -Infinity;
   let frame = 0;
 
   function label(v) {
@@ -84,21 +102,67 @@ globalThis.hirzAutofill = (() => {
     const root = host.attachShadow({ mode: "closed" });
     for (const [name, value] of HOST_STYLE) host.style.setProperty(name, value, "important");
     if (typeof host.showPopover === "function") host.setAttribute("popover", "manual");
-    const style = document.createElement("style");
-    style.textContent = SHEET;
+    const styled = adoptSheet(root);
     const panel = document.createElement("div");
     panel.className = "panel";
     panel.setAttribute("role", "listbox");
     const head = document.createElement("div");
     head.className = "head";
     panel.append(head);
-    root.append(style, panel);
+    root.append(panel);
     // Keep the focus in the field while the user clicks a row.
     root.addEventListener("pointerdown", (ev) => ev.preventDefault());
     root.addEventListener("mousedown", (ev) => ev.preventDefault());
     root.addEventListener("click", onRowClick);
     root.addEventListener("pointermove", onRowHover);
-    return { host, panel, rows: [], field: null, active: -1 };
+    return {
+      host,
+      root,
+      panel,
+      rows: [],
+      field: null,
+      active: -1,
+      styled,
+      checked: false,
+      shownAt: 0,
+      movedAt: 0,
+      pos: "",
+    };
+  }
+
+  // A constructable stylesheet is not subject to the page's Content Security Policy, a `<style>`
+  // element can be.
+  function adoptSheet(root) {
+    try {
+      if (typeof CSSStyleSheet === "function" && "adoptedStyleSheets" in root) {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(SHEET);
+        root.adoptedStyleSheets = [sheet];
+        return root.adoptedStyleSheets.length === 1;
+      }
+    } catch {
+      // Fall through to the element.
+    }
+    return false;
+  }
+
+  function appendStyleElement(root) {
+    const style = document.createElement("style");
+    style.textContent = SHEET;
+    root.prepend(style);
+  }
+
+  // Once the list is in the document: when the adopted sheet did not take effect, use an element.
+  function ensureStyled() {
+    if (ui.checked) return;
+    ui.checked = true;
+    let applied = false;
+    try {
+      applied = ui.styled && getComputedStyle(ui.panel).boxSizing === "border-box";
+    } catch {
+      applied = false;
+    }
+    if (!applied) appendStyleElement(ui.root);
   }
 
   function render() {
@@ -153,6 +217,11 @@ globalThis.hirzAutofill = (() => {
     let top = r.bottom + GAP;
     if (top + height > vh && r.top - height - GAP >= 0) top = r.top - height - GAP;
     const s = ui.host.style;
+    const pos = `${Math.round(left)},${Math.round(top)},${Math.round(width)}`;
+    if (pos !== ui.pos) {
+      ui.pos = pos;
+      ui.movedAt = performance.now();
+    }
     s.setProperty("left", `${Math.round(left)}px`, "important");
     s.setProperty("top", `${Math.round(top)}px`, "important");
     s.setProperty("width", `${Math.round(width)}px`, "important");
@@ -177,6 +246,8 @@ globalThis.hirzAutofill = (() => {
           // Already shown.
         }
       }
+      ui.shownAt = performance.now();
+      ensureStyled();
     }
     place();
   }
@@ -210,6 +281,7 @@ globalThis.hirzAutofill = (() => {
 
   function onRowClick(ev) {
     if (!ev.isTrusted || !ui) return;
+    if (performance.now() - Math.max(ui.shownAt, ui.movedAt) < ROW_CLICK_DELAY_MS) return;
     const row = ev.target instanceof Element ? ev.target.closest(".row") : null;
     const i = row ? ui.rows.indexOf(row) : -1;
     if (i >= 0) choose(i);
@@ -222,17 +294,44 @@ globalThis.hirzAutofill = (() => {
     if (i >= 0 && i !== ui.active) setActive(i);
   }
 
+  // The user touched a `webauthn` field: show the list, asking the host first when the last answer
+  // is old. The answer arrives in `provide`.
+  function open(field) {
+    if (!req || req.busy) return false;
+    req.want = field;
+    const now = performance.now();
+    if (req.answeredAt !== null && now - req.answeredAt < ACCOUNTS_TTL_MS) {
+      show(field);
+      return isOpen();
+    }
+    if (req.askedAt === null || now - req.askedAt >= ASK_TIMEOUT_MS) {
+      req.askedAt = now;
+      req.request();
+    }
+    return false;
+  }
+
+  function stillWanted(field) {
+    try {
+      return field.isConnected && field.matches(":focus");
+    } catch {
+      return false;
+    }
+  }
+
   function onPointerDown(ev) {
     if (!ev.isTrusted || insideUi(ev)) return;
     const t = targetOf(ev);
-    if (isField(t)) show(t);
+    if (isField(t)) open(t);
     else if (isOpen()) hide();
   }
 
-  function onFocusIn(ev) {
-    if (!ev.isTrusted) return;
+  // The key is released in the field it moved the focus to; a script that calls `focus()` produces
+  // a trusted focus event but no key event, and the key event is the touch.
+  function onKeyUp(ev) {
+    if (!ev.isTrusted || ev.key !== "Tab") return;
     const t = targetOf(ev);
-    if (isField(t) && performance.now() - lastTabAt < TAB_FOCUS_MS) show(t);
+    if (isField(t)) open(t);
   }
 
   function onFocusOut(ev) {
@@ -241,15 +340,10 @@ globalThis.hirzAutofill = (() => {
 
   function onKeyDown(ev) {
     if (!ev.isTrusted) return;
-    if (ev.key === "Tab") {
-      lastTabAt = performance.now();
-      return;
-    }
     const t = targetOf(ev);
     if (!isOpen()) {
-      if ((ev.key === "ArrowDown" || ev.key === "ArrowUp") && isField(t) && req && !req.busy) {
-        show(t);
-        if (isOpen()) ev.preventDefault();
+      if ((ev.key === "ArrowDown" || ev.key === "ArrowUp") && isField(t) && open(t)) {
+        ev.preventDefault();
       }
       return;
     }
@@ -281,7 +375,7 @@ globalThis.hirzAutofill = (() => {
 
   const LISTENERS = [
     ["pointerdown", onPointerDown],
-    ["focusin", onFocusIn],
+    ["keyup", onKeyUp],
     ["focusout", onFocusOut],
     ["keydown", onKeyDown],
     ["scroll", schedulePlace],
@@ -306,9 +400,18 @@ globalThis.hirzAutofill = (() => {
     return out;
   }
 
-  function start(rid, accounts, onSelect) {
+  function start(rid, hooks) {
     if (req) stop(req.rid);
-    req = { rid, accounts: clean(accounts), onSelect, busy: false };
+    req = {
+      rid,
+      accounts: [],
+      answeredAt: null,
+      askedAt: null,
+      want: null,
+      busy: false,
+      request: hooks.request,
+      onSelect: hooks.onSelect,
+    };
     listen(true);
   }
 
@@ -320,9 +423,30 @@ globalThis.hirzAutofill = (() => {
     ui = null;
   }
 
+  // The host's answer to the last ask, for the field the user touched.
+  function provide(rid, accounts) {
+    if (!req || req.rid !== rid) return;
+    req.accounts = clean(accounts);
+    req.answeredAt = performance.now();
+    req.askedAt = null;
+    if (req.want !== null && req.accounts.length > 0 && stillWanted(req.want)) show(req.want);
+    req.want = null;
+  }
+
+  // The list is out of date or the host is gone: forget it, ask again at the next touch.
+  function invalidate(rid) {
+    if (!req || req.rid !== rid) return;
+    hide();
+    req.accounts = [];
+    req.answeredAt = null;
+    req.askedAt = null;
+    req.want = null;
+    req.busy = false;
+  }
+
   function resume(rid) {
     if (req && req.rid === rid) req.busy = false;
   }
 
-  return Object.freeze({ start, stop, resume });
+  return Object.freeze({ start, stop, provide, invalidate, resume });
 })();

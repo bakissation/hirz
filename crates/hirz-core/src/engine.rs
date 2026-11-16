@@ -16,13 +16,17 @@ use hirz_proto::auth_data::{
 use hirz_proto::cbor::MapBuilder;
 use hirz_proto::cose;
 use hirz_vault::{
-    CredentialRecord, HmacSecretPair, MAX_STRING_LEN, MAX_USER_ID_LEN, Vault, VaultError,
+    CredentialRecord, HmacSecretPair, MAX_STRING_LEN, MAX_USER_ID_LEN, ScanReport, Vault,
+    VaultError,
 };
 
 pub struct Engine<'a> {
     vault: &'a mut Vault,
     approver: &'a dyn Approver,
     clock: fn() -> u64,
+    cancelled: Option<&'a dyn Fn() -> bool>,
+    commit: Option<&'a dyn Fn() -> bool>,
+    loaded: bool,
 }
 
 impl fmt::Debug for Engine<'_> {
@@ -39,6 +43,9 @@ impl<'a> Engine<'a> {
             vault,
             approver,
             clock: hirz_proto::time::unix_now,
+            cancelled: None,
+            commit: None,
+            loaded: false,
         }
     }
 
@@ -47,12 +54,61 @@ impl<'a> Engine<'a> {
         self
     }
 
+    /// `cancelled` is asked again once the user has approved, right before anything is stored or
+    /// signed: a request the platform has given up on creates and signs nothing.
+    pub fn with_cancel(mut self, cancelled: &'a dyn Fn() -> bool) -> Self {
+        self.cancelled = Some(cancelled);
+        self
+    }
+
+    /// Asked once per registration, after the new credential is stored and before an older one of
+    /// the same account is replaced or an answer is built. `false` undoes the registration: the
+    /// new credential is deleted and the older one stays. A caller that must make "cancelled" and
+    /// "committed" exclusive (hirz-nmh) decides here; without it the `cancelled` function is asked.
+    pub fn with_commit(mut self, commit: &'a dyn Fn() -> bool) -> Self {
+        self.commit = Some(commit);
+        self
+    }
+
+    /// The caller reloaded the vault right before building this engine (hirz-session does), so
+    /// the first look before a prompt is not repeated. The look after the approval always happens.
+    pub fn with_loaded_vault(mut self) -> Self {
+        self.loaded = true;
+        self
+    }
+
     pub fn vault(&self) -> &Vault {
         self.vault
     }
 
+    /// The look before a prompt. A device that was removed never gets as far as a prompt.
     fn reload(&mut self) -> Result<(), CoreError> {
-        self.vault.reload().map(|_| ()).map_err(vault_error)
+        if !core::mem::take(&mut self.loaded) {
+            self.vault.reload().map_err(vault_error)?;
+        }
+        self.vault.ensure_active().map_err(vault_error)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.is_some_and(|f| f())
+    }
+
+    fn committed(&self) -> bool {
+        match self.commit {
+            Some(commit) => commit(),
+            None => !self.is_cancelled(),
+        }
+    }
+
+    /// The prompt can stay open for minutes. Before the approval is acted on, check that the
+    /// request is still wanted, and look at the vault again: another device may have removed this
+    /// one or deleted the credential meanwhile.
+    fn refresh_after_approval(&mut self) -> Result<(), CoreError> {
+        if self.is_cancelled() {
+            return Err(CoreError::Approval(ApprovalError::Denied));
+        }
+        self.vault.reload().map_err(vault_error)?;
+        self.vault.ensure_active().map_err(vault_error)
     }
 
     /// `origin` is shown in the prompt (extension path only).
@@ -73,8 +129,10 @@ impl<'a> Engine<'a> {
             .find(|a| *a == COSE_ALG_ES256 || *a == COSE_ALG_EDDSA)
             .ok_or(CoreError::UnsupportedAlgorithm)?;
         self.reload()?;
+        if is_read_only(self.vault.report()) {
+            return Err(CoreError::Approval(ApprovalError::Unavailable));
+        }
 
-        let (excluded, excluded_with_uv) = self.excluded(req);
         let rp_uv = req.uv == UvRequirement::Required;
         let ctx = ApprovalContext {
             ceremony: Ceremony::Create,
@@ -92,6 +150,8 @@ impl<'a> Engine<'a> {
         if !approval.user_present {
             return Err(CoreError::Approval(ApprovalError::Denied));
         }
+        self.refresh_after_approval()?;
+        let (excluded, excluded_with_uv) = self.excluded(req);
         if excluded || (excluded_with_uv && approval.user_verified) {
             return Err(CoreError::CredentialExcluded);
         }
@@ -121,6 +181,10 @@ impl<'a> Engine<'a> {
         };
         let backup_state = self.vault.backup_state();
         self.vault.put(record).map_err(vault_error)?;
+        if !self.committed() {
+            let _ = self.vault.delete(&credential_id);
+            return Err(CoreError::Approval(ApprovalError::Denied));
+        }
         if req.resident_key {
             self.replace_older(&req.rp.id, &req.user.id, &credential_id);
         }
@@ -203,24 +267,44 @@ impl<'a> Engine<'a> {
             return self.silent_probe(req);
         }
         self.reload()?;
-        let vault: &Vault = self.vault;
         let with_list = !req.allow_list.is_empty();
-        let mut pool = locate(vault, req);
-        if pool.is_empty() {
-            return Err(CoreError::NoCredentials);
-        }
-        let rp_uv = req.uv == UvRequirement::Required;
-        let (record, approval) = match ask(self.approver, req, origin, &pool, rp_uv) {
-            Ok(v) => v,
-            Err(CoreError::UvRequiredUnavailable) if !rp_uv => {
-                pool.retain(|r| !needs_uv(r, with_list));
-                if pool.is_empty() {
-                    return Err(CoreError::NoCredentials);
-                }
-                ask(self.approver, req, origin, &pool, false)?
+        let (credential_id, approval) = {
+            let vault: &Vault = self.vault;
+            let mut pool = locate(vault, req);
+            if pool.is_empty() {
+                return Err(CoreError::NoCredentials);
             }
-            Err(e) => return Err(e),
+            let rp_uv = req.uv == UvRequirement::Required;
+            let (record, approval) = match ask(self.approver, req, origin, &pool, rp_uv) {
+                Ok(v) => v,
+                Err(CoreError::UvRequiredUnavailable) if !rp_uv => {
+                    pool.retain(|r| !needs_uv(r, with_list));
+                    if pool.is_empty() {
+                        return Err(CoreError::NoCredentials);
+                    }
+                    ask(self.approver, req, origin, &pool, false)?
+                }
+                // Nothing was shown, so the approver never said whether a method for UV exists:
+                // try again without the credentials that need it.
+                Err(CoreError::Approval(ApprovalError::NothingShown))
+                    if !rp_uv && pool.iter().any(|r| needs_uv(r, with_list)) =>
+                {
+                    pool.retain(|r| !needs_uv(r, with_list));
+                    if pool.is_empty() {
+                        return Err(CoreError::Approval(ApprovalError::NothingShown));
+                    }
+                    ask(self.approver, req, origin, &pool, false)?
+                }
+                Err(e) => return Err(e),
+            };
+            (record.credential_id.clone(), approval)
         };
+        self.refresh_after_approval()?;
+        let vault: &Vault = self.vault;
+        let record = vault
+            .get(&credential_id)
+            .filter(|r| r.rp_id == req.rp_id)
+            .ok_or(CoreError::NoCredentials)?;
         let uv = approval.user_verified;
 
         let output = req
@@ -289,13 +373,16 @@ impl<'a> Engine<'a> {
     }
 }
 
-const MACHINE_LOGIN_PREFIX: &str = "pam://";
-
-/// pam-u2f asks for `pam://HOST` by default; the engine refuses these.
+/// The ids are listed in `machine_login`; kept here so existing callers keep their path.
 pub fn is_machine_login_rp_id(rp_id: &str) -> bool {
-    rp_id
-        .get(..MACHINE_LOGIN_PREFIX.len())
-        .is_some_and(|p| p.eq_ignore_ascii_case(MACHINE_LOGIN_PREFIX))
+    crate::machine_login::is_machine_login_rp_id(rp_id)
+}
+
+/// True while the vault only serves the passkeys it has: a fork, a rotation conflict, or a key
+/// change this device holds no key for. Saving anything fails then (docs/vault-format.md, 9.3 and
+/// 9.4), so a registration is refused before the user is asked.
+pub fn is_read_only(report: &ScanReport) -> bool {
+    report.fork_detected || report.rotation_conflict || report.locked_out
 }
 
 fn refuse_machine_login(rp_id: &str) -> Result<(), CoreError> {
@@ -531,8 +618,13 @@ fn sign(rec: &CredentialRecord, message: &[u8]) -> Result<Vec<u8>, CoreError> {
     }
 }
 
+/// A removed device or a fork is a refusal, not a failure of the vault: callers answer "not
+/// allowed" and keep the vault open (CTAP NOT_ALLOWED, WebAuthn NotAllowedError).
 fn vault_error(e: VaultError) -> CoreError {
-    CoreError::Vault(e.to_string())
+    match e {
+        VaultError::Removed | VaultError::Fork => CoreError::Approval(ApprovalError::Unavailable),
+        e => CoreError::Vault(e.to_string()),
+    }
 }
 
 fn crypto_error(e: hirz_crypto::CryptoError) -> CoreError {

@@ -21,6 +21,9 @@ fn pin_error(e: PinError) -> CliError {
             CliError::usage(format!("A PIN can be at most {MAX_PIN_BYTES} bytes long."))
         }
         PinError::NotUtf8 => CliError::usage("The PIN is not valid text."),
+        PinError::NotPrintableAscii => CliError::usage(
+            "A PIN can use only letters, digits, spaces and the punctuation of a US keyboard.",
+        ),
         PinError::NotSet => CliError::failed("No PIN is set. Set one with: hirz pin set"),
         PinError::AlreadySet => {
             CliError::failed("A PIN is already set. Change it with: hirz pin change")
@@ -131,7 +134,7 @@ fn prove_owner(ctx: &mut Ctx<'_>) -> CliResult<()> {
             dir.display()
         )));
     }
-    ctx.open_vault()?;
+    ctx.open_active_vault()?;
     ctx.say("To show that you own this vault, type its 24-word recovery phrase.")?;
     let typed = prompt::read_secret(ctx.prompt, "Recovery phrase: ")?;
     let phrase = match RecoveryPhrase::parse(&typed) {

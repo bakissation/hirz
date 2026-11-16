@@ -220,6 +220,16 @@ pub mod ed25519 {
     pub fn public_key(pkcs8: &[u8]) -> Result<[u8; 32]> {
         public_of(&load(pkcs8)?)
     }
+    /// For keys stored as a 32-byte RFC 8032 seed instead of PKCS#8.
+    pub fn public_from_seed(seed: &[u8; 32]) -> Result<[u8; 32]> {
+        let kp = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| CryptoError::Invalid)?;
+        public_of(&kp)
+    }
+    pub fn sign_with_seed(seed: &[u8; 32], msg: &[u8]) -> Result<[u8; 64]> {
+        let kp = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| CryptoError::Invalid)?;
+        let sig = kp.try_sign(msg).map_err(|_| CryptoError::Invalid)?;
+        <[u8; 64]>::try_from(sig.as_ref()).map_err(|_| CryptoError::Invalid)
+    }
     pub fn verify(public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<()> {
         signature::UnparsedPublicKey::new(&signature::ED25519, public)
             .verify(msg, sig)

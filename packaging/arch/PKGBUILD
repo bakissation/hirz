@@ -7,7 +7,7 @@ pkgdesc='Passkey authenticator for Linux: a virtual security key and a Firefox e
 arch=('x86_64' 'aarch64')
 url='https://github.com/bakissation/hirz'
 license=('MIT OR Apache-2.0')
-depends=('glibc' 'libgcc' 'polkit' 'zenity' 'systemd')
+depends=('glibc' 'libgcc' 'polkit' 'zenity>=4' 'systemd')
 makedepends=('cargo' 'cmake')
 optdepends=(
   'fprintd: approve with your fingerprint'
@@ -16,11 +16,12 @@ optdepends=(
 install=hirz.install
 # AWS-LC (C code built by aws-lc-sys) is not built with makepkg's LTO flags.
 options=('!lto' '!debug')
-# The release's signed source tarball and vendored crates (docs/release.md), so the build needs no network.
+# The release's source tarball and vendored crates (docs/release.md), so the build needs no network.
+# The files carry a GitHub attestation and a Sigstore bundle; makepkg checks only the sha256 sums below.
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz"
         "$url/releases/download/v$pkgver/$pkgname-$pkgver-vendor.tar.xz")
 noextract=("$pkgname-$pkgver-vendor.tar.xz")
-# The release workflow writes the real sums into the AUR copy of this file.
+# The release workflow writes the real sums into the AUR copy, from the attested release files; here they are SKIP.
 sha256sums=('SKIP'
             'SKIP')
 
@@ -70,7 +71,8 @@ package() {
     packaging/systemd/hirzd.service > "$pkgdir/usr/lib/systemd/user/hirzd.service"
   grep -Eq '^ExecStart=/usr/bin/hirzd( |$)' "$pkgdir/usr/lib/systemd/user/hirzd.service"
 
-  install -Dm0644 -t "$pkgdir/usr/lib/udev/rules.d" packaging/udev/70-hirz.rules packaging/udev/72-hirz.rules
+  install -Dm0644 -t "$pkgdir/usr/lib/udev/rules.d" packaging/udev/70-hirz.rules packaging/udev/72-hirz.rules \
+    packaging/udev/99-zzz-hirz.rules
   install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
     "$pkgdir/usr/share/polkit-1/actions/dev.hirz.authenticate.policy"
   install -Dm0644 assets/brand/hirz-app-icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/hirz.svg"

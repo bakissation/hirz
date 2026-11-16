@@ -1,0 +1,15 @@
+# hirz virtual security key, part 3 of 3 (parts 1 and 2 are 70-hirz.rules and 72-hirz.rules). Removes
+# the uaccess tag once more late in the run, because a rule installed by another package (keyboard
+# configuration tools are the usual case) may tag all hidraw nodes uaccess after 72-hirz.rules ran,
+# and logind would then give the seat user an ACL on the node. The last tag change of the event is
+# what the udev database keeps. Rule files run in file name order and this name sorts late, but a
+# file with a later name (99-zzzz.rules, or any name that starts with a letter) still runs after it
+# and could add the tag again; no name can prevent that (docs/uhid.md, "hidraw access").
+
+ACTION=="remove", GOTO="hirz_final_end"
+SUBSYSTEM!="hidraw", GOTO="hirz_final_end"
+DEVPATH!="/devices/virtual/misc/uhid/0003:1209:0007.*", GOTO="hirz_final_end"
+
+TAG-="uaccess"
+
+LABEL="hirz_final_end"

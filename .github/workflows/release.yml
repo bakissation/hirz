@@ -2,7 +2,10 @@ name: release
 
 # Runs for a tag vX.Y.Z (created by release-plz) or vX.Y.Z-rc.N (pushed on main by a maintainer):
 # reproducible builds, signing and the GitHub Release; stable tags then update each package
-# channel whose secrets exist (docs/release.md).
+# channel listed in the RELEASE_CHANNELS variable (docs/release.md). Every job that signs or holds a
+# publishing secret runs in the "release" environment, which allows only v* tags and needs a reviewer.
+# Signing (cosign, attestations) happens only in jobs that run no project or dependency code:
+# "publish" and "snap-attest". The jobs that run build scripts as root have no id-token permission.
 
 on:
   push:
@@ -19,6 +22,13 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Fingerprints of the repository signing key (apt and dnf) and of the key that signs the source
+  # packages uploaded to the PPA. README.md, docs/install.md and the release notes carry the same
+  # values (scripts/check.sh keys compares them); the pkgrepo and ppa jobs refuse another key.
+  REPO_KEY_FPR: "583116C255B872AF888CA940E59953310261779A"
+  PPA_KEY_FPR: "458094087F6D1BFF45508EEAA5E35D5E1CCFF011"
+
 jobs:
   meta:
     name: check the tag
@@ -28,6 +38,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
       prerelease: ${{ steps.tag.outputs.prerelease }}
+      latest: ${{ steps.tag.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,6 +50,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          ALLOW_UNSIGNED_TAGS: ${{ vars.ALLOW_UNSIGNED_TAGS }}
         run: |
           if [ "$GITHUB_REF_TYPE" != tag ]; then
             echo "::error::run this workflow on a tag (gh workflow run release.yml --ref vX.Y.Z)"
@@ -71,19 +83,44 @@ jobs:
             echo "pre-release: the build stamps $version over Cargo.toml's $cargo"
           fi
 
-          # Signed tags show as verified; release-plz signs them when RELEASE_TAG_SSH_KEY is set.
+          # Signed tags show as verified; release-plz signs them when RELEASE_TAG_SSH_KEY is set. A stable
+          # tag must be verified unless the maintainer set the ALLOW_UNSIGNED_TAGS variable to true.
           obj=$(gh api "repos/$REPO/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha')
           if [ "${obj%% *}" = tag ] &&
             [ "$(gh api "repos/$REPO/git/tags/${obj#* }" --jq .verification.verified)" = true ]; then
             echo "$tag is a signed, verified tag"
+          elif [ "$prerelease" = false ] && [ "$ALLOW_UNSIGNED_TAGS" != true ]; then
+            echo "::error::$tag is not a verified signed tag (configure RELEASE_TAG_SSH_KEY, or set the ALLOW_UNSIGNED_TAGS variable to true)"
+            exit 1
           else
             echo "::warning::$tag is not a verified signed tag"
+          fi
+
+          # A release must not ship a stale Public Suffix List; a pre-release only warns.
+          if ! scripts/check-psl-age.sh; then
+            if [ "$prerelease" = false ]; then
+              exit 1
+            fi
+            echo "::warning::the bundled Public Suffix List is stale"
+          fi
+
+          # Only the highest stable tag becomes the latest release and reaches the package channels,
+          # so re-running an older tag never moves "latest" or the channels back.
+          latest=false
+          if [ "$prerelease" = false ]; then
+            highest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            if [ "$highest" = "$tag" ]; then
+              latest=true
+            else
+              echo "::warning::$tag is older than $highest: it is not marked as the latest release and no package channel is updated"
+            fi
           fi
 
           {
             echo "tag=$tag"
             echo "version=$version"
             echo "prerelease=$prerelease"
+            echo "latest=$latest"
           } >>"$GITHUB_OUTPUT"
 
   build:
@@ -103,14 +140,20 @@ jobs:
     needs: [meta, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # Signs with the workflow's OIDC identity, so it runs behind the same gate as the secrets.
+    environment: release
     permissions:
       contents: write
       id-token: write
       attestations: write
+    outputs:
+      # The channel jobs compare the "sums" artifact with this value, so a replaced artifact fails.
+      sums-sha256: ${{ steps.sums.outputs.sha256 }}
     env:
       TAG: ${{ needs.meta.outputs.tag }}
       VERSION: ${{ needs.meta.outputs.version }}
       PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+      LATEST: ${{ needs.meta.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,15 +161,28 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: "{source,binaries-*,rpm-*}"
           path: dist
           merge-multiple: true
 
       - name: SHA256SUMS
+        id: sums
         run: |
           cd dist
           ls -l
           sha256sum -- * >SHA256SUMS
           cat SHA256SUMS
+          echo "sha256=$(sha256sum SHA256SUMS | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+
+      # The channel jobs check what they download against these sums, after checking the sums
+      # themselves against the digest above, which only this job can set (scripts/ci/verify-sums.sh).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sums
+          path: dist/SHA256SUMS
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: error
 
       - name: GitHub artifact attestations (SLSA build provenance)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -146,6 +202,7 @@ jobs:
 
       - name: Release notes
         run: |
+          group() { sed 's/.\{4\}/& /g; s/ $//' <<<"$1"; }
           if [ "$PRERELEASE" = true ]; then
             {
               echo "Pre-release $TAG for testing. It is not published to any package channel."
@@ -162,31 +219,46 @@ jobs:
           {
             echo
             echo "Verify downloads with gh attestation verify FILE --repo $GITHUB_REPOSITORY"
-            echo "and cosign verify-blob, as described in docs/release.md."
+            echo "and cosign verify-blob, as described in docs/release.md. Check that the tag commit is on main."
           } >>notes.md
+          if [ "$PRERELEASE" != true ]; then
+            {
+              echo
+              echo "Package signing keys. The same fingerprints are in README.md and docs/install.md; compare"
+              echo "all three before you trust a key you downloaded:"
+              echo
+              echo "- apt and dnf repository (https://$GITHUB_REPOSITORY_OWNER.github.io/${GITHUB_REPOSITORY#*/}): $(group "$REPO_KEY_FPR")"
+              echo "- Ubuntu PPA upload key (signs the source packages sent to Launchpad; the PPA archive itself is signed by Launchpad): $(group "$PPA_KEY_FPR")"
+            } >>notes.md
+          fi
           cat notes.md
 
       - name: Upload assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # release-plz leaves a draft release for stable tags; rc tags have none.
+          # release-plz leaves a draft release for stable tags; rc tags have none. The notes of the
+          # draft are replaced by the ones above (the changelog section plus the verification hint).
+          mark=false
+          if [ "$LATEST" = true ]; then mark=true; fi
           if gh release view "$TAG" --json isDraft --jq .isDraft >is_draft 2>/dev/null; then
             gh release upload "$TAG" dist/* --clobber
             if [ "$PRERELEASE" = true ]; then
-              gh release edit "$TAG" --draft=false --prerelease
+              gh release edit "$TAG" --draft=false --prerelease --notes-file notes.md
             else
-              gh release edit "$TAG" --draft=false --latest
+              gh release edit "$TAG" --draft=false --latest="$mark" --notes-file notes.md
             fi
           elif [ "$PRERELEASE" = true ]; then
             gh release create "$TAG" --verify-tag --prerelease --title "hirz $TAG" \
               --notes-file notes.md dist/*
           else
-            gh release create "$TAG" --verify-tag --latest --title "hirz $TAG" \
+            gh release create "$TAG" --verify-tag --latest="$mark" --title "hirz $TAG" \
               --notes-file notes.md dist/*
           fi
 
-  # Stable tags only, and only channels whose secrets exist; each channel job is skipped otherwise.
+  # Stable tags only, and only the channels named in the RELEASE_CHANNELS variable (a space
+  # separated list of ppa copr aur pkgrepo amo snap). No secret is read here; each channel job
+  # checks for its own secrets inside the "release" environment.
   channels:
     name: package channels
     needs: [meta, publish]
@@ -202,28 +274,23 @@ jobs:
     steps:
       - id: gate
         env:
-          STABLE: ${{ needs.meta.outputs.prerelease == 'false' }}
-          PPA: ${{ secrets.PPA_GPG_PRIVATE_KEY != '' && vars.PPA_NAME != '' }}
-          COPR: ${{ secrets.COPR_CONFIG != '' && vars.COPR_PROJECT != '' }}
-          AUR: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' && vars.AUR_KNOWN_HOSTS != '' }}
-          PKGREPO: ${{ secrets.REPO_GPG_PRIVATE_KEY != '' }}
-          AMO: ${{ secrets.AMO_JWT_ISSUER != '' && secrets.AMO_JWT_SECRET != '' }}
-          SNAP: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS != '' }}
+          STABLE: ${{ needs.meta.outputs.prerelease == 'false' && needs.meta.outputs.latest == 'true' }}
+          ENABLED: ${{ vars.RELEASE_CHANNELS }}
         run: |
-          for c in PPA COPR AUR PKGREPO AMO SNAP; do
+          for c in ppa copr aur pkgrepo amo snap; do
             on=false
-            if [ "$STABLE" = true ] && [ "${!c}" = true ]; then on=true; fi
-            lc=$(echo "$c" | tr '[:upper:]' '[:lower:]')
-            echo "$lc=$on" >>"$GITHUB_OUTPUT"
-            echo "$lc: $on"
+            if [ "$STABLE" = true ] && [[ " $ENABLED " == *" $c "* ]]; then on=true; fi
+            echo "$c=$on" >>"$GITHUB_OUTPUT"
+            echo "$c: $on"
           done
 
   ppa:
     name: Ubuntu PPA (Launchpad)
-    needs: [meta, channels]
+    needs: [meta, channels, publish]
     if: needs.channels.outputs.ppa == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    environment: release
     env:
       SERIES: ${{ vars.PPA_SERIES || 'resolute noble' }}
     steps:
@@ -235,6 +302,16 @@ jobs:
         with:
           name: source
           path: dist/rpm/SOURCES
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sums
+          path: sums
+
+      - name: Check the sources against the signed checksums
+        env:
+          SUMS_SHA256: ${{ needs.publish.outputs.sums-sha256 }}
+        run: scripts/ci/verify-sums.sh "$SUMS_SHA256" sums/SHA256SUMS dist/rpm/SOURCES
 
       - name: Tools
         run: |
@@ -248,6 +325,15 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
         run: scripts/ci/import-gpg-key.sh >/dev/null
 
+      - name: The key is the published PPA upload key
+        env:
+          FPR: ${{ steps.key.outputs.fingerprint }}
+        run: |
+          if [ "$FPR" != "$PPA_KEY_FPR" ]; then
+            echo "::error::the imported key $FPR is not the published PPA upload key"
+            exit 1
+          fi
+
       - name: Source packages, signed, uploaded
         env:
           FPR: ${{ steps.key.outputs.fingerprint }}
@@ -258,42 +344,64 @@ jobs:
             dput "ppa:$PPA" dist/debsrc/"$s"/hirz_*_source.changes
           done
 
+  # copr-cli comes from Fedora's signed packages in a digest-pinned image, not from PyPI, and the
+  # job has no other dependency tree next to the COPR token.
   copr:
     name: Fedora COPR
-    needs: [meta, channels]
+    needs: [meta, channels, publish]
     if: needs.channels.outputs.copr == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    environment: release
+    container:
+      # fedora:45, multi-arch index digest as of 2026-11-16 (the same image as build.yml).
+      image: docker.io/library/fedora:45@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c
     steps:
+      - name: Tools (copr-cli from Fedora's signed packages)
+        run: dnf -y -q install copr-cli git gawk findutils
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rpm-x86_64
           path: rpm
 
-      - name: copr-cli
-        run: python3 -m pip install --user --quiet copr-cli==2.9
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sums
+          path: sums
+
+      - name: Check the source RPM against the signed checksums
+        env:
+          SUMS_SHA256: ${{ needs.publish.outputs.sums-sha256 }}
+        run: scripts/ci/verify-sums.sh "$SUMS_SHA256" sums/SHA256SUMS rpm
 
       - name: Build the signed SRPM in COPR
         env:
           COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
           PROJECT: ${{ vars.COPR_PROJECT }}
         run: |
-          mkdir -p ~/.config
-          printf '%s\n' "$COPR_CONFIG" >~/.config/copr
-          chmod 0600 ~/.config/copr
+          cfg="$RUNNER_TEMP/copr.conf"
+          trap 'rm -f "$cfg"' EXIT
+          (umask 077 && printf '%s\n' "$COPR_CONFIG" >"$cfg")
           srpm=$(ls rpm/*.src.rpm)
-          ~/.local/bin/copr-cli build "$PROJECT" "$srpm"
-          rm -f ~/.config/copr
+          copr-cli --config "$cfg" build "$PROJECT" "$srpm"
 
   aur:
     name: AUR
-    needs: [meta, channels]
+    needs: [meta, channels, publish]
     if: needs.channels.outputs.aur == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment: release
     container:
       # archlinux:base, index digest as of 2026-11-16.
       image: docker.io/library/archlinux:base@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
     steps:
       - name: Tools
         run: |
@@ -309,35 +417,55 @@ jobs:
           name: source
           path: source
 
-      - name: Update and push the AUR package
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sums
+          path: sums
+
+      - name: Check the sources against the signed checksums
+        env:
+          SUMS_SHA256: ${{ needs.publish.outputs.sums-sha256 }}
+        run: scripts/ci/verify-sums.sh "$SUMS_SHA256" sums/SHA256SUMS source
+
+      # The key only exists as a root-owned file from here on: the next step, which runs makepkg as
+      # another user, has no secret in its environment. In a container job "~" is /github/home but ssh
+      # reads the passwd home, so every path is explicit.
+      - name: Write the SSH key and host key
         env:
           AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           AUR_KNOWN_HOSTS: ${{ vars.AUR_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$AUR_KEY" >"$HOME/.ssh/aur"
+          printf '%s\n' "$AUR_KNOWN_HOSTS" >"$HOME/.ssh/known_hosts"
+
+      - name: Update and push the AUR package
+        env:
           GIT_NAME: ${{ vars.AUR_GIT_NAME || 'hirz release automation' }}
           GIT_EMAIL: ${{ vars.AUR_GIT_EMAIL }}
-          VERSION: ${{ needs.meta.outputs.version }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          install -d -m 0700 ~/.ssh
-          printf '%s\n' "$AUR_KEY" >~/.ssh/aur
-          printf '%s\n' "$AUR_KNOWN_HOSTS" >~/.ssh/known_hosts
-          chmod 0600 ~/.ssh/aur ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           git clone ssh://aur@aur.archlinux.org/hirz.git aur
           git -C aur config user.name "$GIT_NAME"
           git -C aur config user.email "${GIT_EMAIL:-noreply@users.noreply.github.com}"
           BUILD_USER=builder scripts/ci/update-aur.sh aur source "$VERSION"
           git -C aur push origin HEAD:master
-          rm -f ~/.ssh/aur
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/aur" "$HOME/.ssh/known_hosts"
 
   pkgrepo:
     name: apt and dnf repository (GitHub Pages)
-    needs: [meta, channels]
+    needs: [meta, channels, publish]
     if: needs.channels.outputs.pkgrepo == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    permissions:
-      contents: write
+    environment: release
+    env:
+      HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
     container:
       # debian:trixie-slim, index digest as of 2026-11-16.
       image: docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
@@ -360,6 +488,16 @@ jobs:
           path: packages
           merge-multiple: true
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sums
+          path: sums
+
+      - name: Check the packages against the signed checksums
+        env:
+          SUMS_SHA256: ${{ needs.publish.outputs.sums-sha256 }}
+        run: scripts/ci/verify-sums.sh "$SUMS_SHA256" sums/SHA256SUMS packages
+
       - name: Import the signing key
         id: key
         env:
@@ -367,18 +505,47 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.REPO_GPG_PASSPHRASE }}
         run: scripts/ci/import-gpg-key.sh >/dev/null
 
+      - name: The key is the published archive key
+        env:
+          FPR: ${{ steps.key.outputs.fingerprint }}
+        run: |
+          if [ "$FPR" != "$REPO_KEY_FPR" ]; then
+            echo "::error::the imported key $FPR is not the published archive key"
+            exit 1
+          fi
+
+      # gh-pages is protected by a ruleset that only the release GitHub App may bypass, so the
+      # push needs the App token; GITHUB_TOKEN would be refused (docs/release.md).
+      - name: GitHub App token for gh-pages
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Update the gh-pages branch
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           FPR: ${{ steps.key.outputs.fingerprint }}
           VERSION: ${{ needs.meta.outputs.version }}
           BASE_URL: ${{ vars.PKGREPO_BASE_URL }}
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::the apt and dnf repository needs the release GitHub App (RELEASE_APP_PRIVATE_KEY in the release environment and RELEASE_APP_CLIENT_ID)"
+            exit 1
+          fi
           git config --global --add safe.directory '*'
-          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          # The token goes to git through its environment, never through a command line.
+          authgit() {
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
+              git "$@"
+          }
           url="https://github.com/$GITHUB_REPOSITORY.git"
-          if git -c http.extraheader="$auth" ls-remote --exit-code "$url" gh-pages >/dev/null; then
-            git -c http.extraheader="$auth" clone --branch gh-pages --single-branch "$url" site
+          if authgit ls-remote --exit-code "$url" gh-pages >/dev/null; then
+            authgit clone --branch gh-pages --single-branch "$url" site
           else
             git init -q -b gh-pages site
           fi
@@ -389,37 +556,55 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -q -m "hirz $VERSION"
-          git -c http.extraheader="$auth" push "$url" HEAD:gh-pages
+          authgit push "$url" HEAD:gh-pages
 
   amo:
     name: Firefox add-on (addons.mozilla.org, listed)
-    needs: [meta, channels]
+    needs: [meta, channels, publish]
     if: needs.channels.outputs.amo == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          node-version: 24
+          name: source
+          path: source
 
-      - name: Sign and submit
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sums
+          path: sums
+
+      - name: Check the extension archive against the signed checksums
         env:
-          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
-          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          SUMS_SHA256: ${{ needs.publish.outputs.sums-sha256 }}
         run: |
-          npx --yes web-ext@10.8.0 sign \
-            --channel=listed \
-            --source-dir=extension \
-            --artifacts-dir=dist/amo \
-            --amo-metadata=packaging/amo/metadata.json \
-            --approval-timeout=0
+          mkdir xpi
+          cp source/hirz-*.xpi xpi/
+          scripts/ci/verify-sums.sh "$SUMS_SHA256" sums/SHA256SUMS xpi
 
-  snap:
-    name: snap (edge, ${{ matrix.arch }})
+      # Standard library Python only (scripts/amo-submit.py): no npm or PyPI tree runs next to the
+      # AMO credentials. The attested XPI of this release is what gets submitted.
+      - name: Submit the listed version
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          python3 -I scripts/amo-submit.py --xpi "xpi/hirz-$VERSION.xpi" \
+            --metadata packaging/amo/metadata.json --version "$VERSION"
+
+  # The snap is built in a job that has no secret, no environment and no OIDC permission, because
+  # snapcraft runs the dependencies' build scripts as root there. A second job, which runs no
+  # project code, attests the two files; the job that holds the store credentials only verifies
+  # that attestation and uploads.
+  snap-pack:
+    name: snap build (${{ matrix.arch }})
     needs: [meta, channels]
     if: needs.channels.outputs.snap == 'true'
     strategy:
@@ -432,13 +617,22 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SNAPCRAFT_VERSION: "8.14.5"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: snapcraft
-        run: sudo snap install snapcraft --classic --channel=8.x/stable
+        run: |
+          sudo snap install snapcraft --classic --channel=8.x/stable
+          snapcraft --version | grep -qwF "$SNAPCRAFT_VERSION" || {
+            echo "::error::snapcraft is not $SNAPCRAFT_VERSION: review the new version, then change SNAPCRAFT_VERSION"
+            exit 1
+          }
 
       - name: Pack (core24 base, on the Ubuntu 24.04 runner itself)
         env:
@@ -450,9 +644,101 @@ jobs:
           cp -r packaging/snap/hooks snap/
           sudo snapcraft pack --destructive-mode --output "hirz_${VERSION}_${ARCH}.snap"
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: snap-${{ matrix.arch }}
+          path: hirz_*.snap
+          retention-days: 7
+          if-no-files-found: error
+
+  # No checkout and no build tool: the job downloads the pack job's output, refuses anything but
+  # the two expected file names, and attests exactly those two files.
+  snap-attest:
+    name: snap attestation
+    needs: [meta, channels, snap-pack]
+    if: needs.channels.outputs.snap == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: snap-*
+          path: snaps
+          merge-multiple: true
+
+      - name: Only the two snap files are there
+        run: |
+          want=$(printf '%s\n' "hirz_${VERSION}_amd64.snap" "hirz_${VERSION}_arm64.snap")
+          have=$(find snaps -mindepth 1 -printf '%P\n' | sort)
+          if [ "$have" != "$want" ]; then
+            echo "::error::unexpected files in the snap artifacts:"
+            echo "$have"
+            exit 1
+          fi
+          for f in snaps/*; do
+            if [ ! -f "$f" ] || [ -L "$f" ]; then
+              echo "::error::$f is not a regular file"
+              exit 1
+            fi
+          done
+
+      - name: GitHub artifact attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            snaps/hirz_${{ needs.meta.outputs.version }}_amd64.snap
+            snaps/hirz_${{ needs.meta.outputs.version }}_arm64.snap
+
+  snap:
+    name: snap (edge)
+    needs: [meta, channels, snap-attest]
+    if: needs.channels.outputs.snap == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    env:
+      SNAPCRAFT_VERSION: "8.14.5"
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: snap-*
+          path: snaps
+          merge-multiple: true
+
+      - name: Check the attestation of each snap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          want=$(printf '%s\n' "hirz_${VERSION}_amd64.snap" "hirz_${VERSION}_arm64.snap")
+          have=$(find snaps -mindepth 1 -printf '%P\n' | sort)
+          [ "$have" = "$want" ] || { echo "::error::unexpected files in the snap artifacts: $have"; exit 1; }
+          for f in snaps/*.snap; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$TAG"
+          done
+
+      - name: snapcraft
+        run: |
+          sudo snap install snapcraft --classic --channel=8.x/stable
+          snapcraft --version | grep -qwF "$SNAPCRAFT_VERSION" || {
+            echo "::error::snapcraft is not $SNAPCRAFT_VERSION: review the new version, then change SNAPCRAFT_VERSION"
+            exit 1
+          }
+
       - name: Upload to the edge channel
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-          ARCH: ${{ matrix.arch }}
-          VERSION: ${{ needs.meta.outputs.version }}
-        run: snapcraft upload --release=edge "hirz_${VERSION}_${ARCH}.snap"
+        run: |
+          for f in snaps/*.snap; do
+            snapcraft upload --release=edge "$f"
+          done

@@ -5,7 +5,7 @@ use crate::env::{Env, System};
 use crate::error::{CliError, CliResult, Exit};
 use crate::prompt::Prompter;
 use hirz_crypto::kdf::Argon2Params;
-use hirz_vault::Vault;
+use hirz_vault::{Vault, VaultError};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -48,7 +48,7 @@ impl Ctx<'_> {
     pub fn say_json(&mut self, value: &serde_json::Value) -> CliResult {
         let text =
             serde_json::to_string_pretty(value).map_err(|e| CliError::failed(e.to_string()))?;
-        self.say(&text)
+        self.say(&crate::ui::escape_json_controls(&text))
     }
 
     pub fn vault_dir(&self) -> CliResult<PathBuf> {
@@ -71,11 +71,21 @@ impl Ctx<'_> {
         Ok((vault, dir))
     }
 
-    /// Like [`Ctx::open_vault`], but refuses when another device removed this one.
+    /// Like [`Ctx::open_vault`], but refuses when another device removed this one or a newer
+    /// key generation exists that this computer holds no key for.
     pub fn open_active_vault(&self) -> CliResult<(Vault, PathBuf)> {
         let (vault, dir) = self.open_vault()?;
-        if vault.report().this_device_removed {
+        let report = vault.report();
+        let removed_here = matches!(vault.ensure_active(), Err(VaultError::Removed));
+        if (removed_here || report.locked_out) && (report.fork_detected || report.rotation_conflict)
+        {
+            return Err(disputed_removal(&self.program));
+        }
+        if removed_here {
             return Err(removed(&self.program));
+        }
+        if report.locked_out {
+            return Err(locked_out(&self.program));
         }
         Ok((vault, dir))
     }
@@ -89,6 +99,27 @@ pub fn removed(program: &str) -> CliError {
         "{REMOVED}\nTo delete this computer's hirz keys, run `{program} forget-local`. If the \
          removal was a mistake, run that and then join again with `{program} join --vault DIR \
          --request`."
+    ))
+}
+
+/// Removal reported together with a fork or rotation conflict: the removal may be forged, so
+/// deleting this computer's keys is not recommended.
+pub fn disputed_removal(program: &str) -> CliError {
+    CliError::failed(format!(
+        "The vault folder says this computer can no longer use the vault, but it also holds \
+         conflicting key changes, so that may not be true. Do not run `{program} forget-local` \
+         yet. Run `{program} status` and `{program} repair` to see what the folder holds, and \
+         check it on a device you trust; if a device you removed still has access to the folder, \
+         stop sharing the folder with it and run `{program} remove-device` for it again."
+    ))
+}
+
+pub fn locked_out(program: &str) -> CliError {
+    CliError::failed(format!(
+        "This computer cannot read the newest version of your hirz vault: another device \
+         changed the vault key and this computer has not received it. If your sync tool is \
+         still copying files, wait and try again. If this computer was removed from the \
+         vault, run `{program} forget-local`; `{program} status` shows more."
     ))
 }
 
@@ -121,10 +152,11 @@ pub fn run(inv: Invocation, ctx: &mut Ctx<'_>) -> CliResult<Exit> {
         Command::DevicesDeny { request } => crate::cmd_pair::deny(ctx, &request),
         Command::RemoveDevice { prefix, yes } => crate::cmd_vault::remove_device(ctx, &prefix, yes),
         Command::ForgetLocal => crate::cmd_vault::forget_local(ctx),
+        Command::Repair { action, yes } => crate::cmd_repair::repair(ctx, action, yes),
         Command::BackupConfirm { yes } => crate::cmd_vault::backup_confirm(ctx, yes),
         Command::Pin(action) => crate::cmd_pin::pin(ctx, action),
         Command::Export { file, plain } => crate::cmd_cxf::export(ctx, &file, plain),
-        Command::Import { format, file } => crate::cmd_cxf::import(ctx, format, &file),
+        Command::Import { format, file, yes } => crate::cmd_cxf::import(ctx, format, &file, yes),
         Command::SetupFirefox { nmh_path, force } => {
             crate::cmd_setup::firefox(ctx, nmh_path, force)
         }
@@ -153,6 +185,7 @@ Devices and backups:
   devices approve      Let a new device join (compare four words first)
   devices deny ID      Refuse a device that asked to join
   remove-device ID     Stop a lost or old device from reading new passkeys
+  repair               Show and settle a vault folder that was changed behind your back
   forget-local         Delete this computer's hirz keys (after it was removed)
   backup confirm       Tell hirz that your passkeys are backed up
   export --cxf FILE    Save all passkeys to a file (encrypted by default)
@@ -179,8 +212,9 @@ Creates a new, empty vault and sets up this computer to use it.
                       (default: the computer's host name)
   --yes-i-saved-it    Do not ask to retype words of the recovery phrase (scripts)
 
-hirz shows a 24-word recovery phrase once. Write it down: it is the only way to get
-your passkeys back if you lose every device, and you need it to add a computer.
+hirz shows a 24-word recovery phrase once, on the terminal's alternate screen so it
+does not stay in scrollback. Write it down: it is the only way to get your passkeys
+back if you lose every device, and you need it to add a computer.
 ";
 
 const HELP_JOIN: &str = "\
@@ -240,8 +274,9 @@ Lists the devices (computers) that use this vault.
 
   approve    Shows the devices waiting to join (after `hirz join --request` on them)
              and four words for the one you pick. Approve only if the new device shows
-             exactly the same words, then confirm with your password, fingerprint or
-             hirz PIN. REQUEST (the start of its id) picks one directly.
+             exactly the same words. Only then hirz shows the name that device gave
+             itself, and you confirm with your password, fingerprint or hirz PIN.
+             REQUEST (the start of its id) picks one directly.
   deny       Deletes the request of a device waiting to join.
 ";
 
@@ -254,6 +289,27 @@ lists the sites whose passkeys you should replace. You confirm in a hirz window 
 your password, fingerprint or hirz PIN.
 
   --yes    Do not ask the yes/no question in the terminal (the window still asks)
+";
+
+const HELP_REPAIR: &str = "\
+Usage: hirz repair
+       hirz repair --discard NAME [--yes]
+       hirz repair --accept-fork [--yes]
+
+Without options, shows whether the vault folder reports a fork (key changes this computer
+followed are gone or were rewritten) or a rotation conflict (two devices removed each other),
+and lists the key changes this computer does not follow, by the folder name that --discard
+takes. Passkeys keep working in all these cases, but nothing new is saved until it is settled.
+
+  --discard NAME   Delete that key change and everything built on it, after you confirm.
+                   Use it for a key change a device you do not trust made.
+  --accept-fork    Follow the vault folder as it is now, going on from the newest key change
+                   this computer followed that is still there; removed devices stay removed.
+                   Only after you restored the folder from your sync tool's history if you
+                   could, and stopped sharing it with every device you do not trust.
+  --yes            Do not ask the yes/no question in the terminal (the window still asks)
+
+Both changes need your password, fingerprint or hirz PIN in a hirz window.
 ";
 
 const HELP_FORGET: &str = "\
@@ -273,7 +329,8 @@ The hirz PIN is one way to approve passkey requests (see docs/approval.md).
   set       Choose a PIN (at least 4 characters)
   change    Change the PIN (asks for the current one)
   reset     Remove the PIN, for example after too many wrong tries
-            (asks for the recovery phrase when a vault is set up)
+            (asks for the recovery phrase when a vault is set up, and is
+            refused on a computer that was removed from the vault)
   status    Show whether a PIN is set and how many wrong tries were made
 ";
 
@@ -284,18 +341,24 @@ Saves every passkey to FILE in the FIDO Credential Exchange Format (CXF 1.0). By
 default the file is encrypted with a passphrase you choose. Keep it somewhere other
 than this computer, for example on a USB drive.
 
+Like approving or removing a device, an export needs your password, fingerprint or
+hirz PIN in a hirz window, and it is refused on a computer that was removed from the
+vault.
+
   --cxf FILE    File to create (it must not exist yet)
   --plain       Write an unencrypted CXF file, for importing into another passkey
                 manager. Anyone who gets the file can use your passkeys.
 ";
 
 const HELP_IMPORT: &str = "\
-Usage: hirz import --cxf FILE | --bitwarden FILE | --keepassxc PATH
+Usage: hirz import --cxf FILE | --bitwarden FILE | --keepassxc PATH [--yes]
 
-Adds passkeys from an export file. Existing passkeys are never replaced. Passkeys hirz
-cannot use are skipped and listed. Passwords, notes and everything else in the file
-are ignored.
+Adds passkeys from an export file. hirz first lists the sites and accounts it would
+add and asks before it adds them: an imported passkey signs in to the account it
+names. Existing passkeys are never replaced. Passkeys hirz cannot use are skipped and
+listed. Passwords, notes and everything else in the file are ignored.
 
+  --yes               Add the passkeys without asking (the list is still shown)
   --cxf FILE          An encrypted hirz export or a plain CXF export from another
                       passkey manager
   --bitwarden FILE    A Bitwarden .json export, unencrypted or password protected
@@ -321,7 +384,11 @@ Installs the file that lets the hirz Firefox extension start hirz-nmh, for your 
 only (~/.mozilla/native-messaging-hosts/hirz.json). System folders are never touched.
 
   --nmh-path PATH    The hirz-nmh program (default: next to this hirz program)
-  --force            Replace an existing file that points elsewhere
+  --force            Replace an existing file that points elsewhere, and write it even
+                     when a package already installed the system-wide manifest (which
+                     the new file would override)
+
+Installed from a package? Do not run this: the package already connected Firefox.
 ";
 
 pub fn help(topic: Option<&str>) -> CliResult<&'static str> {
@@ -335,6 +402,7 @@ pub fn help(topic: Option<&str>) -> CliResult<&'static str> {
         Some("devices") => HELP_DEVICES,
         Some("remove-device") => HELP_REMOVE,
         Some("forget-local") => HELP_FORGET,
+        Some("repair") => HELP_REPAIR,
         Some("pin") => HELP_PIN,
         Some("export") => HELP_EXPORT,
         Some("import") => HELP_IMPORT,

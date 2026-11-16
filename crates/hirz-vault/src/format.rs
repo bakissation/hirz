@@ -3,8 +3,10 @@
 use crate::DeviceId;
 use crate::codec::{self, Fields, Reader, Writer, aad, hex, unhex};
 use crate::error::VaultError;
+use crate::record::{DeviceAnnouncement, EventId, device_id_for};
 use hirz_crypto::Zeroizing;
 use hirz_crypto::{aead, x25519};
+use std::collections::BTreeMap;
 
 pub(crate) const MAGIC: [u8; 4] = *b"HIRZ";
 pub(crate) const FORMAT_VERSION: u8 = 1;
@@ -20,6 +22,10 @@ pub(crate) const RECORD_SUFFIX: &str = ".rec";
 pub(crate) const STATE_DEVICE: &str = "device";
 pub(crate) const STATE_KEYRING: &str = "keyring";
 pub(crate) const STATE_COUNTER: &str = "counter";
+pub(crate) const STATE_LINE: &str = "line";
+
+/// Cap on key generations a device keeps and a pairing approval carries.
+pub(crate) const MAX_GENERATIONS: usize = 10_000;
 
 pub(crate) type VaultKey = Zeroizing<[u8; 32]>;
 
@@ -31,12 +37,12 @@ pub(crate) enum FileType {
     GenInfo = 3,
     DeviceSlot = 4,
     RecoverySlot = 5,
-    Backup = 6,
     PairingRequest = 7,
     PairingApproval = 8,
     LocalDevice = 0x10,
     LocalKeyring = 0x11,
     LocalCounter = 0x12,
+    LocalLine = 0x13,
 }
 
 pub(crate) fn prefix(t: FileType) -> [u8; 6] {
@@ -82,11 +88,12 @@ impl GenId {
         Ok(GenId { number, rotator })
     }
 
-    pub(crate) fn dir_name(&self) -> String {
+    /// The directory name under `keys/`, as `ScanReport::rejected` entries are shown to users.
+    pub fn dir_name(&self) -> String {
         format!("{:010}-{}", self.number, hex(&self.rotator))
     }
 
-    pub(crate) fn parse_dir(name: &str) -> Option<GenId> {
+    pub fn parse_dir(name: &str) -> Option<GenId> {
         let (num, dev) = name.split_once('-')?;
         if num.len() != 10 || !num.bytes().all(|c| c.is_ascii_digit()) {
             return None;
@@ -188,28 +195,146 @@ pub(crate) fn genesis_tag(
     gen_id: &GenId,
     commitment: &[u8; 32],
     recovery_pub: &[u8; 32],
+    recovery_signing_pub: &[u8; 32],
 ) -> [u8; 32] {
     hirz_crypto::hmac_sha256(
         auth_key,
         &aad(
-            "hirz genesis v1",
-            &[vault_id, &gen_id.bytes(), commitment, recovery_pub],
+            "hirz genesis v2",
+            &[
+                vault_id,
+                &gen_id.bytes(),
+                commitment,
+                recovery_pub,
+                recovery_signing_pub,
+            ],
         ),
     )
+}
+
+/// A device that holds a slot in a generation, as listed and signed by its rotator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Member {
+    pub(crate) device_id: DeviceId,
+    pub(crate) signing_public: [u8; 32],
+    pub(crate) x25519_public: [u8; 32],
+}
+
+const MEMBER_LEN: usize = 80;
+pub(crate) const MAX_MEMBERS: usize = 512;
+/// Announcements that prove a rotator's membership when the parent does not list it.
+pub(crate) const MAX_ENDORSEMENT_CHAIN: usize = 32;
+
+/// A device removal and why (docs/vault-format.md, 4.1 and 9.5): the `device removed` event
+/// that caused it, and the cutoff, every event of the removed device that the remover held when
+/// it removed it. Events of a removed device count only when every cutoff holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Removal {
+    pub(crate) device: DeviceId,
+    pub(crate) cause_author: DeviceId,
+    pub(crate) cause: EventId,
+    /// Sorted, without duplicates.
+    pub(crate) cutoff: Vec<EventId>,
+}
+
+/// Identifies one removal decision; copies made when other devices apply it keep it.
+pub(crate) type RemovalKey = (DeviceId, DeviceId, EventId);
+
+impl Removal {
+    pub(crate) fn key(&self) -> RemovalKey {
+        (self.device, self.cause_author, self.cause)
+    }
+}
+
+/// Removal entries and cutoff ids one file may hold.
+pub(crate) const MAX_REMOVALS: usize = 1024;
+pub(crate) const MAX_CUTOFF_IDS: usize = 50_000;
+const REMOVAL_CHUNK_TAGS: core::ops::RangeInclusive<u8> = 0x20..=0x3f;
+
+pub(crate) fn encode_removals(list: &[Removal]) -> Result<Vec<u8>, VaultError> {
+    let ids: usize = list.iter().map(|r| r.cutoff.len()).sum();
+    if list.len() > MAX_REMOVALS || ids > MAX_CUTOFF_IDS {
+        return Err(VaultError::Encode);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        &u32::try_from(list.len())
+            .map_err(|_| VaultError::Encode)?
+            .to_be_bytes(),
+    );
+    for r in list {
+        if !r.cutoff.windows(2).all(|w| matches!(w, [a, b] if a < b)) {
+            return Err(VaultError::Encode);
+        }
+        out.extend_from_slice(&r.device);
+        out.extend_from_slice(&r.cause_author);
+        out.extend_from_slice(&r.cause);
+        out.extend_from_slice(
+            &u32::try_from(r.cutoff.len())
+                .map_err(|_| VaultError::Encode)?
+                .to_be_bytes(),
+        );
+        for id in &r.cutoff {
+            out.extend_from_slice(id);
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn decode_removals(data: &[u8]) -> Result<Vec<Removal>, VaultError> {
+    let bad = || VaultError::Corrupt("removal list");
+    let mut r = Reader::new(data);
+    let n = usize::try_from(r.u32()?).map_err(|_| bad())?;
+    if n > MAX_REMOVALS {
+        return Err(bad());
+    }
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for _ in 0..n {
+        let device = r.array::<16>()?;
+        let cause_author = r.array::<16>()?;
+        let cause = r.array::<16>()?;
+        let m = usize::try_from(r.u32()?).map_err(|_| bad())?;
+        total = total.saturating_add(m);
+        if total > MAX_CUTOFF_IDS || r.rest().len() < m.saturating_mul(16) {
+            return Err(bad());
+        }
+        let mut cutoff: Vec<EventId> = Vec::with_capacity(m);
+        for _ in 0..m {
+            let id = r.array::<16>()?;
+            if cutoff.last().is_some_and(|l| *l >= id) {
+                return Err(bad());
+            }
+            cutoff.push(id);
+        }
+        out.push(Removal {
+            device,
+            cause_author,
+            cause,
+            cutoff,
+        });
+    }
+    r.finish()?;
+    Ok(out)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GenInfo {
     pub(crate) commitment: [u8; 32],
     pub(crate) recovery_pub: [u8; 32],
-    pub(crate) removed: Vec<DeviceId>,
+    pub(crate) removed: Vec<Removal>,
+    /// Informational only: chosen by the rotator, never used for timing decisions.
     pub(crate) created_at: u64,
     pub(crate) reemit_first: u64,
     pub(crate) reemit_count: u64,
     pub(crate) recovery_tag: Option<[u8; 32]>,
+    pub(crate) recovery_signing_pub: [u8; 32],
+    /// Sorted by device id; includes the rotator.
+    pub(crate) members: Vec<Member>,
+    pub(crate) chain: Vec<DeviceAnnouncement>,
 }
 
-const MAX_REMOVED: usize = 1024;
+const GEN_INFO_VERSION: u8 = 3;
 
 fn gen_info_aad(vault_id: &[u8; 16], gen_id: &GenId, parent: Option<&GenId>) -> Vec<u8> {
     let parent_bytes = parent.map(GenId::bytes).unwrap_or([0u8; 20]);
@@ -219,30 +344,87 @@ fn gen_info_aad(vault_id: &[u8; 16], gen_id: &GenId, parent: Option<&GenId>) -> 
     )
 }
 
+fn gen_info_signed_message(
+    vault_id: &[u8; 16],
+    gen_id: &GenId,
+    parent: Option<&GenId>,
+    body: &[u8],
+) -> Vec<u8> {
+    let parent_bytes = parent.map(GenId::bytes).unwrap_or([0u8; 20]);
+    aad(
+        "hirz gen info signature v1",
+        &[vault_id, &gen_id.bytes(), &parent_bytes, body],
+    )
+}
+
 impl GenInfo {
-    /// Sealed under the parent generation's key, or under its own key for the genesis.
+    pub(crate) fn member(&self, id: &DeviceId) -> Option<&Member> {
+        self.members.iter().find(|m| m.device_id == *id)
+    }
+}
+
+impl GenInfo {
+    /// Sealed under the parent generation's key, or under its own key for the genesis, and
+    /// signed inside the ciphertext by the rotator (`signer_seed`).
     pub(crate) fn seal(
         &self,
         key: &[u8; 32],
         vault_id: &[u8; 16],
         gen_id: &GenId,
         parent: Option<&GenId>,
+        signer_seed: &[u8; 32],
     ) -> Result<Vec<u8>, VaultError> {
-        if self.removed.len() > MAX_REMOVED {
+        if self.members.len() > MAX_MEMBERS
+            || self.chain.len() > MAX_ENDORSEMENT_CHAIN
+            || !self
+                .members
+                .windows(2)
+                .all(|w| matches!(w, [a, b] if a.device_id < b.device_id))
+        {
             return Err(VaultError::Encode);
         }
-        let mut w = Writer::new(1);
+        let mut w = Writer::new(GEN_INFO_VERSION);
         w.field(0x01, &self.commitment)?;
         w.field(0x02, &self.recovery_pub)?;
-        let removed: Vec<u8> = self.removed.iter().flatten().copied().collect();
-        w.field(0x03, &removed)?;
         w.u64_field(0x04, self.created_at)?;
         w.u64_field(0x05, self.reemit_first)?;
         w.u64_field(0x06, self.reemit_count)?;
         if let Some(tag) = &self.recovery_tag {
             w.field(0x07, tag)?;
         }
-        let body = w.finish();
+        w.field(0x08, &self.recovery_signing_pub)?;
+        let mut members = Vec::with_capacity(self.members.len().saturating_mul(MEMBER_LEN));
+        for m in &self.members {
+            members.extend_from_slice(&m.device_id);
+            members.extend_from_slice(&m.signing_public);
+            members.extend_from_slice(&m.x25519_public);
+        }
+        w.field(0x09, &members)?;
+        if !self.chain.is_empty() {
+            let mut chain = Vec::new();
+            for a in &self.chain {
+                let enc = a.encode()?;
+                let len = u16::try_from(enc.len()).map_err(|_| VaultError::Encode)?;
+                chain.extend_from_slice(&len.to_be_bytes());
+                chain.extend_from_slice(&enc);
+            }
+            w.field(0x0a, &chain)?;
+        }
+        if !self.removed.is_empty() {
+            let blob = encode_removals(&self.removed)?;
+            let mut tags = REMOVAL_CHUNK_TAGS;
+            for chunk in blob.chunks(usize::from(u16::MAX)) {
+                w.field(tags.next().ok_or(VaultError::Encode)?, chunk)?;
+            }
+        }
+        let mut body = w.finish();
+        let sig = hirz_crypto::ed25519::sign_with_seed(
+            signer_seed,
+            &gen_info_signed_message(vault_id, gen_id, parent, &body),
+        )?;
+        body.push(0x7f);
+        body.extend_from_slice(&64u16.to_be_bytes());
+        body.extend_from_slice(&sig);
         let sealed = aead::seal(key, &gen_info_aad(vault_id, gen_id, parent), &body)?;
         let mut out = prefix(FileType::GenInfo).to_vec();
         match parent {
@@ -277,6 +459,17 @@ impl GenInfo {
         vault_id: &[u8; 16],
         gen_id: &GenId,
     ) -> Result<GenInfo, VaultError> {
+        GenInfo::open_hashed(data, key, vault_id, gen_id).map(|(info, _)| info)
+    }
+
+    /// Also returns SHA-256 of the authenticated plaintext (signed body and signature), which
+    /// stays the same when a key holder re-encrypts the same body under a new nonce.
+    pub(crate) fn open_hashed(
+        data: &[u8],
+        key: &[u8; 32],
+        vault_id: &[u8; 16],
+        gen_id: &GenId,
+    ) -> Result<(GenInfo, [u8; 32]), VaultError> {
         let parent = GenInfo::parent_of(data)?;
         let mut r = Reader::new(strip_prefix(data, FileType::GenInfo)?);
         r.take(21)?;
@@ -286,47 +479,113 @@ impl GenInfo {
             r.rest(),
         )
         .map_err(|_| VaultError::Corrupt("gen.info authentication"))?;
-        let mut f = Fields::new(&body, 1)?;
+        let mut f = Fields::new(&body, GEN_INFO_VERSION)?;
         let mut commitment = None;
         let mut recovery_pub = None;
-        let mut removed = None;
+        let mut removed_blob: Vec<u8> = Vec::new();
         let mut created_at = None;
         let mut reemit_first = None;
         let mut reemit_count = None;
         let mut recovery_tag = None;
-        while let Some((tag, v)) = f.next_field()? {
+        let mut recovery_signing_pub = None;
+        let mut members = None;
+        let mut chain = Vec::new();
+        let mut signature = None;
+        loop {
+            let before = f.remaining();
+            let Some((tag, v)) = f.next_field()? else {
+                break;
+            };
             match tag {
                 0x01 => commitment = Some(codec::fixed::<32>(v)?),
                 0x02 => recovery_pub = Some(codec::fixed::<32>(v)?),
-                0x03 => {
-                    if v.len() % 16 != 0 || v.len() / 16 > MAX_REMOVED {
-                        return Err(VaultError::Corrupt("removed list"));
-                    }
-                    let mut list = Vec::new();
-                    for c in v.as_chunks::<16>().0 {
-                        list.push(codec::fixed::<16>(c)?);
-                    }
-                    removed = Some(list);
-                }
                 0x04 => created_at = Some(codec::u64_value(v)?),
                 0x05 => reemit_first = Some(codec::u64_value(v)?),
                 0x06 => reemit_count = Some(codec::u64_value(v)?),
                 0x07 => recovery_tag = Some(codec::fixed::<32>(v)?),
+                0x08 => recovery_signing_pub = Some(codec::fixed::<32>(v)?),
+                0x09 => members = Some(decode_members(v)?),
+                0x0a => chain = decode_chain(v)?,
+                t if REMOVAL_CHUNK_TAGS.contains(&t) => removed_blob.extend_from_slice(v),
+                0x7f => {
+                    let sig = codec::fixed::<64>(v)?;
+                    if f.remaining() != 0 {
+                        return Err(VaultError::Corrupt("data after gen.info signature"));
+                    }
+                    let signed = body
+                        .get(..body.len().saturating_sub(before))
+                        .ok_or(VaultError::Corrupt("gen.info signature"))?;
+                    signature = Some((sig, signed.to_vec()));
+                }
                 t if t >= 0x40 => {}
                 _ => return Err(VaultError::Corrupt("gen.info field")),
             }
         }
         let missing = VaultError::Corrupt("gen.info missing field");
-        Ok(GenInfo {
+        let info = GenInfo {
             commitment: commitment.ok_or(missing.clone())?,
             recovery_pub: recovery_pub.ok_or(missing.clone())?,
-            removed: removed.ok_or(missing.clone())?,
+            removed: if removed_blob.is_empty() {
+                Vec::new()
+            } else {
+                decode_removals(&removed_blob)?
+            },
             created_at: created_at.ok_or(missing.clone())?,
             reemit_first: reemit_first.ok_or(missing.clone())?,
-            reemit_count: reemit_count.ok_or(missing)?,
+            reemit_count: reemit_count.ok_or(missing.clone())?,
             recovery_tag,
-        })
+            recovery_signing_pub: recovery_signing_pub.ok_or(missing.clone())?,
+            members: members.ok_or(missing.clone())?,
+            chain,
+        };
+        let (sig, signed) = signature.ok_or(missing)?;
+        let rotator = info
+            .member(&gen_id.rotator)
+            .ok_or(VaultError::Corrupt("gen.info rotator is not a member"))?;
+        hirz_crypto::ed25519::verify(
+            &rotator.signing_public,
+            &gen_info_signed_message(vault_id, gen_id, parent.as_ref(), &signed),
+            &sig,
+        )
+        .map_err(|_| VaultError::Corrupt("gen.info signature"))?;
+        let hash = hirz_crypto::sha256(&body);
+        Ok((info, hash))
     }
+}
+
+fn decode_members(v: &[u8]) -> Result<Vec<Member>, VaultError> {
+    if !v.len().is_multiple_of(MEMBER_LEN) || v.len() / MEMBER_LEN > MAX_MEMBERS {
+        return Err(VaultError::Corrupt("member list"));
+    }
+    let mut out: Vec<Member> = Vec::new();
+    for c in v.as_chunks::<MEMBER_LEN>().0 {
+        let mut r = Reader::new(c);
+        let m = Member {
+            device_id: r.array::<16>()?,
+            signing_public: r.array::<32>()?,
+            x25519_public: r.array::<32>()?,
+        };
+        if device_id_for(&m.signing_public) != m.device_id
+            || out.last().is_some_and(|p| p.device_id >= m.device_id)
+        {
+            return Err(VaultError::Corrupt("member list"));
+        }
+        out.push(m);
+    }
+    Ok(out)
+}
+
+fn decode_chain(v: &[u8]) -> Result<Vec<DeviceAnnouncement>, VaultError> {
+    let mut r = Reader::new(v);
+    let mut out = Vec::new();
+    while !r.rest().is_empty() {
+        if out.len() >= MAX_ENDORSEMENT_CHAIN {
+            return Err(VaultError::Corrupt("endorsement chain"));
+        }
+        let len = usize::from(r.u16()?);
+        out.push(DeviceAnnouncement::decode(r.take(len)?)?);
+    }
+    Ok(out)
 }
 
 fn device_slot_aad(vault_id: &[u8; 16], gen_id: &GenId, device: &DeviceId) -> Vec<u8> {
@@ -514,6 +773,8 @@ pub(crate) struct LocalDevice {
     pub(crate) secret: VaultKey,
     pub(crate) x25519_private: VaultKey,
     pub(crate) name: String,
+    /// Ed25519 seed; the device id is derived from its public key.
+    pub(crate) signing_seed: VaultKey,
 }
 
 impl core::fmt::Debug for LocalDevice {
@@ -533,6 +794,7 @@ impl LocalDevice {
         w.field(0x03, self.secret.as_slice())?;
         w.field(0x04, self.x25519_private.as_slice())?;
         w.field(0x05, self.name.as_bytes())?;
+        w.field(0x06, self.signing_seed.as_slice())?;
         let body = w.finish();
         let mut out = Zeroizing::new(Vec::with_capacity(body.len().saturating_add(6)));
         out.extend_from_slice(&prefix(FileType::LocalDevice));
@@ -553,13 +815,28 @@ impl LocalDevice {
         let secret = Zeroizing::new(codec::fixed::<32>(get(0x03)?)?);
         let x25519_private = Zeroizing::new(codec::fixed::<32>(get(0x04)?)?);
         let name = codec::string_value(get(0x05)?, crate::record::MAX_DEVICE_NAME_LEN)?;
-        Ok(LocalDevice {
+        let signing_seed = Zeroizing::new(codec::fixed::<32>(get(0x06)?)?);
+        if f.next_field()?.is_some() {
+            return Err(VaultError::Corrupt("device state"));
+        }
+        let dev = LocalDevice {
             vault_id,
             device_id,
             secret,
             x25519_private,
             name,
-        })
+            signing_seed,
+        };
+        if device_id_for(&dev.signing_public()?) != dev.device_id {
+            return Err(VaultError::Corrupt(
+                "device id does not match its signing key",
+            ));
+        }
+        Ok(dev)
+    }
+
+    pub(crate) fn signing_public(&self) -> Result<[u8; 32], VaultError> {
+        Ok(hirz_crypto::ed25519::public_from_seed(&self.signing_seed)?)
     }
 }
 
@@ -580,6 +857,7 @@ impl core::fmt::Debug for KeyringEntry {
 }
 
 const KEYRING_ENTRY_LEN: usize = 53;
+const KEYRING_VERSION: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Keyring {
@@ -597,18 +875,24 @@ impl Keyring {
     }
 
     pub(crate) fn seal(&self, dev: &LocalDevice) -> Result<Vec<u8>, VaultError> {
-        let mut entries = Zeroizing::new(Vec::with_capacity(
-            self.entries.len().saturating_mul(KEYRING_ENTRY_LEN),
-        ));
-        for e in &self.entries {
-            entries.extend_from_slice(&e.gen_id.bytes());
-            entries.extend_from_slice(e.key.as_slice());
-            entries.push(u8::from(e.root));
+        if self.entries.len() > MAX_GENERATIONS {
+            return Err(VaultError::Encode);
         }
-        let mut w = Writer::new(1);
-        w.field(0x01, &self.recovery_pub)?;
-        w.field(0x02, &entries)?;
-        let body = w.finish();
+        let count = u32::try_from(self.entries.len()).map_err(|_| VaultError::Encode)?;
+        let mut body = Zeroizing::new(Vec::with_capacity(
+            self.entries
+                .len()
+                .saturating_mul(KEYRING_ENTRY_LEN)
+                .saturating_add(37),
+        ));
+        body.push(KEYRING_VERSION);
+        body.extend_from_slice(&self.recovery_pub);
+        body.extend_from_slice(&count.to_be_bytes());
+        for e in &self.entries {
+            body.extend_from_slice(&e.gen_id.bytes());
+            body.extend_from_slice(e.key.as_slice());
+            body.push(u8::from(e.root));
+        }
         let sealed = aead::seal(
             &dev.secret,
             &keyring_aad(&dev.vault_id, &dev.device_id),
@@ -626,16 +910,14 @@ impl Keyring {
             strip_prefix(data, FileType::LocalKeyring)?,
         )
         .map_err(|_| VaultError::Corrupt("keyring authentication"))?;
-        let mut f = Fields::new(&body, 1)?;
-        let recovery_pub = match f.next_field()? {
-            Some((0x01, v)) => codec::fixed::<32>(v)?,
-            _ => return Err(VaultError::Corrupt("keyring")),
-        };
-        let raw = match f.next_field()? {
-            Some((0x02, v)) => v,
-            _ => return Err(VaultError::Corrupt("keyring")),
-        };
-        if raw.len() % KEYRING_ENTRY_LEN != 0 {
+        let mut r = Reader::new(&body);
+        if r.u8()? != KEYRING_VERSION {
+            return Err(VaultError::UnsupportedVersion);
+        }
+        let recovery_pub = r.array::<32>()?;
+        let count = usize::try_from(r.u32()?).map_err(|_| VaultError::Corrupt("keyring"))?;
+        let raw = r.rest();
+        if count > MAX_GENERATIONS || raw.len() != count.saturating_mul(KEYRING_ENTRY_LEN) {
             return Err(VaultError::Corrupt("keyring entries"));
         }
         let mut entries = Vec::new();
@@ -677,5 +959,80 @@ impl Counter {
         let max_seen = r.u64()?;
         r.finish()?;
         Ok(Counter { next, max_seen })
+    }
+}
+
+/// One generation of the line this device follows (docs/vault-format.md, 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LineEntry {
+    pub(crate) gen_id: GenId,
+    pub(crate) info_hash: [u8; 32],
+    /// Local time at which this device first made the generation current.
+    pub(crate) first_seen: u64,
+}
+
+const LINE_ENTRY_LEN: usize = 60;
+const LINE_VERSION: u8 = 3;
+
+/// Genesis first, the generation this device currently follows last, plus every device a
+/// generation of the line ever removed. The removed set outlives the entries: it is kept when the
+/// device moves to another branch or accepts a fork (docs/vault-format.md, 7 and 9.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Line {
+    pub(crate) entries: Vec<LineEntry>,
+    /// Keyed by `Removal::key`.
+    pub(crate) removed: BTreeMap<RemovalKey, Removal>,
+}
+
+impl Line {
+    pub(crate) fn pin(&self) -> Option<&LineEntry> {
+        self.entries.last()
+    }
+
+    pub(crate) fn get(&self, id: &GenId) -> Option<&LineEntry> {
+        self.entries.iter().find(|e| e.gen_id == *id)
+    }
+
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, VaultError> {
+        if self.entries.len() > MAX_GENERATIONS {
+            return Err(VaultError::Encode);
+        }
+        let count = u32::try_from(self.entries.len()).map_err(|_| VaultError::Encode)?;
+        let list: Vec<Removal> = self.removed.values().cloned().collect();
+        let removed = encode_removals(&list)?;
+        let mut out = prefix(FileType::LocalLine).to_vec();
+        out.push(LINE_VERSION);
+        out.extend_from_slice(&count.to_be_bytes());
+        for e in &self.entries {
+            out.extend_from_slice(&e.gen_id.bytes());
+            out.extend_from_slice(&e.info_hash);
+            out.extend_from_slice(&e.first_seen.to_be_bytes());
+        }
+        out.extend_from_slice(&removed);
+        Ok(out)
+    }
+
+    pub(crate) fn decode(data: &[u8]) -> Result<Line, VaultError> {
+        let mut r = Reader::new(strip_prefix(data, FileType::LocalLine)?);
+        if r.u8()? != LINE_VERSION {
+            return Err(VaultError::UnsupportedVersion);
+        }
+        let count = usize::try_from(r.u32()?).map_err(|_| VaultError::Corrupt("line"))?;
+        if count > MAX_GENERATIONS || r.rest().len() < count.saturating_mul(LINE_ENTRY_LEN) {
+            return Err(VaultError::Corrupt("line"));
+        }
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            entries.push(LineEntry {
+                gen_id: GenId::from_bytes(r.take(20)?)?,
+                info_hash: r.array::<32>()?,
+                first_seen: r.u64()?,
+            });
+        }
+        let removed = decode_removals(r.rest())?
+            .into_iter()
+            .map(|x| (x.key(), x))
+            .collect();
+        Ok(Line { entries, removed })
     }
 }

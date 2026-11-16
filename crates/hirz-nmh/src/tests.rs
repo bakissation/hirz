@@ -58,6 +58,9 @@ fn settings(vault: &Path, state: &Path) -> Settings {
 struct TestApprover {
     gate: Option<Mutex<Receiver<()>>>,
     started: Option<Mutex<Sender<()>>>,
+    verified: bool,
+    /// Ends every approval with this error instead of approving.
+    refusal: Option<ApprovalError>,
 }
 
 impl Approver for TestApprover {
@@ -68,9 +71,12 @@ impl Approver for TestApprover {
         if let Some(g) = &self.gate {
             g.lock().unwrap().recv().unwrap();
         }
+        if let Some(e) = &self.refusal {
+            return Err(e.clone());
+        }
         Ok(Approval {
             user_present: true,
-            user_verified: true,
+            user_verified: self.verified,
             selected: (ctx.ceremony == Ceremony::Get).then_some(0),
         })
     }
@@ -146,7 +152,29 @@ fn plain() -> TestApprover {
     TestApprover {
         gate: None,
         started: None,
+        verified: true,
+        refusal: None,
     }
+}
+
+fn refusing(error: ApprovalError) -> TestApprover {
+    TestApprover {
+        refusal: Some(error),
+        ..plain()
+    }
+}
+
+/// An approver that tells the test when a prompt opens and waits for the test to close it.
+fn gated() -> (TestApprover, Receiver<()>, Sender<()>) {
+    let (open_tx, open_rx) = channel();
+    let (gate_tx, gate_rx) = channel();
+    let approver = TestApprover {
+        gate: Some(Mutex::new(gate_rx)),
+        started: Some(Mutex::new(open_tx)),
+        verified: true,
+        refusal: None,
+    };
+    (approver, open_rx, gate_tx)
 }
 
 fn b64(b: &[u8]) -> String {
@@ -322,15 +350,8 @@ fn without_a_vault_firefox_handles_everything() {
 
 #[test]
 fn cancel_while_the_prompt_is_open() {
-    let (open_tx, open_rx) = channel();
-    let (gate_tx, gate_rx) = channel();
-    let mut h = Harness::start(
-        true,
-        TestApprover {
-            gate: Some(Mutex::new(gate_rx)),
-            started: Some(Mutex::new(open_tx)),
-        },
-    );
+    let (approver, open_rx, gate_tx) = gated();
+    let mut h = Harness::start(true, approver);
     h.send(&create_msg(1, &[1u8; 32]));
     h.send(&create_msg(2, &[2u8; 32]));
     open_rx.recv().unwrap();
@@ -404,15 +425,8 @@ fn clean_exit_on_eof() {
 
 #[test]
 fn closed_port_cancels_the_running_ceremony() {
-    let (open_tx, open_rx) = channel();
-    let (gate_tx, gate_rx) = channel();
-    let mut h = Harness::start(
-        true,
-        TestApprover {
-            gate: Some(Mutex::new(gate_rx)),
-            started: Some(Mutex::new(open_tx)),
-        },
-    );
+    let (approver, open_rx, gate_tx) = gated();
+    let mut h = Harness::start(true, approver);
     h.send(&create_msg(1, &[1u8; 32]));
     open_rx.recv().unwrap();
     let Harness {
@@ -473,6 +487,7 @@ fn imported_credential_with_a_16_byte_id_signs_through_handle() {
         session: &mut session,
         uv: true,
         cancelled: &cancelled,
+        commit: None,
     };
     for (n, allow) in [(1, Some(id.as_slice())), (2, None)] {
         let challenge = [n; 32];
@@ -610,6 +625,10 @@ fn a_removed_device_hands_everything_to_firefox() {
     assert_eq!(listed_ids(&h.recv()), [1]);
 
     a.remove_device(&b.device_id()).unwrap();
+    // A request that signs or asks always looks at the folder; lists in the next seconds reuse
+    // that look instead of scanning again.
+    h.send(&get_msg(8, &[1u8; 32], None));
+    assert_eq!(error_name(&h.recv()), "NotHandled");
     h.send(&list_msg(2, &[]));
     assert_eq!(listed_ids(&h.recv()), Vec::<u8>::new());
     h.send(&list_msg(3, &[1]));
@@ -635,4 +654,385 @@ fn a_removed_device_hands_everything_to_firefox() {
     a.reload().unwrap();
     assert_eq!(a.list_all().len(), 1);
     h.finish().unwrap();
+}
+
+#[test]
+fn a_fork_hands_registrations_to_firefox_and_keeps_sign_ins() {
+    let dir = TempDir::new();
+    let vault_dir = dir.0.join("vault");
+    let state_dir = dir.0.join("state");
+    let (mut a, phrase) = Vault::create(&vault_dir, &state_dir, "a").unwrap();
+    let c = Vault::join_with_recovery(&vault_dir, &dir.0.join("c"), &phrase, "c").unwrap();
+    a.put(record(1, "example.com", 10, None, true)).unwrap();
+    a.remove_device(&c.device_id()).unwrap();
+    let name = std::fs::read_dir(vault_dir.join("keys"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .find(|n| n.starts_with("0000000002-"))
+        .unwrap();
+    let from = vault_dir.join("keys").join(&name);
+    let to = vault_dir.join(format!(".hidden-{name}"));
+    std::fs::rename(&from, &to).unwrap();
+
+    let (approver, open_rx, _gate) = gated();
+    let mut h = Harness::start_in(dir, vault_dir, state_dir, approver);
+    h.send(&list_msg(1, &[]));
+    assert_eq!(listed_ids(&h.recv()), [1], "existing passkeys stay listed");
+    h.send(&create_msg(2, &[1u8; 32]));
+    let r = h.recv();
+    assert_eq!(r.get("id").and_then(Json::as_u64), Some(2));
+    assert_eq!(error_name(&r), "NotHandled");
+    assert!(
+        open_rx.try_recv().is_err(),
+        "no prompt for a refused registration"
+    );
+
+    std::fs::rename(&to, &from).unwrap();
+    h.send(&list_msg(3, &[]));
+    assert_eq!(listed_ids(&h.recv()), [1]);
+    h.finish().unwrap();
+}
+
+fn put_records(h: &Harness, records: Vec<hirz_vault::CredentialRecord>) {
+    let mut vault = Vault::open(&h.vault_dir, &h.state_dir).unwrap();
+    for rec in records {
+        vault.put(rec).unwrap();
+    }
+}
+
+fn error_name(reply: &Json) -> &str {
+    assert_eq!(reply.get("ok"), Some(&Json::Bool(false)), "{reply}");
+    reply.get("error").and_then(Json::as_str).unwrap()
+}
+
+#[test]
+fn no_credential_here_goes_to_firefox_without_a_prompt() {
+    let (approver, open_rx, _gate) = gated();
+    let mut h = Harness::start(true, approver);
+    put_records(
+        &h,
+        vec![
+            record(1, "other.example", 10, None, true),
+            record(2, "example.com", 20, None, false),
+        ],
+    );
+    // An empty allow list needs a discoverable credential of this RP: there is none.
+    h.send(&get_msg(1, &[1u8; 32], None));
+    let r = h.recv();
+    assert_eq!(r.get("id").and_then(Json::as_u64), Some(1));
+    assert_eq!(error_name(&r), "NotHandled");
+    // The id of a hardware key, and the id of a credential that belongs to another RP.
+    for (id, allow) in [(2, [9u8; 16]), (3, [1u8; 16])] {
+        h.send(&get_msg(id, &[1u8; 32], Some(&allow)));
+        assert_eq!(error_name(&h.recv()), "NotHandled");
+    }
+    assert!(
+        open_rx.try_recv().is_err(),
+        "no prompt was shown for a request nothing matched"
+    );
+    h.finish().unwrap();
+}
+
+#[test]
+fn an_empty_vault_hands_every_get_to_firefox() {
+    let mut h = Harness::start(true, plain());
+    h.send(&get_msg(1, &[1u8; 32], None));
+    assert_eq!(error_name(&h.recv()), "NotHandled");
+    h.send(&get_msg(2, &[1u8; 32], Some(&[7u8; 32])));
+    assert_eq!(error_name(&h.recv()), "NotHandled");
+    h.finish().unwrap();
+}
+
+#[test]
+fn a_prompt_followed_by_no_usable_credential_is_a_refusal_not_a_fallback() {
+    // The only credential needs user verification; the approval has none. The user already saw a
+    // prompt, so Firefox must not start a second ceremony.
+    let (open_tx, open_rx) = channel();
+    let mut h = Harness::start(
+        true,
+        TestApprover {
+            gate: None,
+            started: Some(Mutex::new(open_tx)),
+            verified: false,
+            refusal: None,
+        },
+    );
+    put_records(&h, vec![record(1, "example.com", 10, Some(3), true)]);
+    h.send(&get_msg(1, &[1u8; 32], Some(&[1u8; 16])));
+    assert_eq!(error_name(&h.recv()), "NotAllowedError");
+    assert!(open_rx.try_recv().is_ok(), "the user was shown a prompt");
+    h.finish().unwrap();
+}
+
+#[test]
+fn appid_and_unparsable_origins_go_to_firefox() {
+    let mut h = Harness::start(true, plain());
+    h.send(&create_msg(1, &[1u8; 32]));
+    let (id, _) = registration(&h.recv(), &[1u8; 32]);
+
+    let with_appid = get_msg(2, &[2u8; 32], Some(&id)).replace(
+        r#""extensions":{}"#,
+        r#""extensions":{"appid":"https://example.com/app-id.json"}"#,
+    );
+    h.send(&with_appid);
+    assert_eq!(error_name(&h.recv()), "NotHandled");
+
+    for origin in [
+        "https://my_app.example.com",
+        "https://example.com.",
+        "https://-a.example.com",
+    ] {
+        let msg = get_msg(3, &[3u8; 32], None).replace(ORIGIN, origin);
+        h.send(&msg);
+        assert_eq!(error_name(&h.recv()), "NotHandled", "{origin}");
+    }
+    h.finish().unwrap();
+}
+
+#[test]
+fn a_flood_behind_an_open_prompt_neither_blocks_the_reader_nor_loses_the_cancel() {
+    let (approver, open_rx, gate_tx) = gated();
+    let mut h = Harness::start(true, approver);
+    h.send(&create_msg(1, &[1u8; 32]));
+    open_rx.recv().unwrap();
+    for n in 0..70u64 {
+        h.send(&list_msg(100 + n, &[]));
+    }
+    h.send(r#"{"v":1,"id":1,"type":"cancel"}"#);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    gate_tx.send(()).unwrap();
+
+    let first = h.recv();
+    assert_eq!(first.get("id").and_then(Json::as_u64), Some(1));
+    assert_eq!(error_name(&first), "AbortError");
+    let (mut served, mut refused) = (0, 0);
+    for _ in 0..70 {
+        let r = h.recv();
+        match r.get("ok") {
+            Some(Json::Bool(true)) => served += 1,
+            _ => {
+                assert_eq!(error_name(&r), "NotAllowedError");
+                assert_eq!(r.get("message").and_then(Json::as_str), Some("host busy"));
+                assert!(r.get("id").and_then(Json::as_u64).unwrap() >= 100);
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!((served, refused), (QUEUE, 70 - QUEUE));
+    let vault = Vault::open(&h.vault_dir, &h.state_dir).unwrap();
+    assert!(
+        vault.list_all().is_empty(),
+        "the cancelled create stored nothing"
+    );
+    h.finish().unwrap();
+}
+
+#[test]
+fn closing_the_port_behind_a_full_queue_is_still_seen() {
+    let (approver, open_rx, gate_tx) = gated();
+    let mut h = Harness::start(true, approver);
+    h.send(&create_msg(1, &[1u8; 32]));
+    open_rx.recv().unwrap();
+    for n in 0..(QUEUE as u64 + 10) {
+        h.send(&list_msg(100 + n, &[]));
+    }
+    let Harness {
+        to_host,
+        mut from_host,
+        worker,
+        _dir,
+        vault_dir,
+        state_dir,
+    } = h;
+    drop(to_host);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    gate_tx.send(()).unwrap();
+    let reply = read_frame(&mut from_host, framing::OUTBOUND_MAX)
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8(reply).unwrap().contains("AbortError"));
+    while read_frame(&mut from_host, framing::OUTBOUND_MAX)
+        .unwrap()
+        .is_some()
+    {}
+    worker.join().unwrap().unwrap();
+    assert!(
+        Vault::open(&vault_dir, &state_dir)
+            .unwrap()
+            .list_all()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_credential_hirz_cannot_ask_about_looks_like_no_credential() {
+    // The approver refuses before any window (prompt budget used up, no way to verify, no zenity).
+    // A page must not be able to tell a matching allow list from one that matches nothing.
+    let mut h = Harness::start(true, refusing(ApprovalError::NothingShown));
+    put_records(&h, vec![record(1, "example.com", 10, None, true)]);
+    let mut replies = Vec::new();
+    for (id, allow) in [
+        (1, Some([1u8; 16])),
+        (2, Some([9u8; 16])),
+        (3, None),
+        (4, Some([1u8; 16])),
+    ] {
+        h.send(&get_msg(
+            id,
+            &[id as u8; 32],
+            allow.as_ref().map(|a| a.as_slice()),
+        ));
+        let r = h.recv();
+        assert_eq!(r.get("id").and_then(Json::as_u64), Some(id));
+        assert_eq!(error_name(&r), "NotHandled", "request {id}");
+        replies.push(r.get("message").and_then(Json::as_str).unwrap().to_owned());
+    }
+    assert!(replies.windows(2).all(|w| w[0] == w[1]), "{replies:?}");
+    h.finish().unwrap();
+
+    // After a window the user saw, a refusal stays one.
+    for error in [ApprovalError::Denied, ApprovalError::Timeout] {
+        let mut h = Harness::start(true, refusing(error));
+        put_records(&h, vec![record(1, "example.com", 10, None, true)]);
+        h.send(&get_msg(1, &[1u8; 32], Some(&[1u8; 16])));
+        assert_eq!(error_name(&h.recv()), "NotAllowedError");
+        h.finish().unwrap();
+    }
+}
+
+#[test]
+fn a_registration_nobody_can_be_asked_about_goes_to_firefox() {
+    let mut h = Harness::start(true, refusing(ApprovalError::NothingShown));
+    h.send(&create_msg(1, &[1u8; 32]));
+    assert_eq!(error_name(&h.recv()), "NotHandled");
+    assert!(
+        Vault::open(&h.vault_dir, &h.state_dir)
+            .unwrap()
+            .list_all()
+            .is_empty()
+    );
+    h.finish().unwrap();
+}
+
+fn host_for(dir: &TempDir) -> (Host<TestApprover>, PathBuf, PathBuf) {
+    let (vault_dir, state_dir) = (dir.0.join("vault"), dir.0.join("state"));
+    Vault::create(&vault_dir, &state_dir, "test").unwrap();
+    let session = Session::new(settings(&vault_dir, &state_dir), plain());
+    let host = Host {
+        session,
+        pending: Arc::new(Mutex::new(Pending::default())),
+        removed_told: false,
+    };
+    (host, vault_dir, state_dir)
+}
+
+#[test]
+fn list_and_capability_requests_do_not_scan_the_folder_every_time() {
+    let dir = TempDir::new();
+    let (mut host, vault_dir, state_dir) = host_for(&dir);
+    let mut vault = Vault::open(&vault_dir, &state_dir).unwrap();
+    vault.put(record(1, "example.com", 10, None, true)).unwrap();
+    for i in 0..100u64 {
+        let msg = json::parse(list_msg(i + 1, &[]).as_bytes(), &Limits::default()).unwrap();
+        let reply = host.answer(&msg);
+        assert_eq!(reply.get("ok"), Some(&Json::Bool(true)), "{reply}");
+        let caps = json::parse(
+            format!(r#"{{"v":1,"id":{},"type":"capabilities"}}"#, 1000 + i).as_bytes(),
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(host.answer(&caps).get("ok"), Some(&Json::Bool(true)));
+    }
+    assert_eq!(
+        host.session.looks(),
+        1,
+        "200 requests that only read looked at the folder once"
+    );
+
+    // A ceremony always looks again.
+    let get = json::parse(
+        get_msg(500, &[1u8; 32], None).as_bytes(),
+        &Limits::default(),
+    )
+    .unwrap();
+    host.answer(&get);
+    assert_eq!(host.session.looks(), 2);
+}
+
+#[test]
+fn only_a_cancel_that_comes_before_the_commit_can_undo_a_registration() {
+    let pending = Mutex::new(Pending::default());
+    lock(&pending).waiting.insert(7);
+    assert!(commit_ceremony(&pending, 7));
+    assert!(
+        !lock(&pending).waiting.contains(&7),
+        "after the commit nothing is waiting for a cancel"
+    );
+
+    let pending = Mutex::new(Pending::default());
+    {
+        let mut p = lock(&pending);
+        p.waiting.insert(7);
+        p.cancelled.insert(7);
+    }
+    assert!(!commit_ceremony(&pending, 7));
+}
+
+#[test]
+fn a_cancel_that_lands_after_the_credential_was_stored_deletes_it_and_keeps_the_old_one() {
+    let dir = TempDir::new();
+    let (mut host, vault_dir, state_dir) = host_for(&dir);
+    {
+        let mut other = Vault::open(&vault_dir, &state_dir).unwrap();
+        let mut rec = record(1, "example.com", 10, None, true);
+        rec.user_id = b"alice".to_vec();
+        other.put(rec).unwrap();
+    }
+    assert_eq!(host.session.ensure_vault(), VaultStatus::Ready);
+    let pending = Arc::clone(&host.pending);
+    lock(&pending).waiting.insert(5);
+    // The reader records the cancel after the engine stored the credential and before it asks
+    // whether to go on: the last point where a cancel is early enough.
+    let commit = || {
+        lock(&pending).cancelled.insert(5);
+        commit_ceremony(&pending, 5)
+    };
+    let never = || false;
+    let mut engine = HostEngine {
+        session: &mut host.session,
+        uv: false,
+        cancelled: &never,
+        commit: Some(&commit),
+    };
+    let request = hirz_core::MakeCredentialRequest {
+        client_data_hash: [5; 32],
+        rp: hirz_core::RpEntity {
+            id: "example.com".into(),
+            name: None,
+        },
+        user: hirz_core::UserEntity {
+            id: b"alice".to_vec(),
+            name: Some("alice".into()),
+            display_name: None,
+        },
+        algorithms: vec![hirz_core::COSE_ALG_ES256],
+        exclude_list: Vec::new(),
+        resident_key: true,
+        uv: hirz_core::UvRequirement::Preferred,
+        extensions: hirz_core::MakeExtensions::default(),
+    };
+    let r = hirz_webauthn::Engine::make_credential(&mut engine, &request, ORIGIN);
+    assert_eq!(r.unwrap_err(), CoreError::Approval(ApprovalError::Denied));
+
+    let kept = Vault::open(&vault_dir, &state_dir).unwrap();
+    let ids: Vec<Vec<u8>> = kept
+        .list_all()
+        .iter()
+        .map(|r| r.credential_id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        [vec![1u8; 16]],
+        "the new credential is gone and the older one was not replaced"
+    );
 }

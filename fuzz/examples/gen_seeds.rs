@@ -7,10 +7,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use hirz_crypto::Zeroizing;
+use hirz_crypto::kdf::Argon2Params;
 use hirz_ctap::hid::{self, BROADCAST_CID, REPORT_SIZE, cmd};
+use hirz_fuzz::{cxf, envelope};
 use hirz_proto::auth_data::{AuthenticatorData, FLAG_BE, FLAG_UP, FLAG_UV};
 use hirz_proto::cbor::{self, MapBuilder, Value};
 use hirz_proto::{attestation, base64url, cose};
+use hirz_vault::{CredentialRecord, HmacSecretPair};
 
 #[allow(dead_code)]
 #[path = "../../crates/hirz-proto/tests/common/vectors.rs"]
@@ -389,19 +393,6 @@ fn webauthn_seeds(o: &mut Out) {
 }
 
 fn vault_and_uv_seeds(o: &mut Out) {
-    for flag in [0u8, 1] {
-        let mut b = b"HIRZ".to_vec();
-        b.extend_from_slice(&[6, 1]);
-        b.extend_from_slice(&[0x10; 16]);
-        b.push(flag);
-        b.extend_from_slice(&[0x20; 16]);
-        for v in [65_536u32, 3, 4] {
-            b.extend_from_slice(&v.to_be_bytes());
-        }
-        b.extend_from_slice(&[0x30; 64]);
-        o.put("vault_backup", &format!("flag{flag}"), &b);
-    }
-
     o.put(
         "uv_config",
         "full",
@@ -496,6 +487,17 @@ fn record_body(version: u8, credential_id: &[u8], full: bool) -> Vec<u8> {
     tlv(version, &f)
 }
 
+/// The device id the vault derives from a signing key (docs/vault-format.md, 5.2).
+fn device_id_for(signing_public: &[u8; 32]) -> [u8; 16] {
+    let mut input = b"hirz device id v1\0".to_vec();
+    input.extend_from_slice(&32u32.to_be_bytes());
+    input.extend_from_slice(signing_public);
+    let h = hirz_crypto::sha256(&input);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&h[..16]);
+    out
+}
+
 fn event(kind: u8, payload: &[u8]) -> Vec<u8> {
     let lamport = 7u64.to_be_bytes();
     let mut b = tlv(
@@ -556,10 +558,13 @@ fn nmh_and_vault_record_seeds(o: &mut Out) {
             &tlv(
                 1,
                 &[
-                    (0x01, &[0x10; 16]),
+                    (0x01, &device_id_for(&[0x77; 32])),
                     (0x02, b"laptop"),
                     (0x03, &[0x66; 32]),
                     (0x04, &created),
+                    (0x05, &[0x77; 32]),
+                    (0x06, &[0; 16]),
+                    (0x07, &[0x88; 64]),
                 ],
             ),
         ),
@@ -655,6 +660,106 @@ fn import_seeds(o: &mut Out) {
     o.put("import_keepassxc", "es256", file.as_bytes());
 }
 
+/// Seeds for the targets of hirz-cli that read files: `hex`, `cxf_parse` and `envelope_open`.
+fn file_format_seeds(o: &mut Out) {
+    for (name, text) in [
+        ("empty", ""),
+        ("one_byte", "0a"),
+        ("sixteen_bytes", "000102030405060708090a0b0c0d0e0f"),
+        ("uppercase", "00FF"),
+        ("odd_length", "abc"),
+        ("not_hex", "zz"),
+    ] {
+        o.put("hex", name, text.as_bytes());
+    }
+    o.put("hex", "binary", &[0x00, 0x01, 0x80, 0xfe, 0xff]);
+
+    let record = |id: u8, rp: &str, hmac: bool| CredentialRecord {
+        credential_id: vec![id; 32],
+        rp_id: rp.to_owned(),
+        rp_name: (id == 1).then(|| "Example".to_owned()),
+        user_id: vec![id; 16],
+        user_name: Some("alice".to_owned()),
+        user_display_name: (id == 1).then(|| "Alice".to_owned()),
+        algorithm: hirz_core::COSE_ALG_ES256,
+        private_key_pkcs8: Zeroizing::new(p256_scalar_one_pkcs8()),
+        created_at: 1_700_000_000,
+        cred_protect: (id == 1).then_some(2),
+        hmac_secret: hmac.then(|| HmacSecretPair {
+            cred_random_with_uv: Zeroizing::new([0x11; 32]),
+            cred_random_without_uv: Zeroizing::new([0x22; 32]),
+        }),
+        discoverable: id != 2,
+        backup_eligible: true,
+    };
+    let records = [
+        record(1, "example.com", true),
+        record(2, "ssh:Work Key", false),
+        record(3, "io.example.app", false),
+    ];
+    let refs: Vec<&CredentialRecord> = records.iter().collect();
+    let export = cxf::export_json(&refs, 1_700_000_000, &[7; 16]).expect("export");
+    o.put("cxf_parse", "hirz_export", &export);
+    o.put(
+        "cxf_parse",
+        "provider_export",
+        include_bytes!("../../crates/hirz-cli/tests/fixtures/provider-export.json"),
+    );
+    o.put(
+        "cxf_parse",
+        "no_accounts",
+        br#"{"version": {"major": 1, "minor": 0}, "accounts": []}"#,
+    );
+    o.put(
+        "cxf_parse",
+        "newer_version",
+        br#"{"version": {"major": 2, "minor": 0}, "accounts": []}"#,
+    );
+
+    const FAST: Argon2Params = Argon2Params {
+        m_cost_kib: 64,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let sealed = envelope::seal(
+        b"fuzz passphrase",
+        br#"{"version": {"major": 1, "minor": 0}, "accounts": []}"#,
+        FAST,
+    )
+    .expect("seal");
+    o.put("envelope_open", "sealed", &sealed);
+    let mut tampered = sealed.clone();
+    if let Some(last) = tampered.last_mut() {
+        *last ^= 1;
+    }
+    o.put("envelope_open", "sealed_tampered", &tampered);
+    o.put("envelope_open", "magic_only", envelope::MAGIC);
+    let header = |limit: Argon2Params| {
+        let mut h = envelope::MAGIC.to_vec();
+        h.extend_from_slice(&[1, 1]);
+        h.extend_from_slice(&limit.m_cost_kib.to_be_bytes());
+        h.extend_from_slice(&limit.t_cost.to_be_bytes());
+        h.extend_from_slice(&limit.p_cost.to_be_bytes());
+        h.extend_from_slice(&[0x5a; 16]);
+        h.extend_from_slice(&[0xa5; 12 + 16 + 8]);
+        h
+    };
+    let limit = envelope::IMPORT_LIMIT;
+    o.put("envelope_open", "header_at_the_limit", &header(limit));
+    o.put(
+        "envelope_open",
+        "header_over_the_limit",
+        &header(Argon2Params {
+            m_cost_kib: limit.m_cost_kib + 1,
+            ..limit
+        }),
+    );
+    o.put("envelope_open", "header_cheap", &header(FAST));
+    let mut round_trip = vec![0u8];
+    round_trip.extend_from_slice(br#"{"accounts": []}"#);
+    o.put("envelope_open", "seal_and_open", &round_trip);
+}
+
 fn main() {
     let root = std::env::args_os()
         .nth(1)
@@ -666,5 +771,6 @@ fn main() {
     vault_and_uv_seeds(&mut out);
     nmh_and_vault_record_seeds(&mut out);
     import_seeds(&mut out);
+    file_format_seeds(&mut out);
     println!("wrote {} bytes of seeds to {}", out.total, out.root.display());
 }

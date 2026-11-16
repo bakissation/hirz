@@ -36,6 +36,7 @@ struct Fake {
     wrapped: Option<Vec<u8>>,
     user: Option<UserEntity>,
     user_handle: Vec<u8>,
+    no_uv: bool,
 }
 
 impl Fake {
@@ -109,6 +110,10 @@ impl Authenticator for Fake {
     fn select(&mut self, ctx: &RequestContext) -> Result<(), CoreError> {
         self.selects += 1;
         self.wait(ctx)
+    }
+
+    fn user_verification_available(&mut self) -> bool {
+        !self.no_uv
     }
 }
 
@@ -1393,4 +1398,73 @@ fn descriptor_ids_of_any_length_up_to_1023() {
         parse_get_assertion(&enc).unwrap().allow_list,
         vec![vec![2u8; 16]]
     );
+}
+
+fn uv_option(resp: &[u8]) -> Value {
+    let info = body(resp);
+    let options = info.get_int(0x04).unwrap();
+    options.get_text("uv").unwrap().clone()
+}
+
+#[test]
+fn get_info_reports_whether_user_verification_can_work() {
+    let h = handler();
+    let r = h.process(&[command::GET_INFO], &RequestContext::new());
+    assert_eq!(uv_option(&r), Value::Bool(true));
+
+    let h = Ctap2Handler::new(Fake {
+        no_uv: true,
+        ..Fake::default()
+    });
+    let r = h.process(&[command::GET_INFO], &RequestContext::new());
+    assert_eq!(uv_option(&r), Value::Bool(false));
+    assert_eq!(r, get_info_response_with(false));
+    assert_ne!(r, get_info_response());
+    assert_eq!(r.len(), get_info_response().len());
+}
+
+#[test]
+fn get_info_never_waits_for_a_request_that_holds_the_authenticator() {
+    let h = Arc::new(Ctap2Handler::new(Fake {
+        block: true,
+        ..Fake::default()
+    }));
+    let ctx = RequestContext::new();
+    let worker = {
+        let h = Arc::clone(&h);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || h.process(&[command::SELECTION], &ctx))
+    };
+    let start = Instant::now();
+    while h.engine.try_lock().is_ok() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let asked = Instant::now();
+    let r = h.process(&[command::GET_INFO], &RequestContext::new());
+    assert!(asked.elapsed() < Duration::from_secs(2));
+    assert_eq!(uv_option(&r), Value::Bool(true));
+    ctx.cancel();
+    worker.join().unwrap();
+}
+
+#[test]
+fn only_requests_that_wait_for_the_user_may_block() {
+    let h = handler();
+    for c in [
+        command::MAKE_CREDENTIAL,
+        command::GET_ASSERTION,
+        command::SELECTION,
+    ] {
+        assert!(CborHandler::may_block(&h, &[c, 0xa0]), "{c:#x}");
+    }
+    for c in [
+        command::GET_INFO,
+        command::CLIENT_PIN,
+        command::RESET,
+        command::GET_NEXT_ASSERTION,
+        0x77,
+    ] {
+        assert!(!CborHandler::may_block(&h, &[c, 0xa0]), "{c:#x}");
+    }
+    assert!(!CborHandler::may_block(&h, &[]));
 }

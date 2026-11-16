@@ -6,7 +6,7 @@ After=hirz-uhid-broker.socket
 
 [Service]
 Type=simple
-ExecStart=/usr/local/libexec/hirz/hirz-uhid-broker
+ExecStart=/usr/libexec/hirz/hirz-uhid-broker
 Restart=on-failure
 
 # /dev/uhid is root:root 0600. Running as uid 0 opens it through the owner permission

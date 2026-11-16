@@ -157,6 +157,26 @@ pub struct RemovalApprovalContext<'a> {
     pub device_id_short: &'a str,
 }
 
+/// The user exports every passkey to a file; shown before a UV method.
+#[derive(Debug)]
+pub struct ExportApprovalContext {
+    pub passkeys: usize,
+    /// The file is not encrypted.
+    pub plain: bool,
+}
+
+/// The user repairs the vault folder (`hirz repair`); shown before a UV method. Both actions
+/// change which key changes this computer follows, so they are never click-to-allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairApprovalContext<'a> {
+    /// Delete one key change that this computer does not follow, and everything built on it.
+    /// `generation` is its folder name as `hirz repair` lists it; untrusted, shown after cleaning.
+    DiscardGeneration { generation: &'a str },
+    /// Follow the vault folder as it is now, going on from the newest key change this computer
+    /// followed that is still there; removals it saw stay in force.
+    AcceptFork,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalError {
     Denied,
@@ -164,6 +184,10 @@ pub enum ApprovalError {
     Unavailable,
     Locked,
     Internal(String),
+    /// `Approver::approve` ended before any window was shown (no verification method, prompt
+    /// budget used up, a missing helper, a broken config). A front end that must not reveal
+    /// whether a credential exists treats it like "nothing matched".
+    NothingShown,
 }
 
 /// CTAP path only: encrypts the hmac-secret output with the PIN/UV protocol shared secret.
@@ -195,6 +219,16 @@ pub trait Approver {
         &self,
         _ctx: &RemovalApprovalContext<'_>,
     ) -> Result<Approval, ApprovalError> {
+        Err(ApprovalError::Unavailable)
+    }
+
+    /// Click-to-allow never counts: callers act only on `user_verified`. The default refuses (fails closed).
+    fn confirm_export(&self, _ctx: &ExportApprovalContext) -> Result<Approval, ApprovalError> {
+        Err(ApprovalError::Unavailable)
+    }
+
+    /// Click-to-allow never counts: callers act only on `user_verified`. The default refuses (fails closed).
+    fn confirm_repair(&self, _ctx: &RepairApprovalContext<'_>) -> Result<Approval, ApprovalError> {
         Err(ApprovalError::Unavailable)
     }
 }
@@ -251,5 +285,32 @@ mod tests {
             ApproveOnly.confirm_removal(&ctx),
             Err(ApprovalError::Unavailable)
         );
+    }
+
+    #[test]
+    fn export_fails_closed_by_default() {
+        let ctx = ExportApprovalContext {
+            passkeys: 3,
+            plain: false,
+        };
+        assert_eq!(
+            ApproveOnly.confirm_export(&ctx),
+            Err(ApprovalError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn repair_fails_closed_by_default() {
+        for ctx in [
+            RepairApprovalContext::AcceptFork,
+            RepairApprovalContext::DiscardGeneration {
+                generation: "0000000002-0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+            },
+        ] {
+            assert_eq!(
+                ApproveOnly.confirm_repair(&ctx),
+                Err(ApprovalError::Unavailable)
+            );
+        }
     }
 }

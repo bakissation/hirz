@@ -29,10 +29,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   HIRZ_CHECK_STRICT: "1"
+  # Nightly used by the fuzz job, pinned by date; change it in a reviewed change (docs/fuzzing.md).
+  FUZZ_TOOLCHAIN: nightly-2026-11-12
 
 jobs:
   lint:
-    name: fmt, clippy, unsafe, dependencies, versions
+    name: fmt, clippy, unsafe, dependencies, versions, pins, scripts
     if: github.event_name != 'schedule' && !inputs.fuzz
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -52,7 +54,12 @@ jobs:
             target
           key: lint-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
-      - run: scripts/check.sh versions fmt clippy unsafe deps extension
+      # The extension tests (node:test, no packages) run in the extension section of check.sh.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.2"
+
+      - run: scripts/check.sh versions fmt clippy unsafe deps extension toolchain keys workflows scripts
 
   test:
     name: test (${{ matrix.arch }})
@@ -113,6 +120,26 @@ jobs:
     with:
       retention-days: 7
 
+  # Advisories are published after a dependency was merged, so they are also checked every night.
+  advisories:
+    name: RustSec advisories (nightly)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-deny@0.20.2
+
+      - run: cargo deny --locked check advisories
+
   fuzz:
     name: fuzz smoke (60 s per target)
     if: github.event_name == 'schedule' || inputs.fuzz
@@ -125,8 +152,8 @@ jobs:
 
       - name: Nightly toolchain and cargo-fuzz
         run: |
-          rustup toolchain install nightly --profile minimal
-          cargo +nightly install cargo-fuzz@0.13.2 --locked
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+          cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz@0.13.2 --locked
 
       - name: Smoke run
         env:
@@ -134,12 +161,31 @@ jobs:
           FUZZ_JOBS: "4"
         run: scripts/fuzz.sh smoke
 
-      - name: Keep crashing inputs
+      # Anyone signed in to GitHub can download the artifacts of a public repository, so a crashing
+      # input is only kept encrypted to a maintainer key; without the variable nothing is uploaded.
+      - name: Encrypt crashing inputs
         if: failure()
+        env:
+          RECIPIENT_KEY: ${{ vars.FUZZ_CRASH_GPG_PUBLIC_KEY }}
+        run: |
+          if [ -z "$RECIPIENT_KEY" ]; then
+            echo "::warning::set the FUZZ_CRASH_GPG_PUBLIC_KEY variable to keep crashing inputs; none is uploaded without it (docs/fuzzing.md)"
+            exit 0
+          fi
+          export GNUPGHOME
+          GNUPGHOME=$(mktemp -d)
+          printf '%s\n' "$RECIPIENT_KEY" | gpg --batch --quiet --import
+          fpr=$(gpg --batch --with-colons --list-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          tar -C fuzz -cf - artifacts |
+            gpg --batch --quiet --trust-model always --encrypt --recipient "$fpr" -o "$RUNNER_TEMP/fuzz-artifacts.tar.gpg"
+          echo "ENCRYPTED=$RUNNER_TEMP/fuzz-artifacts.tar.gpg" >>"$GITHUB_ENV"
+
+      - name: Keep the encrypted crashing inputs
+        if: failure() && env.ENCRYPTED != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: fuzz-artifacts
-          path: fuzz/artifacts/
+          name: fuzz-artifacts-encrypted
+          path: ${{ env.ENCRYPTED }}
           retention-days: 30
 
   ci:

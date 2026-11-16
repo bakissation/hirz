@@ -2,6 +2,7 @@
 //! lengths only, no floats, tags or `undefined`, integer or text map keys. Canonical order
 //! follows CTAP2 section 8; see docs/architecture.md, "Implementation notes".
 
+use crate::wipe;
 use crate::{Error, Result};
 use core::cmp::Ordering;
 
@@ -18,6 +19,8 @@ const SIMPLE_FALSE: u8 = 0xf4;
 const SIMPLE_TRUE: u8 = 0xf5;
 const SIMPLE_NULL: u8 = 0xf6;
 
+/// A decoded value wipes the bytes and text it holds when it is dropped: a CTAP request carries
+/// PIN and salt blobs, and an item that failed to decode part way is dropped the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Unsigned(u64),
@@ -30,6 +33,22 @@ pub enum Value {
     Map(Vec<(Value, Value)>),
     Bool(bool),
     Null,
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        match self {
+            Value::Bytes(b) => wipe::bytes(b),
+            Value::Text(t) => wipe::string(t),
+            // Items inside an array or map are dropped, and so wiped, one by one.
+            Value::Unsigned(_)
+            | Value::Negative(_)
+            | Value::Array(_)
+            | Value::Map(_)
+            | Value::Bool(_)
+            | Value::Null => {}
+        }
+    }
 }
 
 impl Value {
@@ -503,9 +522,52 @@ pub(crate) fn write_map_header(out: &mut Vec<u8>, len: usize) {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::wipe;
 
     fn strict() -> Limits {
         Limits::default()
+    }
+
+    #[test]
+    fn a_decoded_value_wipes_its_bytes_and_text_when_it_is_dropped() {
+        let value = MapBuilder::new()
+            .int(1, vec![7u8; 8])
+            .text("k", "secret")
+            .int(
+                3,
+                Value::Array(vec![Value::from(vec![1u8, 2, 3]), Value::from("xy")]),
+            )
+            .build();
+        let bytes = encode(&value).unwrap();
+        drop(value);
+        let _ = wipe::take_wiped();
+        let decoded = decode(&bytes, &strict()).unwrap();
+        assert_eq!(wipe::take_wiped(), 0);
+        drop(decoded);
+        // 8 bytes, the key "k", "secret", 3 bytes, "xy"
+        assert_eq!(wipe::take_wiped(), 8 + 1 + 6 + 3 + 2);
+    }
+
+    #[test]
+    fn a_decode_that_fails_wipes_what_it_had_built() {
+        let _ = wipe::take_wiped();
+        // An array of a 4 byte string, a text "ab" and a truncated 5 byte string.
+        let input = [0x83, 0x44, 1, 2, 3, 4, 0x62, b'a', b'b', 0x45, 1, 2];
+        assert_eq!(decode(&input, &strict()).unwrap_err(), Error::Truncated);
+        assert_eq!(wipe::take_wiped(), 4 + 2);
+
+        // A map whose second key repeats the first: the key and value already read.
+        let dup = [0xa2, 0x61, b'k', 0x43, 9, 9, 9, 0x61, b'k', 0x01];
+        assert_eq!(decode(&dup, &strict()).unwrap_err(), Error::DuplicateKey);
+        assert_eq!(wipe::take_wiped(), 1 + 3 + 1);
+
+        // Trailing bytes after a complete item.
+        let trailing = [0x43, 5, 6, 7, 0x00];
+        assert_eq!(
+            decode(&trailing, &strict()).unwrap_err(),
+            Error::TrailingBytes
+        );
+        assert_eq!(wipe::take_wiped(), 3);
     }
 
     fn lenient() -> Limits {

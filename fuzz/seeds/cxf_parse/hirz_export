@@ -1,0 +1,97 @@
+{
+  "accounts": [
+    {
+      "collections": [],
+      "email": "",
+      "id": "BwcHBwcHBwcHBwcHBwcHBw",
+      "items": [
+        {
+          "creationAt": 1700000000,
+          "credentials": [
+            {
+              "credentialId": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "fido2Extensions": {
+                "hmacCredentials": {
+                  "algorithm": "hmac-sha256",
+                  "credWithUV": "ERERERERERERERERERERERERERERERERERERERERERE",
+                  "credWithoutUV": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI"
+                }
+              },
+              "key": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGhRANCAARrF9Hy4SxCR_i85uVjpEDydwN9gS3rM6D0oTlF2JjClk_jQuL-Gn-bjufrSnwPnhYrzjNXazFezsu2QGg3v1H1",
+              "rpId": "example.com",
+              "type": "passkey",
+              "userDisplayName": "Alice",
+              "userHandle": "AQEBAQEBAQEBAQEBAQEBAQ",
+              "username": "alice"
+            }
+          ],
+          "extensions": [
+            {
+              "credProtect": 2,
+              "discoverable": true,
+              "name": "hirz.berkati.xyz/passkey",
+              "rpName": "Example"
+            }
+          ],
+          "id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+          "subtitle": "alice",
+          "title": "example.com"
+        },
+        {
+          "creationAt": 1700000000,
+          "credentials": [
+            {
+              "credentialId": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "key": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGhRANCAARrF9Hy4SxCR_i85uVjpEDydwN9gS3rM6D0oTlF2JjClk_jQuL-Gn-bjufrSnwPnhYrzjNXazFezsu2QGg3v1H1",
+              "rpId": "ssh:Work Key",
+              "type": "passkey",
+              "userDisplayName": "",
+              "userHandle": "AgICAgICAgICAgICAgICAg",
+              "username": "alice"
+            }
+          ],
+          "extensions": [
+            {
+              "discoverable": false,
+              "name": "hirz.berkati.xyz/passkey"
+            }
+          ],
+          "id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+          "subtitle": "alice",
+          "title": "ssh:Work Key"
+        },
+        {
+          "creationAt": 1700000000,
+          "credentials": [
+            {
+              "credentialId": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "key": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGhRANCAARrF9Hy4SxCR_i85uVjpEDydwN9gS3rM6D0oTlF2JjClk_jQuL-Gn-bjufrSnwPnhYrzjNXazFezsu2QGg3v1H1",
+              "rpId": "io.example.app",
+              "type": "passkey",
+              "userDisplayName": "",
+              "userHandle": "AwMDAwMDAwMDAwMDAwMDAw",
+              "username": "alice"
+            }
+          ],
+          "extensions": [
+            {
+              "discoverable": true,
+              "name": "hirz.berkati.xyz/passkey"
+            }
+          ],
+          "id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+          "subtitle": "alice",
+          "title": "io.example.app"
+        }
+      ],
+      "username": ""
+    }
+  ],
+  "exporterDisplayName": "hirz",
+  "exporterRpId": "hirz.berkati.xyz",
+  "timestamp": 1700000000,
+  "version": {
+    "major": 1,
+    "minor": 0
+  }
+}

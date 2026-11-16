@@ -1,5 +1,6 @@
-# Keeps the commit-SHA pins of third-party actions current. Updates arrive as pull requests
-# into dev, with the version comment next to each pin updated too.
+# Keeps the commit-SHA pins of third-party actions and the Cargo dependencies current. Updates
+# arrive as pull requests into dev, with the version comment next to each pin updated too. The
+# digests of the build containers in the workflows are refreshed by hand (docs/dependencies.md).
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -12,4 +13,15 @@ updates:
       include: scope
     groups:
       actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cargo:
         patterns: ["*"]

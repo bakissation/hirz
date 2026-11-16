@@ -8,13 +8,13 @@
 )]
 
 use crate::app::{self, Ctx};
-use crate::args::{self, Command, DeleteTarget, ImportFormat, Invocation, PinAction};
+use crate::args::{self, Command, DeleteTarget, ImportFormat, Invocation, PinAction, RepairAction};
 use crate::env::{Env, System};
 use crate::error::{CliError, Exit};
 use crate::prompt::Prompter;
 use hirz_core::{
-    Approval, ApprovalContext, ApprovalError, Approver, PairingApprovalContext,
-    RemovalApprovalContext,
+    Approval, ApprovalContext, ApprovalError, Approver, ExportApprovalContext,
+    PairingApprovalContext, RemovalApprovalContext, RepairApprovalContext,
 };
 use hirz_crypto::Zeroizing;
 use hirz_crypto::kdf::Argon2Params;
@@ -107,6 +107,8 @@ impl System for FakeSys {
             result: Ok(VERIFIED),
             seen: None,
             removals: None,
+            exports: None,
+            repairs: None,
         })
     }
 }
@@ -123,6 +125,8 @@ struct FakeApprover<'a> {
     result: Result<Approval, ApprovalError>,
     seen: Option<&'a RefCell<Vec<SeenPairing>>>,
     removals: Option<&'a RefCell<Vec<(String, String)>>>,
+    exports: Option<&'a RefCell<Vec<(usize, bool)>>>,
+    repairs: Option<&'a RefCell<Vec<String>>>,
 }
 
 impl Approver for FakeApprover<'_> {
@@ -143,6 +147,23 @@ impl Approver for FakeApprover<'_> {
         if let Some(seen) = self.removals {
             seen.borrow_mut()
                 .push((ctx.device_name.to_string(), ctx.device_id_short.to_string()));
+        }
+        self.result.clone()
+    }
+    fn confirm_export(&self, ctx: &ExportApprovalContext) -> Result<Approval, ApprovalError> {
+        if let Some(seen) = self.exports {
+            seen.borrow_mut().push((ctx.passkeys, ctx.plain));
+        }
+        self.result.clone()
+    }
+    fn confirm_repair(&self, ctx: &RepairApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        if let Some(seen) = self.repairs {
+            seen.borrow_mut().push(match ctx {
+                RepairApprovalContext::DiscardGeneration { generation } => {
+                    format!("discard {generation}")
+                }
+                RepairApprovalContext::AcceptFork => "accept-fork".to_string(),
+            });
         }
         self.result.clone()
     }
@@ -174,6 +195,7 @@ struct Script {
     out: SharedBuf,
     wrong_words: bool,
     prompts: Vec<String>,
+    notices: Vec<String>,
 }
 
 impl Script {
@@ -203,6 +225,9 @@ impl Prompter for Script {
     fn secret(&mut self, prompt: &str) -> io::Result<Option<Zeroizing<String>>> {
         Ok(self.next(prompt).map(Zeroizing::new))
     }
+    fn notice(&mut self, text: &str) {
+        self.notices.push(text.to_string());
+    }
 }
 
 fn phrase_words(out: &str) -> Vec<String> {
@@ -227,6 +252,7 @@ struct Run {
     result: Result<Exit, CliError>,
     out: String,
     prompts: Vec<String>,
+    notices: Vec<String>,
 }
 
 impl Run {
@@ -283,6 +309,7 @@ fn run_opts(m: &Machine, args: &[&str], answers: &[&str], o: Opts<'_>) -> Run {
         out: out.clone(),
         wrong_words,
         prompts: Vec::new(),
+        notices: Vec::new(),
     };
     let mut ctx = Ctx {
         out: &mut writer,
@@ -299,6 +326,7 @@ fn run_opts(m: &Machine, args: &[&str], answers: &[&str], o: Opts<'_>) -> Run {
         result,
         out: out.text(),
         prompts: script.prompts,
+        notices: script.notices,
     }
 }
 
@@ -545,6 +573,18 @@ fn parse_table() {
                 Command::Import {
                     format: ImportFormat::Cxf,
                     file: "in.json".into(),
+                    yes: false,
+                },
+            ),
+        ),
+        (
+            &["import", "--yes", "--keepassxc", "dir"],
+            inv(
+                None,
+                Command::Import {
+                    format: ImportFormat::KeePassXc,
+                    file: "dir".into(),
+                    yes: true,
                 },
             ),
         ),
@@ -555,6 +595,7 @@ fn parse_table() {
                 Command::Import {
                     format: ImportFormat::Bitwarden,
                     file: "bw.json".into(),
+                    yes: false,
                 },
             ),
         ),
@@ -565,12 +606,43 @@ fn parse_table() {
                 Command::Import {
                     format: ImportFormat::KeePassXc,
                     file: "keys".into(),
+                    yes: false,
                 },
             ),
         ),
         (
             &["backup", "confirm"],
             inv(None, Command::BackupConfirm { yes: false }),
+        ),
+        (
+            &["repair"],
+            inv(
+                None,
+                Command::Repair {
+                    action: RepairAction::Show,
+                    yes: false,
+                },
+            ),
+        ),
+        (
+            &["repair", "--discard", "0000000002-aa", "--yes"],
+            inv(
+                None,
+                Command::Repair {
+                    action: RepairAction::Discard("0000000002-aa".into()),
+                    yes: true,
+                },
+            ),
+        ),
+        (
+            &["repair", "--accept-fork"],
+            inv(
+                None,
+                Command::Repair {
+                    action: RepairAction::AcceptFork,
+                    yes: false,
+                },
+            ),
         ),
         (
             &["setup", "firefox", "--nmh-path", "/opt/hirz-nmh", "--force"],
@@ -591,6 +663,11 @@ fn parse_table() {
         &["frobnicate"],
         &["join"],
         &["init", "extra"],
+        &["repair", "extra"],
+        &["repair", "--discard"],
+        &["repair", "--yes"],
+        &["repair", "--discard", "x", "--accept-fork"],
+        &["repair", "--discard", "x", "--discard", "y"],
         &["init", "--json"],
         &["list", "--site"],
         &["list", "--site="],
@@ -929,7 +1006,7 @@ fn encrypted_export_imports_into_a_fresh_vault() {
     let vb = b.default_vault();
     let r = run(
         &b,
-        &["import", "--cxf", fs_],
+        &["import", "--cxf", fs_, "--yes"],
         &[
             "wrong passphrase 1",
             "wrong passphrase 2",
@@ -939,11 +1016,11 @@ fn encrypted_export_imports_into_a_fresh_vault() {
     assert_eq!(r.exit(), Exit::Denied);
     assert!(records(&b, &vb).is_empty());
 
-    let r = run(&b, &["import", "--cxf", fs_], &[PASS]);
+    let r = run(&b, &["import", "--cxf", fs_, "--yes"], &[PASS]);
     assert!(r.ok().contains("Imported 3 passkeys"));
     assert_eq!(records(&a, &va), records(&b, &vb));
 
-    let r = run(&b, &["import", "--cxf", fs_], &[PASS]);
+    let r = run(&b, &["import", "--cxf", fs_, "--yes"], &[PASS]);
     assert!(r.ok().contains("3 passkeys were already in hirz"));
     assert_eq!(records(&b, &vb).len(), 3);
 }
@@ -992,7 +1069,7 @@ fn plain_export_is_standard_cxf_and_counts_as_backup_when_confirmed() {
 
     let c = Machine::new("plain-c");
     init(&c);
-    let r = run(&c, &["import", "--cxf", fs_], &[]);
+    let r = run(&c, &["import", "--cxf", fs_, "--yes"], &[]);
     assert!(r.ok().contains("Imported 1 passkey"));
     assert_eq!(records(&a, &va), records(&c, &c.default_vault()));
 }
@@ -1004,7 +1081,7 @@ fn import_from_another_provider() {
     let file = m.tmp.path("provider.json");
     fs::write(&file, FIXTURE).unwrap();
     let fs_ = file.to_str().unwrap();
-    let r = run(&m, &["import", "--cxf", fs_], &[]);
+    let r = run(&m, &["import", "--cxf", fs_, "--yes"], &[]);
     assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
     let out = &r.out;
     assert!(out.contains("Export made by: Example Provider"));
@@ -1050,7 +1127,7 @@ fn import_from_another_provider() {
         assert!(v.get(&[4u8; 32]).is_none());
     }
 
-    let r = run(&m, &["import", "--cxf", fs_], &[]);
+    let r = run(&m, &["import", "--cxf", fs_, "--yes"], &[]);
     assert_eq!(r.exit(), Exit::Partial);
     assert!(r.out.contains("4 passkeys were already in hirz"));
 
@@ -1060,7 +1137,7 @@ fn import_from_another_provider() {
     r.ok();
     let c = Machine::new("fixture-c");
     init(&c);
-    let r = run(&c, &["import", "--cxf", o], &[]);
+    let r = run(&c, &["import", "--cxf", o, "--yes"], &[]);
     assert!(r.ok().contains("Imported 4 passkeys"), "{}", r.out);
     assert_eq!(
         records(&m, &m.default_vault()),
@@ -1072,7 +1149,11 @@ fn import_from_another_provider() {
         Value::from(hirz_proto::base64url::encode(&[7u8; 1024]));
     let long_file = m.tmp.path("long.json");
     fs::write(&long_file, serde_json::to_vec(&long).unwrap()).unwrap();
-    let r = run(&c, &["import", "--cxf", long_file.to_str().unwrap()], &[]);
+    let r = run(
+        &c,
+        &["import", "--cxf", long_file.to_str().unwrap(), "--yes"],
+        &[],
+    );
     assert!(
         r.out.contains("(bob): the field credentialId is too long"),
         "{}",
@@ -1082,7 +1163,11 @@ fn import_from_another_provider() {
     max["accounts"][0]["items"][1]["credentials"][0]["credentialId"] =
         Value::from(hirz_proto::base64url::encode(&[7u8; 1023]));
     fs::write(&long_file, serde_json::to_vec(&max).unwrap()).unwrap();
-    let r = run(&c, &["import", "--cxf", long_file.to_str().unwrap()], &[]);
+    let r = run(
+        &c,
+        &["import", "--cxf", long_file.to_str().unwrap(), "--yes"],
+        &[],
+    );
     assert!(r.out.contains("Imported 1 passkey"), "{}", r.out);
     assert!(
         Vault::open(&c.default_vault(), &c.state())
@@ -1095,7 +1180,7 @@ fn import_from_another_provider() {
     let other_key = hirz_proto::base64url::encode(&hirz_crypto::es256::generate().unwrap().0);
     tampered["accounts"][0]["items"][0]["credentials"][0]["key"] = Value::from(other_key);
     fs::write(&file, serde_json::to_vec(&tampered).unwrap()).unwrap();
-    let r = run(&m, &["import", "--cxf", fs_], &[]);
+    let r = run(&m, &["import", "--cxf", fs_, "--yes"], &[]);
     assert!(r.out.contains("a different passkey with the same id"));
     assert_eq!(
         records(&m, &m.default_vault())[0].private_key_pkcs8,
@@ -1139,7 +1224,7 @@ fn import_from_bitwarden() {
     let file = m.tmp.path("bitwarden_export.json");
     fs::write(&file, &doc).unwrap();
     let fs_ = file.to_str().unwrap();
-    let r = run(&m, &["import", "--bitwarden", fs_], &[]);
+    let r = run(&m, &["import", "--bitwarden", fs_, "--yes"], &[]);
     assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
     assert!(r.out.contains("Imported 2 passkeys"), "{}", r.out);
     assert!(r.out.contains("1 item of other kinds"), "{}", r.out);
@@ -1156,7 +1241,7 @@ fn import_from_bitwarden() {
     assert_eq!(recs[1].private_key_pkcs8, keys[0]);
     assert!(recs.iter().all(|r| r.backup_eligible && r.algorithm == -7));
 
-    let r = run(&m, &["import", "--bitwarden", fs_], &[]);
+    let r = run(&m, &["import", "--bitwarden", fs_, "--yes"], &[]);
     assert_eq!(r.exit(), Exit::Partial);
     assert!(
         r.out.contains("2 passkeys were already in hirz"),
@@ -1176,13 +1261,17 @@ fn import_from_bitwarden() {
     fs::write(&file, &protected).unwrap();
     let r = run(
         &c,
-        &["import", "--bitwarden", fs_],
+        &["import", "--bitwarden", fs_, "--yes"],
         &["wrong", "wrong too", "nope"],
     );
     assert_eq!(r.exit(), Exit::Denied, "{}", r.out);
     assert_eq!(r.prompts.len(), 3);
     assert!(records(&c, &c.default_vault()).is_empty());
-    let r = run(&c, &["import", "--bitwarden", fs_], &["wrong", PASS]);
+    let r = run(
+        &c,
+        &["import", "--bitwarden", fs_, "--yes"],
+        &["wrong", PASS],
+    );
     assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
     assert!(r.out.contains("password protected"));
     assert!(r.out.contains("Wrong password"));
@@ -1200,10 +1289,10 @@ fn import_from_bitwarden() {
         },
     );
     fs::write(&file, argon.replace("\"data\": \"2.", "\"data\": \"2.A")).unwrap();
-    let r = run(&c, &["import", "--bitwarden", fs_], &[PASS]);
+    let r = run(&c, &["import", "--bitwarden", fs_, "--yes"], &[PASS]);
     assert_eq!(r.exit(), Exit::Failed, "{}", r.out);
     fs::write(&file, &argon).unwrap();
-    let r = run(&c, &["import", "--bitwarden", fs_], &[PASS]);
+    let r = run(&c, &["import", "--bitwarden", fs_, "--yes"], &[PASS]);
     assert!(
         r.out.contains("2 passkeys were already in hirz"),
         "{}",
@@ -1213,7 +1302,7 @@ fn import_from_bitwarden() {
     let account = r#"{"encrypted": true, "encKeyValidation_DO_NOT_EDIT": "2.a|b|c",
         "folders": [], "items": []}"#;
     fs::write(&file, account).unwrap();
-    let r = run(&c, &["import", "--bitwarden", fs_], &[]);
+    let r = run(&c, &["import", "--bitwarden", fs_, "--yes"], &[]);
     assert_eq!(r.exit(), Exit::Failed);
     assert!(r.message().contains("account key"), "{}", r.message());
 }
@@ -1233,7 +1322,11 @@ fn import_from_keepassxc() {
         passkey_file("example.com", "alice", &[9; 24], b"u-1", &es),
     )
     .unwrap();
-    let r = run(&m, &["import", "--keepassxc", one.to_str().unwrap()], &[]);
+    let r = run(
+        &m,
+        &["import", "--keepassxc", one.to_str().unwrap(), "--yes"],
+        &[],
+    );
     assert!(r.ok().contains("Imported 1 passkey"), "{}", r.out);
 
     fs::write(
@@ -1243,7 +1336,11 @@ fn import_from_keepassxc() {
     .unwrap();
     fs::write(dir.join("broken.passkey"), "{").unwrap();
     fs::write(dir.join("notes.txt"), "ignored").unwrap();
-    let r = run(&m, &["import", "--keepassxc", dir.to_str().unwrap()], &[]);
+    let r = run(
+        &m,
+        &["import", "--keepassxc", dir.to_str().unwrap(), "--yes"],
+        &[],
+    );
     assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
     assert!(r.out.contains("Imported 1 passkey"), "{}", r.out);
     assert!(
@@ -1265,7 +1362,11 @@ fn import_from_keepassxc() {
 
     let empty = m.tmp.path("empty");
     fs::create_dir_all(&empty).unwrap();
-    let r = run(&m, &["import", "--keepassxc", empty.to_str().unwrap()], &[]);
+    let r = run(
+        &m,
+        &["import", "--keepassxc", empty.to_str().unwrap(), "--yes"],
+        &[],
+    );
     assert_eq!(r.exit(), Exit::Failed);
     let r = run(
         &m,
@@ -1300,7 +1401,7 @@ fn import_rejects_bad_documents() {
         ),
     ] {
         fs::write(&file, content).unwrap();
-        let r = run(&m, &["import", "--cxf", fs_], &[]);
+        let r = run(&m, &["import", "--cxf", fs_, "--yes"], &[]);
         assert_eq!(r.exit(), Exit::Failed, "{content}");
         assert!(r.message().contains(needle), "{content}: {}", r.message());
     }
@@ -1310,9 +1411,12 @@ fn import_rejects_bad_documents() {
         "]".repeat(200)
     );
     fs::write(&file, deep).unwrap();
-    assert_eq!(run(&m, &["import", "--cxf", fs_], &[]).exit(), Exit::Failed);
+    assert_eq!(
+        run(&m, &["import", "--cxf", fs_, "--yes"], &[]).exit(),
+        Exit::Failed
+    );
     fs::write(&file, b"HIRZ-CXF\x09").unwrap();
-    let r = run(&m, &["import", "--cxf", fs_], &[]);
+    let r = run(&m, &["import", "--cxf", fs_, "--yes"], &[]);
     assert_eq!(r.exit(), Exit::Failed);
 }
 
@@ -1711,6 +1815,452 @@ fn setup_firefox_writes_the_user_manifest() {
 }
 
 #[test]
+fn setup_firefox_refuses_when_a_package_installed_the_manifest() {
+    let m = Machine::new("ff-pkg");
+    let bin = m.env.exe_dir.clone().unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let nmh = bin.join("hirz-nmh");
+    fs::write(&nmh, b"#!/bin/sh\n").unwrap();
+    fs::set_permissions(&nmh, fs::Permissions::from_mode(0o755)).unwrap();
+    let user = m.tmp.path(".mozilla/native-messaging-hosts/hirz.json");
+
+    for (dir, body) in [
+        (
+            "/usr/lib/mozilla/native-messaging-hosts",
+            crate::cmd_setup::render_manifest(&fs::canonicalize(&nmh).unwrap()).unwrap(),
+        ),
+        (
+            "/usr/lib64/mozilla/native-messaging-hosts",
+            "{}".to_string(),
+        ),
+    ] {
+        let system = m.env.sys_path(dir);
+        fs::create_dir_all(&system).unwrap();
+        let file = system.join("hirz.json");
+        fs::write(&file, body).unwrap();
+
+        let r = run(&m, &["setup", "firefox"], &["y"]);
+        assert_eq!(r.exit(), Exit::Failed, "{dir}");
+        assert!(r.message().contains("A package already connected"), "{dir}");
+        assert!(r.message().contains("setup firefox --force"), "{dir}");
+        assert!(r.prompts.is_empty(), "{:?}", r.prompts);
+        assert!(!user.exists(), "{dir}: nothing is written without --force");
+
+        let r = run(&m, &["setup", "firefox", "--force"], &[]);
+        let out = r.ok();
+        assert!(out.contains("Installed"), "{dir}");
+        assert!(out.contains("takes precedence over the packaged manifest"));
+        assert!(user.exists(), "{dir}");
+        fs::remove_file(&user).unwrap();
+        fs::remove_file(&file).unwrap();
+    }
+
+    let r = run(&m, &["setup", "firefox"], &[]);
+    assert!(r.ok().contains("Installed"));
+    assert!(!r.out.contains("takes precedence"));
+}
+
+fn hide_generation(vault: &Path, number: u32) -> (PathBuf, PathBuf) {
+    let prefix = format!("{number:010}-");
+    let name = fs::read_dir(vault.join("keys"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .find(|n| n.starts_with(&prefix))
+        .unwrap();
+    let from = vault.join("keys").join(&name);
+    let to = vault.join(format!(".hidden-{name}"));
+    fs::rename(&from, &to).unwrap();
+    (to, from)
+}
+
+fn device_hex(m: &Machine, vault: &Path) -> String {
+    crate::ui::hex(&Vault::open(vault, &m.state()).unwrap().device_id())
+}
+
+fn uv_run(m: &Machine, sys: &UvSys, args: &[&str], answers: &[&str]) -> Run {
+    run_sys(m, sys, args, answers)
+}
+
+/// `a` removes `x` and `x` removes `a` from the same parent; `b` follows neither.
+fn mutual_removal() -> (Machine, Machine, Machine, PathBuf, String, String) {
+    let a = Machine::new("repair-a");
+    let phrase = init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    put(&a, &vault, vec![record("example.com", "alice", false, 1)]);
+    let x = Machine::new("repair-x");
+    let b = Machine::new("repair-b");
+    run(
+        &x,
+        &["join", "--vault", &vs, "--name", "mallory"],
+        &[&phrase],
+    )
+    .ok();
+    run(&b, &["join", "--vault", &vs, "--name", "bob"], &[&phrase]).ok();
+    let a_id = device_hex(&a, &vault);
+    let x_id = device_hex(&x, &vault);
+    run(&a, &["remove-device", &x_id[..8]], &["y"]).ok();
+    let (hidden, back) = hide_generation(&vault, 2);
+    run(&x, &["remove-device", &a_id[..8]], &["y"]).ok();
+    fs::rename(&hidden, &back).unwrap();
+    (a, x, b, vault, a_id, x_id)
+}
+
+#[test]
+fn repair_shows_a_conflict_and_discards_a_named_key_change_after_verification() {
+    let (_a, _x, b, vault, a_id, x_id) = mutual_removal();
+    let a_gen = format!("0000000002-{a_id}");
+    let x_gen = format!("0000000002-{x_id}");
+
+    let st = run(&b, &["status"], &[]);
+    assert_eq!(st.exit(), Exit::Failed);
+    assert!(st.out.contains("hirz repair"), "{}", st.out);
+
+    let out = run(&b, &["repair"], &[]).ok().to_string();
+    assert!(
+        out.contains("Conflict: two devices removed each other"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Key changes this computer does not follow (2)"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("{a_gen}  made by \"test-host\"")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("{x_gen}  made by \"mallory\"")),
+        "{out}"
+    );
+    assert!(out.contains("repair --discard NAME"));
+    assert!(!out.contains("--accept-fork"));
+
+    let uv = UvSys::new(&[UvMethod::Pin], Ok(VERIFIED));
+    let r = uv_run(&b, &uv, &["repair", "--discard", "banana"], &[]);
+    assert_eq!(r.exit(), Exit::Usage, "{}", r.message());
+    let r = uv_run(&b, &uv, &["repair", "--discard", "0000000001-00"], &[]);
+    assert_eq!(r.exit(), Exit::Usage);
+    let first = fs::read_dir(vault.join("keys"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .find(|n| n.starts_with("0000000001-"))
+        .unwrap();
+    let r = uv_run(&b, &uv, &["repair", "--discard", &first], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("not one of the key changes"));
+    let unknown = format!("0000000002-{}", "ab".repeat(16));
+    let r = uv_run(&b, &uv, &["repair", "--discard", &unknown], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(uv.repairs.borrow().is_empty());
+
+    let none = UvSys::new(&[], Ok(VERIFIED));
+    let r = uv_run(&b, &none, &["repair", "--discard", &x_gen], &["y"]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("hirz pin set"), "{}", r.message());
+    assert!(r.prompts.is_empty());
+    assert!(none.repairs.borrow().is_empty());
+
+    let r = uv_run(&b, &uv, &["repair", "--discard", &x_gen], &["n"]);
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(
+        r.prompts
+            .iter()
+            .any(|p| p.starts_with("Delete this key change now?"))
+    );
+    assert!(
+        uv.repairs.borrow().is_empty(),
+        "no window before the terminal question"
+    );
+    assert!(vault.join("keys").join(&x_gen).is_dir());
+
+    for (result, exit, needle) in [
+        (
+            Err(ApprovalError::Denied),
+            Exit::Cancelled,
+            "Nothing was deleted.",
+        ),
+        (
+            Err(ApprovalError::Unavailable),
+            Exit::Failed,
+            "hirz pin set",
+        ),
+        (
+            Err(ApprovalError::Timeout),
+            Exit::Failed,
+            "not answered in time",
+        ),
+        (
+            Ok(Approval {
+                user_present: true,
+                user_verified: false,
+                selected: None,
+            }),
+            Exit::Failed,
+            "could not verify",
+        ),
+    ] {
+        let refusing = UvSys::new(&[UvMethod::Pin], result);
+        let r = uv_run(&b, &refusing, &["repair", "--discard", &x_gen], &["y"]);
+        assert_eq!(r.exit(), exit, "{}", r.message());
+        assert!(r.message().contains(needle), "{}", r.message());
+        assert!(r.out.contains("Confirm in the hirz window"));
+        assert_eq!(
+            refusing.repairs.borrow().as_slice(),
+            [format!("discard {x_gen}")]
+        );
+        assert!(
+            vault.join("keys").join(&x_gen).is_dir(),
+            "a refused window deletes nothing"
+        );
+    }
+
+    let r = uv_run(&b, &uv, &["repair", "--discard", &x_gen], &["y"]);
+    let out = r.ok().to_string();
+    assert_eq!(uv.repairs.borrow().as_slice(), [format!("discard {x_gen}")]);
+    assert!(
+        out.contains(&format!("Deleted the key change {x_gen}.")),
+        "{out}"
+    );
+    assert!(out.contains("reports no fork and no conflict now"), "{out}");
+    assert!(!vault.join("keys").join(&x_gen).exists());
+    assert!(vault.join("keys").join(&a_gen).is_dir());
+    assert_eq!(run(&b, &["status"], &[]).exit(), Exit::Ok);
+    run(&b, &["list"], &[]).ok();
+}
+
+#[test]
+fn repair_discard_with_yes_skips_only_the_terminal_question() {
+    let (_a, _x, b, vault, _a_id, x_id) = mutual_removal();
+    let x_gen = format!("0000000002-{x_id}");
+    let uv = UvSys::new(&[UvMethod::Pin], Ok(VERIFIED));
+    let r = uv_run(&b, &uv, &["repair", "--discard", &x_gen, "--yes"], &[]);
+    r.ok();
+    assert!(r.prompts.is_empty());
+    assert_eq!(uv.repairs.borrow().len(), 1);
+    assert!(!vault.join("keys").join(&x_gen).exists());
+}
+
+#[test]
+fn repair_accepts_a_fork_only_after_a_typed_word_and_verification() {
+    let a = Machine::new("fork-a");
+    let phrase = init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    put(&a, &vault, vec![record("example.com", "alice", false, 1)]);
+    let c = Machine::new("fork-c");
+    run(&c, &["join", "--vault", &vs, "--name", "old"], &[&phrase]).ok();
+    let c_id = device_hex(&c, &vault);
+
+    let uv = UvSys::new(&[UvMethod::Pin], Ok(VERIFIED));
+    let healthy = uv_run(&a, &uv, &["repair"], &[]).ok().to_string();
+    assert!(healthy.contains("Nothing to repair"), "{healthy}");
+    let r = uv_run(&a, &uv, &["repair", "--accept-fork"], &["follow"]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("does not report a fork"));
+    assert!(uv.repairs.borrow().is_empty());
+
+    run(&a, &["remove-device", &c_id[..8]], &["y"]).ok();
+    hide_generation(&vault, 2);
+
+    let st = run(&a, &["status"], &[]);
+    assert_eq!(st.exit(), Exit::Failed);
+    assert!(
+        st.out.contains("no longer holds the key changes"),
+        "{}",
+        st.out
+    );
+    assert!(st.out.contains("hirz repair"), "{}", st.out);
+    let r = run(&a, &["delete", "0101", "--yes"], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("hirz repair"), "{}", r.message());
+    assert!(r.message().contains("no longer holds the key changes"));
+    assert!(run(&a, &["list"], &[]).ok().contains("example.com"));
+
+    let shown = uv_run(&a, &uv, &["repair"], &[]).ok().to_string();
+    assert!(
+        shown.contains("Fork: the vault folder no longer holds"),
+        "{shown}"
+    );
+    assert!(shown.contains("repair --accept-fork"), "{shown}");
+
+    let r = uv_run(&a, &uv, &["repair", "--accept-fork"], &["no"]);
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(
+        r.prompts
+            .iter()
+            .any(|p| p.contains("Type follow to continue"))
+    );
+    assert!(uv.repairs.borrow().is_empty());
+
+    for result in [
+        Err(ApprovalError::Denied),
+        Err(ApprovalError::Unavailable),
+        Ok(Approval {
+            user_present: true,
+            user_verified: false,
+            selected: None,
+        }),
+    ] {
+        let refusing = UvSys::new(&[UvMethod::Pin], result);
+        let r = uv_run(&a, &refusing, &["repair", "--accept-fork"], &["follow"]);
+        assert_ne!(r.exit(), Exit::Ok);
+        assert_eq!(refusing.repairs.borrow().as_slice(), ["accept-fork"]);
+        assert_eq!(
+            run(&a, &["status"], &[]).exit(),
+            Exit::Failed,
+            "a refused window leaves the fork reported"
+        );
+    }
+
+    let r = uv_run(&a, &uv, &["repair", "--accept-fork"], &["follow"]);
+    let out = r.ok().to_string();
+    assert_eq!(uv.repairs.borrow().as_slice(), ["accept-fork"]);
+    assert!(
+        out.contains("follows the vault folder as it is now"),
+        "{out}"
+    );
+    assert!(out.contains("1 passkey"), "{out}");
+    assert!(out.contains("reports no fork and no conflict now"), "{out}");
+    assert!(!run(&a, &["status"], &[]).out.contains("no longer holds"));
+}
+
+#[test]
+fn repair_refuses_a_removed_device_and_needs_a_vault() {
+    let m = Machine::new("repair-none");
+    let r = run(&m, &["repair"], &[]);
+    assert_eq!(r.exit(), Exit::NotSetUp);
+
+    let a = Machine::new("repair-rm-a");
+    let phrase = init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let b = Machine::new("repair-rm-b");
+    run(&b, &["join", "--vault", &vs, "--name", "old"], &[&phrase]).ok();
+    let b_id = device_hex(&b, &vault);
+    run(&a, &["remove-device", &b_id[..8]], &["y"]).ok();
+    for args in [
+        &["repair"][..],
+        &["repair", "--accept-fork"],
+        &[
+            "repair",
+            "--discard",
+            "0000000002-00000000000000000000000000000000",
+        ],
+    ] {
+        let r = run(&b, args, &["follow", "y"]);
+        assert_eq!(r.exit(), Exit::Failed, "{args:?}");
+        assert!(
+            r.message().starts_with(crate::app::REMOVED),
+            "{}",
+            r.message()
+        );
+    }
+}
+
+#[test]
+fn vault_errors_for_a_fork_and_a_removed_device_are_plain() {
+    use hirz_vault::VaultError;
+    let fork = CliError::from(VaultError::Fork);
+    assert_eq!(fork.exit, Exit::Failed);
+    assert!(fork.message.contains("hirz repair"), "{}", fork.message);
+    assert!(!fork.message.contains("Vault error"));
+    let removed = CliError::from(VaultError::Removed);
+    assert_eq!(removed.exit, Exit::Failed);
+    assert!(removed.message.starts_with(crate::app::REMOVED));
+}
+
+#[test]
+fn devices_show_who_approved_each_device() {
+    let a = Machine::new("by-a");
+    let phrase = init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let b = Machine::new("by-b");
+    let c = Machine::new("by-c");
+    run(
+        &c,
+        &["join", "--vault", &vs, "--name", "phrase-joined"],
+        &[&phrase],
+    )
+    .ok();
+    let approved = RefCell::new(false);
+    let sys = PairSys::new(2, |n| {
+        if n == 1 {
+            run(&a, &["devices", "approve"], &["yes", "yes"]).ok();
+            *approved.borrow_mut() = true;
+        }
+    });
+    join_request(&b, &vs, &sys).ok();
+    assert!(*approved.borrow());
+
+    let out = run(&a, &["devices"], &[]).ok().to_string();
+    let header = out.lines().next().unwrap();
+    assert!(header.contains("ADDED BY"), "{out}");
+    let row = |name: &str| {
+        out.lines()
+            .find(|l| l.starts_with(name))
+            .unwrap()
+            .to_string()
+    };
+    assert!(row("phrase-joined").contains("recovery phrase"), "{out}");
+    assert!(row("test-host").contains("recovery phrase"), "{out}");
+    assert!(row("desk").contains("test-host"), "{out}");
+
+    let json: Value = serde_json::from_str(run(&a, &["devices", "--json"], &[]).ok()).unwrap();
+    let a_id = device_hex(&a, &vault);
+    let by = |name: &str| {
+        json.as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap()["added_by"]
+            .clone()
+    };
+    assert_eq!(by("desk"), Value::String(a_id));
+    assert_eq!(by("phrase-joined"), Value::Null);
+    assert_eq!(by("test-host"), Value::Null);
+}
+
+#[test]
+fn a_cut_short_request_list_says_how_many_were_not_listed() {
+    let a = Machine::new("hidden-a");
+    init(&a);
+    let vault = a.default_vault();
+    let planted = hirz_vault::MAX_LISTED_REQUESTS + 3;
+    let tmp = Tmp::new("hidden-states");
+    for i in 0..planted {
+        hirz_vault::PendingJoin::start(&vault, &tmp.path(&format!("s{i}")), &format!("dev {i}"))
+            .unwrap();
+    }
+    let out = run(&a, &["devices"], &[]).ok().to_string();
+    assert!(
+        out.contains(&format!(
+            "{} devices waiting for approval",
+            hirz_vault::MAX_LISTED_REQUESTS
+        )),
+        "{out}"
+    );
+    assert!(out.contains("3 requests more not listed"), "{out}");
+    assert!(out.contains("planting them"), "{out}");
+
+    let uv = UvSys::new(&[UvMethod::Pin], Ok(VERIFIED));
+    let r = approve_with(&a, &uv, &["1", "no"]);
+    assert!(r.out.contains("3 requests more not listed"), "{}", r.out);
+    assert!(uv.seen.borrow().is_empty());
+
+    // Answering no removed the request that was picked, so one more became visible.
+    let r = run(&a, &["devices", "deny", "ffff"], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(
+        r.message()
+            .contains("2 waiting requests not listed may match"),
+        "{}",
+        r.message()
+    );
+}
+
+#[test]
 fn commands_need_setup() {
     let m = Machine::new("nosetup");
     for args in [
@@ -1815,8 +2365,15 @@ fn init_warns_and_clears_the_phrase_on_a_terminal() {
     );
     let out = r.ok();
     assert!(out.contains("Do not copy, paste or screenshot this screen."));
-    let clear = "\x1b[2J\x1b[3J\x1b[H";
-    let after = &out[out.find(clear).expect("screen cleared") + clear.len()..];
+    assert!(r.notices.is_empty());
+    let enter = "\x1b[?1049h";
+    let clear = "\x1b[2J\x1b[3J\x1b[H\x1b[?1049l";
+    let shown_at = out.find("YOUR RECOVERY PHRASE").unwrap();
+    let entered_at = out.find(enter).expect("alternate screen entered");
+    let cleared_at = out.find(clear).expect("screen wiped and left");
+    assert!(entered_at < shown_at && shown_at < cleared_at);
+    assert_eq!(out.matches(enter).count(), 1);
+    let after = &out[cleared_at + clear.len()..];
     let words = phrase_words(out);
     // Phrase words are common English words, so look for the numbered layout of the phrase.
     assert!(
@@ -1831,8 +2388,11 @@ fn init_warns_and_clears_the_phrase_on_a_terminal() {
     assert!(after.contains("hirz join --vault DIR --request"));
 
     let m2 = Machine::new("noclear");
-    let out = run(&m2, &["init"], &[]).ok().to_string();
-    assert!(!out.contains(clear));
+    let r2 = run(&m2, &["init"], &[]);
+    let out = r2.ok().to_string();
+    assert!(!out.contains(clear) && !out.contains(enter));
+    assert_eq!(r2.notices.len(), 1);
+    assert!(r2.notices[0].contains("not a terminal"), "{:?}", r2.notices);
     assert!(out.contains("Do not copy, paste or screenshot"));
     assert!(out.contains("Connect Firefox: hirz setup firefox"));
     let m3 = Machine::new("noclear-saved");
@@ -1847,7 +2407,8 @@ fn init_warns_and_clears_the_phrase_on_a_terminal() {
             wrong_words: false,
         },
     );
-    assert!(!r.ok().contains(clear));
+    assert!(!r.ok().contains(clear) && !r.out.contains(enter));
+    assert!(r.notices.is_empty());
 }
 
 /// The clock advances on every poll and `on_sleep` runs while the joining command waits (the user at the other device).
@@ -1953,7 +2514,7 @@ fn pairing_adds_a_device_without_the_phrase() {
             assert!(listed.ok().contains("1 device waiting for approval"));
         }
         2 => {
-            let r = run(&a, &["devices", "approve"], &["yes"]);
+            let r = run(&a, &["devices", "approve"], &["yes", "yes"]);
             *approved.borrow_mut() = r.ok().to_string();
         }
         _ => {}
@@ -2057,6 +2618,8 @@ struct UvSys {
     result: Result<Approval, ApprovalError>,
     seen: RefCell<Vec<SeenPairing>>,
     removals: RefCell<Vec<(String, String)>>,
+    exports: RefCell<Vec<(usize, bool)>>,
+    repairs: RefCell<Vec<String>>,
 }
 
 impl UvSys {
@@ -2066,6 +2629,8 @@ impl UvSys {
             result,
             seen: RefCell::new(Vec::new()),
             removals: RefCell::new(Vec::new()),
+            exports: RefCell::new(Vec::new()),
+            repairs: RefCell::new(Vec::new()),
         }
     }
 }
@@ -2085,6 +2650,8 @@ impl System for UvSys {
             result: self.result.clone(),
             seen: Some(&self.seen),
             removals: Some(&self.removals),
+            exports: Some(&self.exports),
+            repairs: Some(&self.repairs),
         })
     }
 }
@@ -2160,7 +2727,7 @@ fn pairing_approval_requires_user_verification() {
             ),
         ] {
             let uv = UvSys::new(&[UvMethod::Polkit], result);
-            let r = approve_with(&a, &uv, &["yes"]);
+            let r = approve_with(&a, &uv, &["yes", "yes"]);
             assert_eq!(r.exit(), exit, "{}", r.message());
             assert!(r.message().contains(needle), "{}", r.message());
             assert!(r.out.contains("Confirm in the hirz window"));
@@ -2169,7 +2736,7 @@ fn pairing_approval_requires_user_verification() {
         }
 
         let ok = UvSys::new(&[UvMethod::Pin], Ok(VERIFIED));
-        let r = approve_with(&a, &ok, &["yes"]);
+        let r = approve_with(&a, &ok, &["yes", "yes"]);
         let out = r.ok().to_string();
         let seen = ok.seen.borrow();
         let (name, words, requested_at) = &seen[0];
@@ -2186,4 +2753,656 @@ fn pairing_approval_requires_user_verification() {
     r.ok();
     assert!(approved.borrow().contains("Approved \"desk\""));
     assert_eq!(records(&b, &vault).len(), 0);
+}
+
+const ENTER_SCREEN: &str = "\x1b[?1049h";
+const LEAVE_SCREEN: &str = "\x1b[2J\x1b[3J\x1b[H\x1b[?1049l";
+
+fn terminal_opts(wrong_words: bool) -> Opts<'static> {
+    Opts {
+        sys: &FakeSys,
+        program: "hirz",
+        terminal: true,
+        wrong_words,
+    }
+}
+
+#[test]
+fn the_phrase_screen_is_left_when_the_check_fails() {
+    let m = Machine::new("screen-fail");
+    let r = run_opts(&m, &["init"], &[], terminal_opts(true));
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(r.message().contains("not confirmed"));
+    let enter = r.out.find(ENTER_SCREEN).unwrap();
+    let phrase = r.out.rfind("Here is the phrase again").unwrap();
+    let leave = r.out.rfind(LEAVE_SCREEN).unwrap();
+    assert!(enter < phrase && phrase < leave, "{}", r.out);
+    assert!(!r.out[leave..].contains("RECOVERY PHRASE"));
+    assert_eq!(r.out.matches(ENTER_SCREEN).count(), 1);
+}
+
+#[test]
+fn the_phrase_is_shown_before_a_step_that_can_fail() {
+    let m = Machine::new("phrase-first");
+    fs::create_dir_all(
+        m.state()
+            .join(hirz_vault::VAULT_POINTER_FILE)
+            .join("blocker"),
+    )
+    .unwrap();
+    fs::set_permissions(m.state(), fs::Permissions::from_mode(0o700)).unwrap();
+    let r = run(&m, &["init", "--yes-i-saved-it"], &[]);
+    assert_eq!(r.exit(), Exit::Failed, "{}", r.out);
+    assert!(r.message().contains("Could not record the vault location"));
+    assert!(r.message().contains("recovery phrase shown is valid"));
+    assert_eq!(phrase_words(&r.out).len(), 24);
+    assert!(m.default_vault().join(hirz_vault::HEADER_FILE).is_file());
+}
+
+#[test]
+fn hirz_vault_and_hirz_state_move_the_cli_like_the_daemons() {
+    let home = Tmp::new("envvars");
+    let vault = home.path("elsewhere/vault");
+    let state = home.path("elsewhere/state");
+    let h = home.0.clone();
+    let vars = |extra: &'static [(&'static str, &'static str)]| {
+        let h = h.clone();
+        let vault = vault.clone();
+        let state = state.clone();
+        move |k: &str| -> Option<OsString> {
+            let extra_value = extra.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);
+            match (k, extra_value) {
+                ("HIRZ_VAULT", Some("set")) => Some(vault.clone().into_os_string()),
+                ("HIRZ_STATE", Some("set")) => Some(state.clone().into_os_string()),
+                ("HIRZ_VAULT" | "HIRZ_STATE", Some(other)) => Some(OsString::from(other)),
+                ("HOME", _) => Some(h.clone().into_os_string()),
+                _ => None,
+            }
+        }
+    };
+    let plain = Env::from_vars(vars(&[])).unwrap();
+    assert_eq!(plain.state_dir(), h.join(".local/state/hirz"));
+    assert_eq!(plain.vault_dir(None).unwrap(), plain.default_vault());
+
+    let set = Env::from_vars(vars(&[("HIRZ_VAULT", "set"), ("HIRZ_STATE", "set")])).unwrap();
+    assert_eq!(set.state_dir(), state);
+    assert_eq!(set.uv.state_dir, state);
+    assert_eq!(set.vault_dir(None).unwrap(), vault);
+    assert_eq!(set.new_vault_dir(None).unwrap(), vault);
+    let flag = h.join("flag");
+    assert_eq!(set.vault_dir(Some(&flag)).unwrap(), flag);
+    assert_eq!(set.new_vault_dir(Some(&flag)).unwrap(), flag);
+
+    let relative =
+        Env::from_vars(vars(&[("HIRZ_VAULT", "rel/vault"), ("HIRZ_STATE", "")])).unwrap();
+    assert_eq!(relative.state_dir(), h.join(".local/state/hirz"));
+    assert_eq!(relative.vault_dir(None).unwrap(), relative.default_vault());
+
+    let mut env = set;
+    env.root = h.join("root");
+    env.cwd = Some(h.clone());
+    let m = Machine { tmp: home, env };
+    let r = run(&m, &["init", "--yes-i-saved-it"], &[]);
+    r.ok();
+    assert!(vault.join(hirz_vault::HEADER_FILE).is_file());
+    assert!(state.join(hirz_vault::DEVICE_STATE_FILE).is_file());
+    assert!(!m.default_vault().exists());
+    put(&m, &vault, vec![record("example.com", "alice", false, 1)]);
+    assert!(run(&m, &["list"], &[]).ok().contains("example.com"));
+    let st = run(&m, &["status", "--json"], &[]);
+    let v: Value = serde_json::from_str(&st.out).unwrap();
+    assert_eq!(v["vault_dir"], vault.display().to_string());
+    assert_eq!(v["state_dir"], state.display().to_string());
+    assert_eq!(v["vault"]["passkeys"], 1);
+}
+
+#[test]
+fn json_output_never_carries_raw_terminal_controls() {
+    let m = Machine::new("json-controls");
+    init(&m);
+    let mut r = record("example.com", "ali\u{9b}31mce\u{7f}", false, 1);
+    r.rp_name = Some("Evil\u{202e}Site\u{85}".into());
+    put(&m, &m.default_vault(), vec![r]);
+    let out = run(&m, &["list", "--json"], &[]);
+    let text = out.ok();
+    assert!(
+        text.chars()
+            .all(|c| !('\u{7f}'..='\u{9f}').contains(&c) && c != '\u{202e}'),
+        "{text}"
+    );
+    assert!(text.contains("\\u009b") && text.contains("\\u007f") && text.contains("\\u202e"));
+    let v: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(v[0]["user_name"], "ali\u{9b}31mce\u{7f}");
+    assert_eq!(v[0]["site_name"], "Evil\u{202e}Site\u{85}");
+}
+
+fn two_look_alikes(m: &Machine) {
+    let (mut a, mut b) = (
+        record("example.com", "alice", false, 1),
+        record("example.com", "alice", false, 2),
+    );
+    a.credential_id = [vec![0x11; 10], vec![0xaa; 22]].concat();
+    b.credential_id = [vec![0x11; 10], vec![0xbb; 22]].concat();
+    put(m, &m.default_vault(), vec![a, b]);
+}
+
+#[test]
+fn ambiguous_delete_prints_enough_of_each_id_to_type() {
+    let m = Machine::new("delete-digits");
+    init(&m);
+    two_look_alikes(&m);
+    let r = run(&m, &["delete", "1111"], &[]);
+    assert_eq!(r.exit(), Exit::Usage);
+    assert!(r.message().contains("longer id prefix from the list above"));
+    let ids: Vec<&str> = r
+        .out
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_whitespace().last())
+        .collect();
+    assert_eq!(ids.len(), 2, "{}", r.out);
+    assert_ne!(ids[0], ids[1]);
+    assert!(ids[0].len() > 12 && ids[0].len() == ids[1].len(), "{ids:?}");
+    let r = run(&m, &["delete", ids[0], "--yes"], &[]);
+    r.ok();
+    assert_eq!(records(&m, &m.default_vault()).len(), 1);
+}
+
+#[test]
+fn approving_by_prefix_still_warns_that_several_devices_wait() {
+    let a = Machine::new("several-a");
+    init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let (b, c) = (Machine::new("several-b"), Machine::new("several-c"));
+    let seen = RefCell::new(String::new());
+    let outer = PairSys::new(60, |n| {
+        if n != 1 {
+            return;
+        }
+        let inner = PairSys::new(60, |m| {
+            if m != 1 {
+                return;
+            }
+            let reqs: Vec<String> = pairing_dir_files(&vault)
+                .into_iter()
+                .filter(|f| f.ends_with(".req"))
+                .collect();
+            assert_eq!(reqs.len(), 2);
+            let r = run(&a, &["devices", "approve", &reqs[0][..8]], &["yes", "yes"]);
+            *seen.borrow_mut() = r.out.clone();
+            assert_eq!(r.exit(), Exit::Ok, "{}", r.out);
+        });
+        join_request(&c, &vs, &inner);
+    });
+    join_request(&b, &vs, &outer);
+    let out = seen.borrow().clone();
+    assert!(out.contains("Several devices are waiting"), "{out}");
+    assert!(out.contains("hirz devices deny REQUEST"));
+    let (table, rest) = out.split_once("A new device asked to join").unwrap();
+    assert!(table.contains("WORDS"), "{table}");
+    assert!(!table.contains("NAME"), "{table}");
+    assert!(
+        !table.contains("desk"),
+        "no name before the words were confirmed: {table}"
+    );
+    let rows: Vec<&str> = table
+        .lines()
+        .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()))
+        .collect();
+    assert_eq!(rows.len(), 2, "{table}");
+    for row in rows {
+        let words: Vec<&str> = row.split_whitespace().skip(1).take(4).collect();
+        assert!(
+            words
+                .iter()
+                .all(|w| w.chars().all(|c| c.is_ascii_uppercase())),
+            "four words in capitals after the number: {row}"
+        );
+    }
+    assert!(rest.contains("[desk]"));
+    assert!(out.contains("Approved \"desk\""));
+}
+
+#[test]
+fn the_name_of_a_device_is_shown_only_after_the_words_matched() {
+    let a = Machine::new("name-late-a");
+    init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let b = Machine::new("name-late-b");
+    let seen = RefCell::new(Vec::new());
+    let sys = PairSys::new(2, |n| {
+        if n != 1 {
+            return;
+        }
+        let waiting = || {
+            pairing_dir_files(&vault)
+                .iter()
+                .filter(|f| f.ends_with(".req"))
+                .count()
+        };
+
+        // The words do not match: the name never reaches the screen.
+        let r = run(&a, &["devices", "approve"], &["no"]);
+        assert_eq!(r.exit(), Exit::Cancelled, "{}", r.out);
+        assert!(!r.out.contains("desk"), "{}", r.out);
+        assert!(!r.out.contains("calls itself"), "{}", r.out);
+        assert_eq!(waiting(), 0, "a refused comparison removes the request");
+        seen.borrow_mut().push(r.out);
+    });
+    let _ = join_request(&b, &vs, &sys);
+    assert_eq!(seen.borrow().len(), 1);
+}
+
+#[test]
+fn a_name_that_is_not_the_one_the_person_gave_is_refused_before_any_verification() {
+    let a = Machine::new("name-no-a");
+    init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let b = Machine::new("name-no-b");
+    let seen = RefCell::new(Vec::new());
+    let sys = PairSys::new(2, |n| {
+        if n != 1 {
+            return;
+        }
+        let uv = UvSys::new(&[UvMethod::Polkit], Ok(VERIFIED));
+        let r = approve_with(&a, &uv, &["yes", "no"]);
+        assert_eq!(r.exit(), Exit::Cancelled, "{}", r.out);
+        assert!(
+            uv.seen.borrow().is_empty(),
+            "no verification window was opened"
+        );
+        assert!(r.out.contains("calls itself"), "{}", r.out);
+        assert_eq!(
+            pairing_dir_files(&vault)
+                .iter()
+                .filter(|f| f.ends_with(".req"))
+                .count(),
+            0
+        );
+        seen.borrow_mut().push(r.out);
+    });
+    let _ = join_request(&b, &vs, &sys);
+    assert_eq!(seen.borrow().len(), 1);
+}
+
+#[test]
+fn export_requires_user_verification_before_anything_is_built() {
+    let m = Machine::new("export-uv");
+    init(&m);
+    put(
+        &m,
+        &m.default_vault(),
+        vec![
+            record("example.com", "alice", false, 1),
+            record("example.org", "bob", true, 2),
+        ],
+    );
+    let file = m.tmp.path("out.hirz");
+    let fs_ = file.to_str().unwrap();
+    assert!(args::parse(&os(&["export", "--cxf", fs_, "--yes"])).is_err());
+
+    let none = UvSys::new(&[], Ok(VERIFIED));
+    let r = run_sys(&m, &none, &["export", "--cxf", fs_], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("hirz pin set"), "{}", r.message());
+    assert!(r.message().contains("Exporting your passkeys needs"));
+    assert!(r.prompts.is_empty());
+    assert!(none.exports.borrow().is_empty());
+    assert!(!file.exists());
+
+    for (result, exit, needle) in [
+        (Err(ApprovalError::Denied), Exit::Cancelled, "cancelled"),
+        (
+            Err(ApprovalError::Timeout),
+            Exit::Failed,
+            "not answered in time",
+        ),
+        (Err(ApprovalError::Locked), Exit::Failed, "hirz pin reset"),
+        (
+            Err(ApprovalError::Unavailable),
+            Exit::Failed,
+            "hirz pin set",
+        ),
+        (
+            Ok(Approval {
+                user_present: true,
+                user_verified: false,
+                selected: None,
+            }),
+            Exit::Failed,
+            "could not verify",
+        ),
+    ] {
+        for plain in [false, true] {
+            let uv = UvSys::new(&[UvMethod::Pin], result.clone());
+            let mut args = vec!["export", "--cxf", fs_];
+            let answers: &[&str] = if plain {
+                args.push("--plain");
+                &["yes"]
+            } else {
+                &[PASS, PASS]
+            };
+            let r = run_sys(&m, &uv, &args, answers);
+            assert_eq!(r.exit(), exit, "{}", r.message());
+            assert!(r.message().contains(needle), "{}", r.message());
+            assert!(r.message().contains("No file was written."));
+            assert!(r.out.contains("Confirm in the hirz window"));
+            assert_eq!(uv.exports.borrow().as_slice(), [(2, plain)]);
+            assert!(!file.exists(), "a refused verification writes nothing");
+        }
+    }
+
+    let ok = UvSys::new(&[UvMethod::Fingerprint], Ok(VERIFIED));
+    let r = run_sys(&m, &ok, &["export", "--cxf", fs_], &[PASS, PASS, "n"]);
+    assert!(r.ok().contains("Saved 2 passkeys"));
+    assert_eq!(ok.exports.borrow().as_slice(), [(2, false)]);
+    assert!(fs::read(&file).unwrap().starts_with(b"HIRZ-CXF"));
+}
+
+#[test]
+fn export_import_and_pin_reset_refuse_a_removed_device() {
+    let a = Machine::new("removed-a");
+    let phrase = init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    put(&a, &vault, vec![record("example.com", "alice", false, 1)]);
+    let b = Machine::new("removed-b");
+    run(&b, &["join", "--vault", &vs, "--name", "old"], &[&phrase]).ok();
+    run(&b, &["pin", "set"], &["1234", "1234"]).ok();
+    let b_id = crate::ui::hex(&Vault::open(&vault, &b.state()).unwrap().device_id());
+    run(&a, &["remove-device", &b_id[..8]], &["y"]).ok();
+
+    let export = b.tmp.path("export.hirz");
+    let plain_export = b.tmp.path("plain.json");
+    let shared = a.tmp.path("shared.json");
+    let r = run(
+        &a,
+        &["export", "--plain", "--cxf", shared.to_str().unwrap()],
+        &["yes", "y"],
+    );
+    r.ok();
+    let files = tree(&vault);
+    for args in [
+        vec!["export", "--cxf", export.to_str().unwrap()],
+        vec!["export", "--plain", "--cxf", plain_export.to_str().unwrap()],
+        vec!["import", "--cxf", shared.to_str().unwrap(), "--yes"],
+        vec!["import", "--bitwarden", shared.to_str().unwrap(), "--yes"],
+        vec!["import", "--keepassxc", shared.to_str().unwrap(), "--yes"],
+    ] {
+        let r = run(&b, &args, &[PASS, PASS, "yes"]);
+        assert_eq!(r.exit(), Exit::Failed, "{args:?}");
+        assert!(
+            r.message().starts_with(crate::app::REMOVED),
+            "{}",
+            r.message()
+        );
+        assert!(r.message().contains("hirz forget-local"));
+        assert!(r.prompts.is_empty(), "{:?}", r.prompts);
+        assert!(r.out.is_empty(), "{}", r.out);
+    }
+    assert!(!export.exists() && !plain_export.exists());
+    assert_eq!(tree(&vault), files);
+
+    let r = run(&b, &["pin", "reset"], &[&phrase]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().starts_with(crate::app::REMOVED));
+    assert!(!r.prompts.iter().any(|p| p.contains("Recovery phrase")));
+    assert!(run(&b, &["pin", "status"], &[]).ok().contains("is set"));
+
+    run(&b, &["forget-local"], &["y"]).ok();
+    let r = run(&b, &["pin", "reset"], &["y"]);
+    assert!(r.ok().contains("The PIN was removed."));
+}
+
+#[test]
+fn import_lists_what_it_adds_and_asks_first() {
+    let m = Machine::new("preview");
+    init(&m);
+    let vault = m.default_vault();
+    let mut mine = record("example.com", "alice", false, 9);
+    mine.user_id = b"user-alice-0001".to_vec();
+    put(&m, &vault, vec![mine]);
+    let file = m.tmp.path("provider.json");
+    fs::write(&file, FIXTURE).unwrap();
+    let fs_ = file.to_str().unwrap();
+
+    for answer in ["n", "", "maybe"] {
+        let r = run(&m, &["import", "--cxf", fs_], &[answer]);
+        assert_eq!(r.exit(), Exit::Cancelled, "{}", r.out);
+        assert!(r.message().contains("Nothing was imported"));
+        assert!(r.out.contains("Passkeys to add: 4"), "{}", r.out);
+        assert!(r.out.contains("SITE"), "{}", r.out);
+        assert!(r.out.contains("login.example.org"));
+        assert!(r.out.contains("acme.example"));
+        assert!(
+            r.out
+                .contains("Warning: example.com (alice): hirz already has a passkey")
+        );
+        assert!(!r.out.contains("Imported"));
+        assert_eq!(records(&m, &vault).len(), 1);
+    }
+    assert_eq!(
+        run(&m, &["import", "--cxf", fs_], &[]).exit(),
+        Exit::Cancelled
+    );
+    assert_eq!(records(&m, &vault).len(), 1);
+
+    let r = run(&m, &["import", "--cxf", fs_], &["y"]);
+    assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
+    assert!(
+        r.prompts
+            .iter()
+            .any(|p| p.starts_with("Add 4 passkeys to hirz?"))
+    );
+    assert!(r.out.contains("Imported 4 passkeys"));
+    assert_eq!(records(&m, &vault).len(), 5);
+
+    let other = Machine::new("preview-yes");
+    init(&other);
+    let r = run(&other, &["import", "--cxf", fs_, "--yes"], &[]);
+    assert!(r.prompts.is_empty());
+    assert!(r.out.contains("Passkeys to add: 4"));
+    assert!(r.out.contains("Imported 4 passkeys"));
+    assert!(!r.out.contains("Warning: example.com"));
+}
+
+#[test]
+fn import_asks_nothing_when_nothing_would_be_added() {
+    let m = Machine::new("preview-none");
+    init(&m);
+    let file = m.tmp.path("provider.json");
+    fs::write(&file, FIXTURE).unwrap();
+    let fs_ = file.to_str().unwrap();
+    run(&m, &["import", "--cxf", fs_, "--yes"], &[]);
+    let r = run(&m, &["import", "--cxf", fs_], &[]);
+    assert_eq!(r.exit(), Exit::Partial);
+    assert!(r.prompts.is_empty());
+    assert!(!r.out.contains("Passkeys to add"));
+    assert!(r.out.contains("4 passkeys were already in hirz"));
+}
+
+#[test]
+fn imported_creation_times_never_come_from_the_future() {
+    let m = Machine::new("future");
+    init(&m);
+    let file = m.tmp.path("future.json");
+    fs::write(&file, FIXTURE.replace("1700000000", "4102444800")).unwrap();
+    let before = crate::ui::now();
+    run(
+        &m,
+        &["import", "--cxf", file.to_str().unwrap(), "--yes"],
+        &[],
+    );
+    let after = crate::ui::now();
+    let all = records(&m, &m.default_vault());
+    assert!(!all.is_empty());
+    assert!(all.iter().all(|r| r.created_at <= after));
+    let alice = all
+        .iter()
+        .find(|r| r.user_name.as_deref() == Some("alice"))
+        .unwrap();
+    assert!(alice.created_at >= before);
+}
+
+#[test]
+fn export_and_import_round_trip_ssh_keys_and_other_site_ids() {
+    let a = Machine::new("ssh-a");
+    init(&a);
+    let va = a.default_vault();
+    let sites = [
+        "ssh:",
+        "ssh:Work Key",
+        "example.com",
+        "Mixed.Case",
+        "io.example.app",
+    ];
+    let mut recs: Vec<CredentialRecord> = sites
+        .iter()
+        .zip(1u8..)
+        .map(|(rp, seed)| record(rp, "alice", seed % 2 == 0, seed))
+        .collect();
+    recs.push(record("caf\u{e9}.example", "zoe", false, 9));
+    put(&a, &va, recs);
+
+    let file = a.tmp.path("ssh.hirz");
+    let fs_ = file.to_str().unwrap();
+    let r = run(&a, &["export", "--cxf", fs_], &[PASS, PASS, "n"]);
+    let out = r.ok();
+    assert!(out.contains("Saved 6 passkeys"));
+    assert!(
+        out.contains("Warning: some passkeys have a site id"),
+        "{out}"
+    );
+    assert!(out.contains("caf"), "{out}");
+
+    let b = Machine::new("ssh-b");
+    init(&b);
+    let r = run(&b, &["import", "--cxf", fs_, "--yes"], &[PASS]);
+    assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
+    assert!(r.out.contains("Imported 5 passkeys"), "{}", r.out);
+    assert!(r.out.contains("Skipped 1 passkey"));
+    assert!(
+        r.out
+            .contains("its site id is not text hirz can keep as it is")
+    );
+    let got = records(&b, &b.default_vault());
+    let want: Vec<CredentialRecord> = records(&a, &va)
+        .into_iter()
+        .filter(|r| r.rp_id != "caf\u{e9}.example")
+        .collect();
+    assert_eq!(got, want);
+    assert!(got.iter().any(|r| r.rp_id == "ssh:Work Key"));
+    assert!(got.iter().any(|r| r.rp_id == "ssh:"));
+    assert!(got.iter().any(|r| r.rp_id == "Mixed.Case"));
+}
+
+#[test]
+fn unreadable_names_from_an_imported_folder_never_reach_the_terminal() {
+    let m = Machine::new("kpxc-names");
+    init(&m);
+    let dir = m.tmp.path("keys");
+    fs::create_dir_all(&dir).unwrap();
+    let name = "x\u{1b}]0;owned\u{7}\u{1b}[2J\u{9b}31m.passkey";
+    let bad = dir.join(name);
+    fs::write(&bad, b"{}").unwrap();
+    fs::set_permissions(&bad, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&bad).is_ok() {
+        return;
+    }
+    let r = run(
+        &m,
+        &["import", "--keepassxc", dir.to_str().unwrap(), "--yes"],
+        &[],
+    );
+    assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
+    assert!(r.out.contains("Could not open"), "{}", r.out);
+    assert!(
+        r.out
+            .chars()
+            .all(|c| c == '\n' || !c.is_control() && !('\u{80}'..='\u{9f}').contains(&c)),
+        "{:?}",
+        r.out
+    );
+    let r = run(
+        &m,
+        &["import", "--keepassxc", bad.to_str().unwrap(), "--yes"],
+        &[],
+    );
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("Could not open"));
+    assert!(
+        r.message()
+            .chars()
+            .all(|c| !c.is_control() && !('\u{80}'..='\u{9f}').contains(&c))
+    );
+}
+
+#[test]
+fn remove_device_lists_the_devices_it_approved_and_devices_flags_shared_names() {
+    let a = Machine::new("rest-a");
+    let r = run(&a, &["init", "--name", "laptop", "--yes-i-saved-it"], &[]);
+    let out = r.ok();
+    let phrase = phrase_words(out).join(" ");
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let b = Machine::new("rest-b");
+    run(
+        &b,
+        &["join", "--vault", &vs, "--name", "helper"],
+        &[&phrase],
+    )
+    .ok();
+    let y = Machine::new("rest-y");
+    let pending = hirz_vault::PendingJoin::start(&vault, &y.state(), "laptop").unwrap();
+    let mut bv = Vault::open(&vault, &b.state()).unwrap();
+    let req = bv
+        .pairing_requests()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.request_id == pending.request().request_id)
+        .unwrap();
+    bv.approve_pairing(&req).unwrap();
+    let y_id = match pending.poll(&y.state()).unwrap() {
+        hirz_vault::PairingPoll::Joined(v) => crate::ui::hex(&v.device_id()),
+        other => panic!("{other:?}"),
+    };
+    let b_id = crate::ui::hex(&bv.device_id());
+
+    let out = run(&a, &["devices"], &[]).ok().to_string();
+    assert_eq!(out.matches("laptop (*)").count(), 2, "{out}");
+    assert!(
+        out.contains("Another device in use has the same name"),
+        "{out}"
+    );
+    let r = run(&a, &["devices", "--json"], &[]);
+    let v: Value = serde_json::from_str(&r.out).unwrap();
+    let shared = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["same_name_as_another"] == true)
+        .count();
+    assert_eq!(shared, 2);
+
+    let r = run(&a, &["remove-device", &b_id[..8]], &["n"]);
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(
+        r.out
+            .contains("WARNING: 1 device in use was added through \"helper\""),
+        "{}",
+        r.out
+    );
+    assert!(r.out.contains(&y_id[..12]), "{}", r.out);
+    let out = run(&a, &["remove-device", &b_id[..8]], &["y"])
+        .ok()
+        .to_string();
+    assert!(
+        out.contains("Still in use, added through \"helper\""),
+        "{out}"
+    );
+    let out = run(&a, &["devices"], &[]).ok().to_string();
+    assert!(out.contains("2 devices in use"), "{out}");
 }

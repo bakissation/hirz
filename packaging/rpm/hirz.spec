@@ -32,7 +32,7 @@ BuildRequires:  cmake
 BuildRequires:  systemd-rpm-macros
 
 Requires:       polkit
-Requires:       zenity
+Requires:       zenity >= 4
 Requires:       mozilla-filesystem
 Recommends:     fprintd
 Suggests:       xdg-native-messaging-proxy
@@ -93,16 +93,13 @@ echo 'enable hirz-uhid-broker.socket' > %{buildroot}%{_presetdir}/80-hirz.preset
 
 install -Dm0644 packaging/udev/70-hirz.rules %{buildroot}%{_udevrulesdir}/70-hirz.rules
 install -Dm0644 packaging/udev/72-hirz.rules %{buildroot}%{_udevrulesdir}/72-hirz.rules
+install -Dm0644 packaging/udev/99-zzz-hirz.rules %{buildroot}%{_udevrulesdir}/99-zzz-hirz.rules
 install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
   %{buildroot}%{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
 install -Dm0644 assets/brand/hirz-app-icon.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/hirz.svg
 install -Dm0644 assets/brand/app-icon-256.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/hirz.png
 install -d %{buildroot}%{_modulesloaddir}
 echo uhid > %{buildroot}%{_modulesloaddir}/hirz.conf
-%{_mandir}/man1/hirz.1*
-%{_mandir}/man1/hirzd.1*
-%{_mandir}/man1/hirz-nmh.1*
-%{_mandir}/man8/hirz-uhid-broker.8*
 
 # Firefox on Fedora reads /usr/lib64/mozilla; the portal and proxy also read /usr/lib. The second
 # path is a relative symlink: rpmbuild would hardlink identical files across file systems.
@@ -141,7 +138,7 @@ fi
 
 %postun
 %systemd_postun_with_restart hirz-uhid-broker.service
-%systemd_user_postun hirzd.service
+%systemd_user_postun_with_restart hirzd.service
 %udev_rules_update
 
 %files
@@ -159,10 +156,15 @@ fi
 %{_presetdir}/80-hirz.preset
 %{_udevrulesdir}/70-hirz.rules
 %{_udevrulesdir}/72-hirz.rules
+%{_udevrulesdir}/99-zzz-hirz.rules
 %{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
 %{_datadir}/icons/hicolor/scalable/apps/hirz.svg
 %{_datadir}/icons/hicolor/256x256/apps/hirz.png
 %{_modulesloaddir}/hirz.conf
+%{_mandir}/man1/hirz.1*
+%{_mandir}/man1/hirzd.1*
+%{_mandir}/man1/hirz-nmh.1*
+%{_mandir}/man8/hirz-uhid-broker.8*
 %{_prefix}/lib/mozilla/native-messaging-hosts/hirz.json
 %if "%{_libdir}" != "%{_prefix}/lib"
 %{_libdir}/mozilla/native-messaging-hosts/hirz.json

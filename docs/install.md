@@ -23,12 +23,25 @@ then, build the package yourself (see
 
 Every route installs the same files. hirz is not offered as a snap or a Flatpak (see
 `packaging/snap/README.md`); browsers installed as snaps or Flatpaks work with the
-packages.
+packages. The release workflow can upload a draft snap to the Snap Store's `edge` channel for
+testing; it is not part of the signed checksums and not a supported route.
+
+### Signing keys
+
+Two keys sign what hirz publishes. Compare the fingerprint your tools show with these, with
+the ones in the [README](../README.md) and with the notes of the release you install; they are
+published in all three places, away from the repository's own site. If one differs, stop and
+report it (see [SECURITY.md](../SECURITY.md)).
+
+| Key | Fingerprint | What it signs |
+|---|---|---|
+| hirz archive key | `5831 16C2 55B8 72AF 888C  A940 E599 5331 0261 779A` | the apt and dnf repository |
+| hirz PPA upload key | `4580 9408 7F6D 1BFF 4550  8EEA A5E3 5D5E 1CCF F011` | the source packages uploaded to the Ubuntu PPA (published on keyserver.ubuntu.com) |
 
 ### apt repository (Debian and Ubuntu)
 
-Available from the first release. The repository and its packages are signed with the hirz
-archive key.
+Available from the first release. The repository's `Release` file is signed with the hirz
+archive key, and apt checks every package against the hashes in it.
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -50,7 +63,10 @@ The one-line format works too:
 `deb [signed-by=/etc/apt/keyrings/hirz-archive-keyring.gpg] https://bakissation.github.io/hirz/apt stable main`
 in `/etc/apt/sources.list.d/hirz.list`.
 
-Archive key fingerprint: published here with the first release.
+Archive key fingerprint: `5831 16C2 55B8 72AF 888C  A940 E599 5331 0261 779A`. `gpg --show-keys`
+prints it in this form; it must match, and the same fingerprint is in the README and in the
+release notes. The repository's metadata has no expiry date, so apt cannot tell an old copy from
+a new one: it is served over HTTPS from GitHub Pages only.
 
 ### Ubuntu PPA
 
@@ -61,6 +77,12 @@ Available from the first release. Built by Launchpad from the release sources, f
 sudo add-apt-repository ppa:bakissation/hirz
 sudo apt install hirz
 ```
+
+Launchpad builds the packages and signs the PPA archive with its own key, which
+`add-apt-repository` installs and which the PPA's page shows; apt trusts that key, not ours.
+The source packages in the PPA were uploaded signed with the hirz PPA upload key
+`4580 9408 7F6D 1BFF 4550  8EEA A5E3 5D5E 1CCF F011`: download the `.dsc` file from the PPA's
+page ("View package details") and run `gpg --verify` on it to see which key signed it.
 
 ### dnf repository (Fedora)
 
@@ -85,7 +107,7 @@ gpgkey=https://bakissation.github.io/hirz/hirz-archive-keyring.asc
 ```
 
 dnf shows the key fingerprint the first time and asks before importing it; compare it with
-the fingerprint in the apt section above.
+the archive key fingerprint above (it is the same key as for apt).
 
 ### Fedora COPR
 
@@ -114,7 +136,7 @@ signature; [release.md](release.md#verifying-a-release) shows how to check them.
    sudo apt install ./hirz_*_amd64.deb
    ```
 
-   apt also installs what hirz needs (polkit and zenity) and suggests fprintd for
+   apt also installs what hirz needs (polkit and zenity 4 or newer) and suggests fprintd for
    fingerprints.
 
 #### Fedora
@@ -204,10 +226,14 @@ restart:
 
 Firefox Developer Edition and Nightly can install it permanently: set
 `xpinstall.signatures.required` to `false` in `about:config`, then open the `.xpi` file
-with Firefox.
+with Firefox. That setting turns off Firefox's check that add-ons are signed, for every
+add-on, so any add-on you or a web page installs afterwards loads unchecked: use it only in a
+profile you keep for trying hirz, and set it back to `true` when you are done.
 
 Do not run `hirz setup firefox` when you installed a package: the package already installed
 the Firefox connection system-wide, and a copy in your home folder would take precedence.
+The command refuses while the packaged manifest exists; `--force` overrides that for a
+build from source.
 
 ### Firefox from Snap (Ubuntu's default)
 
@@ -251,7 +277,7 @@ Start with `hirz status`. It shows each part and what is missing.
 | Not set up | Run `hirz init`, or `hirz join --vault DIR` on a second computer |
 | Vault folder missing | Your sync tool has not copied it yet, or it moved. Check the folder |
 | Broker socket not present | `sudo systemctl enable --now hirz-uhid-broker.socket` |
-| polkit action not installed, or zenity missing | Reinstall the package |
+| polkit action not installed, or zenity missing or older than 4 | Reinstall the package, or update zenity |
 | No approval method works | Make sure you are in a desktop session (polkit needs its agent), or set a PIN with `hirz pin set` |
 | A manifest under your home folder (`~/.mozilla/...` or `~/.config/mozilla/...`) | Delete that file unless you develop hirz: it overrides the one from the package |
 | Firefox is a Snap or Flatpak | See the sections above |
@@ -264,6 +290,14 @@ More checks:
 - Is the virtual key there? While `hirzd` runs, `ls -l /dev/hidraw*` shows one node owned by
   you. If not, check that the kernel module is loaded: `lsmod | grep uhid` (load it with
   `sudo modprobe uhid`).
+- The broker log (`journalctl -u hirz-uhid-broker`) says "refused uid ...": the broker serves
+  only a user with an active session on a seat, that is, a login at the computer's own screen
+  (not `ssh`, not a session that went to the background after switching users), and only while
+  the three hirz udev rule files (`70-hirz.rules`, `72-hirz.rules`, `99-zzz-hirz.rules`) are
+  installed and not masked by a link to `/dev/null` or an empty file of the same name in
+  `/etc/udev/rules.d`. The broker log names a missing rule at start. Log in at the computer,
+  or reinstall the package. After a user switch, the key comes back within a minute of
+  switching back.
 - Snap Firefox does not see the key: `snap connections firefox` must show `u2f-devices`
   connected.
 

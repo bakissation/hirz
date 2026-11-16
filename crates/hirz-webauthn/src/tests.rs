@@ -723,18 +723,29 @@ fn cross_origin_frames_are_not_handled() {
 #[test]
 fn origin_and_rp_id_errors() {
     let mut fake = Fake::default();
-    for (origin, name) in [
-        ("null", "NotAllowedError"),
-        ("http://example.com", "SecurityError"),
-        ("https://127.0.0.1", "SecurityError"),
-        ("https://example.com.", "SecurityError"),
-        ("https://EXAMPLE.com", "SecurityError"),
-        ("https://example.com/path", "SecurityError"),
-        ("chrome-extension://abc", "SecurityError"),
+    for origin in [
+        "null",
+        "http://example.com",
+        "https://127.0.0.1",
+        "https://example.com.",
+        "https://EXAMPLE.com",
+        "https://example.com/path",
+        "chrome-extension://abc",
+        "https://my_app.example.com",
+        "https://-a.example.com",
+        "https://a-.example.com",
     ] {
-        let reply = run(&envelope("create", origin, create_options()), &mut fake);
-        assert_eq!(error_of(&reply), name, "{origin}");
+        for kind in ["create", "get"] {
+            let options = if kind == "create" {
+                create_options()
+            } else {
+                get_options()
+            };
+            let reply = run(&envelope(kind, origin, options), &mut fake);
+            assert_eq!(error_of(&reply), "NotHandled", "{kind} {origin}");
+        }
     }
+    assert!(fake.made.is_none() && fake.got.is_none());
     for (rp_id, name) in [
         ("com", "SecurityError"),
         ("", "SecurityError"),
@@ -764,7 +775,7 @@ fn origin_and_rp_id_errors() {
 fn core_errors_map_to_dom_names() {
     for (err, name) in [
         (CoreError::CredentialExcluded, "InvalidStateError"),
-        (CoreError::NoCredentials, "NotAllowedError"),
+        (CoreError::NoCredentials, "NotHandled"),
         (CoreError::UvRequiredUnavailable, "NotAllowedError"),
         (
             CoreError::Approval(ApprovalError::Denied),
@@ -781,6 +792,10 @@ fn core_errors_map_to_dom_names() {
         (
             CoreError::Approval(ApprovalError::Locked),
             "NotAllowedError",
+        ),
+        (
+            CoreError::Approval(ApprovalError::NothingShown),
+            "NotHandled",
         ),
         (
             CoreError::Approval(ApprovalError::Internal("/secret/path".into())),
@@ -807,6 +822,94 @@ fn core_errors_map_to_dom_names() {
         }
     }
     assert_eq!(ErrorName::AbortError.as_str(), "AbortError");
+}
+
+#[test]
+fn no_credential_goes_to_firefox_without_a_message_about_the_vault() {
+    for (kind, options) in [
+        ("get", get_options()),
+        ("get", {
+            let mut o = get_options();
+            set(&mut o, &["allowCredentials"], Some(j("[]")));
+            o
+        }),
+    ] {
+        let mut fake = Fake {
+            fail: Some(CoreError::NoCredentials),
+            ..Fake::default()
+        };
+        let reply = run(&envelope(kind, ORIGIN, options), &mut fake);
+        assert_eq!(error_of(&reply), "NotHandled");
+        assert_eq!(
+            reply.get("message").and_then(Json::as_str),
+            Some("no credential here")
+        );
+    }
+}
+
+#[test]
+fn a_refusal_before_any_window_is_the_same_answer_as_no_credential() {
+    let mut replies = Vec::new();
+    for err in [
+        CoreError::NoCredentials,
+        CoreError::Approval(ApprovalError::NothingShown),
+    ] {
+        let mut fake = Fake {
+            fail: Some(err),
+            ..Fake::default()
+        };
+        replies.push(run(&envelope("get", ORIGIN, get_options()), &mut fake));
+    }
+    assert_eq!(error_of(&replies[1]), "NotHandled");
+    assert_eq!(replies[0], replies[1]);
+    for denied in [
+        CoreError::Approval(ApprovalError::Denied),
+        CoreError::UvRequiredUnavailable,
+    ] {
+        let mut fake = Fake {
+            fail: Some(denied),
+            ..Fake::default()
+        };
+        let reply = run(&envelope("get", ORIGIN, get_options()), &mut fake);
+        assert_eq!(
+            error_of(&reply),
+            "NotAllowedError",
+            "a prompt that was shown stays a refusal"
+        );
+    }
+}
+
+#[test]
+fn appid_is_left_to_firefox() {
+    for appid in ["https://example.com/appid.json", ""] {
+        let mut options = get_options();
+        set(
+            &mut options,
+            &["extensions", "appid"],
+            Some(Json::from(appid)),
+        );
+        let mut fake = Fake::default();
+        let reply = run(&envelope("get", ORIGIN, options), &mut fake);
+        assert_eq!(error_of(&reply), "NotHandled", "{appid:?}");
+        assert!(fake.got.is_none());
+    }
+    let mut fake = Fake::default();
+    let reply = run(&envelope("get", ORIGIN, get_options()), &mut fake);
+    assert_eq!(reply.get("ok"), Some(&Json::Bool(true)));
+}
+
+#[test]
+fn busy_refuses_without_a_prompt() {
+    let reply = crate::envelope::error_reply(Some(5), &crate::Error::Busy("host busy"));
+    assert_eq!(
+        reply.get("error").and_then(Json::as_str),
+        Some("NotAllowedError")
+    );
+    assert_eq!(
+        reply.get("message").and_then(Json::as_str),
+        Some("host busy")
+    );
+    assert_eq!(reply.get("id").and_then(Json::as_u64), Some(5));
 }
 
 #[test]
@@ -1223,10 +1326,11 @@ fn list_caps_names_and_count() {
 #[test]
 fn list_origin_and_rp_id_failures() {
     for (origin, rp_id, name) in [
-        ("null", None, "NotAllowedError"),
-        ("http://example.com", None, "SecurityError"),
-        ("https://127.0.0.1", None, "SecurityError"),
-        ("https://example.com/path", None, "SecurityError"),
+        ("null", None, "NotHandled"),
+        ("http://example.com", None, "NotHandled"),
+        ("https://127.0.0.1", None, "NotHandled"),
+        ("https://example.com/path", None, "NotHandled"),
+        ("https://my_app.example.com", None, "NotHandled"),
         (ORIGIN, Some("com"), "SecurityError"),
         (ORIGIN, Some(""), "SecurityError"),
         (ORIGIN, Some("example.com."), "SecurityError"),
@@ -1296,7 +1400,7 @@ fn list_refuses_frames_and_bad_options() {
 fn list_engine_errors() {
     for (err, name) in [
         (CoreError::Vault("broken".into()), "UnknownError"),
-        (CoreError::NoCredentials, "NotAllowedError"),
+        (CoreError::NoCredentials, "NotHandled"),
     ] {
         let mut fake = Fake {
             fail: Some(err),

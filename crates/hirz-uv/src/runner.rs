@@ -4,7 +4,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use hirz_crypto::Secret;
@@ -54,6 +54,8 @@ pub enum RunResult {
         /// Wiped on drop: zenity prints the typed PIN here.
         stdout: Secret,
         stderr: Vec<u8>,
+        /// How long the child ran.
+        elapsed: Duration,
     },
     TimedOut,
     /// The program is not installed in a trusted system directory.
@@ -68,11 +70,13 @@ impl core::fmt::Debug for RunResult {
                 code,
                 stdout,
                 stderr,
+                elapsed,
             } => f
                 .debug_struct("Exited")
                 .field("code", code)
                 .field("stdout_len", &stdout.len())
                 .field("stderr_len", &stderr.len())
+                .field("elapsed", elapsed)
                 .finish(),
             RunResult::TimedOut => f.write_str("TimedOut"),
             RunResult::NotFound => f.write_str("NotFound"),
@@ -97,7 +101,14 @@ pub trait CommandRunner {
     fn polkit_action_installed(&self) -> bool;
     fn process_identity(&self) -> Option<ProcessIdentity>;
     fn username(&self) -> Option<String>;
+    /// Major version of the installed zenity, `None` when it cannot be told.
+    fn zenity_major_version(&self) -> Option<u32> {
+        None
+    }
 }
+
+/// hirz-uv relies on zenity 4 behaviour (docs/approval.md, "zenity 4 behaviour hirz relies on").
+pub const MIN_ZENITY_MAJOR: u32 = 4;
 
 /// Directories searched for helper programs. PATH is ignored on purpose: a same-user process
 /// could otherwise point it at a fake `pkcheck` that always exits 0.
@@ -136,16 +147,50 @@ const DESKTOP_ENV: &[&str] = &[
     "LC_CTYPE",
 ];
 
-/// Finds `name` in [`TRUSTED_DIRS`]; the file must be a root-owned executable that neither
-/// group nor others can write.
+/// Finds `name` in [`TRUSTED_DIRS`]. See [`trusted_file`] for what the file must be.
 pub fn resolve_tool(name: &str) -> Option<PathBuf> {
+    TRUSTED_DIRS
+        .iter()
+        .find_map(|dir| trusted_file(&Path::new(dir).join(name)))
+}
+
+/// The real path of `path` when the file is a root-owned executable that neither group nor others
+/// can write, and every directory above both the link path and the real path is root-owned and
+/// closed to group and others. A sticky directory is accepted: nobody but root can replace an
+/// entry root owns in it. Symlinks are followed, so a link planted in a writable directory is
+/// refused whatever it points to.
+fn trusted_file(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
-    TRUSTED_DIRS.iter().find_map(|dir| {
-        let path = Path::new(dir).join(name);
-        let md = std::fs::metadata(&path).ok()?;
-        let mode = md.mode();
-        (md.is_file() && md.uid() == 0 && mode & 0o022 == 0 && mode & 0o111 != 0).then_some(path)
+    if !dirs_closed_to_non_root(path) {
+        return None;
+    }
+    let real = std::fs::canonicalize(path).ok()?;
+    let md = std::fs::metadata(&real).ok()?;
+    let mode = md.mode();
+    if !(md.is_file() && md.uid() == 0 && mode & 0o022 == 0 && mode & 0o111 != 0) {
+        return None;
+    }
+    dirs_closed_to_non_root(&real).then_some(real)
+}
+
+fn dirs_closed_to_non_root(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    path.ancestors().skip(1).all(|dir| {
+        std::fs::metadata(dir).is_ok_and(|m| {
+            m.is_dir() && m.uid() == 0 && (m.mode() & 0o022 == 0 || m.mode() & 0o1000 != 0)
+        })
     })
+}
+
+/// The leading number of `zenity --version` output ("4.0.1" gives 4).
+pub fn parse_major_version(out: &[u8]) -> Option<u32> {
+    let text = core::str::from_utf8(out).ok()?;
+    let digits: String = text
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -155,6 +200,7 @@ struct Running {
     child: Child,
     out: mpsc::Receiver<Option<Secret>>,
     err: mpsc::Receiver<Option<Secret>>,
+    started: Instant,
 }
 
 impl Running {
@@ -188,7 +234,12 @@ impl Running {
         };
         let out = spawn_reader(child.stdout.take());
         let err = spawn_reader(child.stderr.take());
-        Ok(Running { child, out, err })
+        Ok(Running {
+            child,
+            out,
+            err,
+            started: Instant::now(),
+        })
     }
 
     fn poll(&mut self) -> Result<Option<ExitStatus>, RunResult> {
@@ -211,6 +262,7 @@ impl Running {
                 code: status.code(),
                 stdout,
                 stderr: stderr.to_vec(),
+                elapsed: self.started.elapsed(),
             },
             _ => RunResult::Failed("output missing or over the size limit".into()),
         }
@@ -324,6 +376,25 @@ impl CommandRunner for SystemRunner {
         read_capped_file(Path::new("/etc/passwd"), 4 * 1024 * 1024)
             .and_then(|p| passwd_name_for_uid(&p, uid))
             .or_else(|| std::env::var("USER").ok().filter(|u| valid_username(u)))
+    }
+
+    fn zenity_major_version(&self) -> Option<u32> {
+        static VERSION: OnceLock<Option<u32>> = OnceLock::new();
+        *VERSION.get_or_init(|| {
+            match self.run(&CommandSpec {
+                tool: Tool::Zenity,
+                args: vec!["--version".into()],
+                env: EnvPolicy::Desktop,
+                timeout: Duration::from_secs(5),
+            }) {
+                RunResult::Exited {
+                    code: Some(0),
+                    stdout,
+                    ..
+                } => parse_major_version(&stdout),
+                _ => None,
+            }
+        })
     }
 }
 
@@ -451,6 +522,7 @@ mod tests {
             code: Some(0),
             stdout: Secret::new(b"1234".to_vec()),
             stderr: vec![],
+            elapsed: Duration::ZERO,
         };
         let s = format!("{r:?}");
         assert!(!s.contains("49"), "{s}");
@@ -529,5 +601,68 @@ mod tests {
         let id = SystemRunner.process_identity().unwrap();
         assert_eq!(id.pid, std::process::id());
         assert!(id.start_time > 0);
+    }
+
+    #[test]
+    fn zenity_versions() {
+        assert_eq!(parse_major_version(b"4.0.1\n"), Some(4));
+        assert_eq!(parse_major_version(b"3.44.0"), Some(3));
+        assert_eq!(parse_major_version(b"10.1\n"), Some(10));
+        assert_eq!(parse_major_version(b" 4.2.1"), Some(4));
+        assert_eq!(parse_major_version(b"zenity 4.0"), None);
+        assert_eq!(parse_major_version(b""), None);
+        assert_eq!(parse_major_version(b"\xff4.0"), None);
+        assert_eq!(parse_major_version(b"99999999999.0"), None);
+    }
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let p =
+                std::env::temp_dir().join(format!("hirz-uv-runner-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Scratch(p)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn helpers_must_come_from_root_only_directories() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+        let d = Scratch::new("trusted");
+        if std::fs::metadata(&d.0).unwrap().uid() == 0 {
+            return;
+        }
+        let tool = d.0.join("pkcheck");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Owned by the test user and in a directory the user owns: never trusted.
+        assert_eq!(trusted_file(&tool), None);
+        // A link to a genuine system binary does not borrow its credentials when the directory
+        // that holds the link is not closed to everyone but root.
+        let link = d.0.join("true");
+        symlink("/usr/bin/true", &link).unwrap();
+        if std::fs::metadata("/usr/bin/true").is_ok() {
+            assert!(trusted_file(Path::new("/usr/bin/true")).is_some());
+            assert_eq!(trusted_file(&link), None);
+        }
+        assert_eq!(trusted_file(&d.0.join("missing")), None);
+        assert_eq!(trusted_file(Path::new("/usr/bin")), None);
+        assert_eq!(trusted_file(Path::new("/")), None);
+    }
+
+    #[test]
+    fn the_real_directories_of_a_system_helper_are_closed() {
+        if let Some(p) = resolve_tool("sh") {
+            assert!(p.is_absolute());
+            assert!(dirs_closed_to_non_root(&p));
+        }
     }
 }

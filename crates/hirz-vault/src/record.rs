@@ -19,7 +19,7 @@ const RECORD_VERSION: u8 = 2;
 const TOMBSTONE_VERSION: u8 = 2;
 const V1: u8 = 1;
 const V1_CREDENTIAL_ID_LEN: usize = 32;
-const EVENT_VERSION: u8 = 1;
+const EVENT_VERSION: u8 = 2;
 
 /// The two CTAP hmac-secret values (CredRandomWithUV and CredRandomWithoutUV).
 #[derive(Clone, PartialEq, Eq)]
@@ -232,12 +232,110 @@ impl CredentialRecord {
     }
 }
 
+/// `endorser` all zero means the recovery key endorsed the device (vault creation or a recovery
+/// phrase join); otherwise it is the id of the device that approved the pairing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceAnnouncement {
     pub(crate) device_id: DeviceId,
     pub(crate) name: String,
     pub(crate) x25519_public: [u8; 32],
     pub(crate) added_at: u64,
+    pub(crate) signing_public: [u8; 32],
+    pub(crate) endorser: DeviceId,
+    pub(crate) signature: [u8; 64],
+}
+
+pub(crate) const RECOVERY_ENDORSER: DeviceId = [0u8; 16];
+
+/// Device ids are bound to the device's signing key, so a device cannot be re-announced with
+/// another key.
+pub(crate) fn device_id_for(signing_public: &[u8; 32]) -> DeviceId {
+    let h = hirz_crypto::sha256(&codec::aad("hirz device id v1", &[signing_public]));
+    let mut out = [0u8; 16];
+    for (o, b) in out.iter_mut().zip(h.iter()) {
+        *o = *b;
+    }
+    out
+}
+
+impl DeviceAnnouncement {
+    pub(crate) fn endorsement_message(&self, vault_id: &[u8; 16]) -> Vec<u8> {
+        codec::aad(
+            "hirz device endorsement v1",
+            &[
+                vault_id,
+                &self.device_id,
+                self.name.as_bytes(),
+                &self.x25519_public,
+                &self.added_at.to_be_bytes(),
+                &self.signing_public,
+                &self.endorser,
+            ],
+        )
+    }
+
+    pub(crate) fn endorse(
+        &mut self,
+        vault_id: &[u8; 16],
+        seed: &[u8; 32],
+    ) -> Result<(), VaultError> {
+        self.signature =
+            hirz_crypto::ed25519::sign_with_seed(seed, &self.endorsement_message(vault_id))?;
+        Ok(())
+    }
+
+    pub(crate) fn endorsement_valid(
+        &self,
+        vault_id: &[u8; 16],
+        endorser_public: &[u8; 32],
+    ) -> bool {
+        hirz_crypto::ed25519::verify(
+            endorser_public,
+            &self.endorsement_message(vault_id),
+            &self.signature,
+        )
+        .is_ok()
+    }
+
+    pub(crate) fn encode(&self) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        if self.name.len() > MAX_DEVICE_NAME_LEN {
+            return Err(VaultError::InvalidRecord("device name"));
+        }
+        let mut w = Writer::new(1);
+        w.field(0x01, &self.device_id)?;
+        w.field(0x02, self.name.as_bytes())?;
+        w.field(0x03, &self.x25519_public)?;
+        w.u64_field(0x04, self.added_at)?;
+        w.field(0x05, &self.signing_public)?;
+        w.field(0x06, &self.endorser)?;
+        w.field(0x07, &self.signature)?;
+        Ok(w.finish())
+    }
+
+    pub(crate) fn decode(payload: &[u8]) -> Result<DeviceAnnouncement, VaultError> {
+        let mut f = Fields::new(payload, 1)?;
+        let device_id = expect_field(&mut f, 0x01).and_then(codec::fixed::<16>)?;
+        let name =
+            expect_field(&mut f, 0x02).and_then(|v| codec::string_value(v, MAX_DEVICE_NAME_LEN))?;
+        let x25519_public = expect_field(&mut f, 0x03).and_then(codec::fixed::<32>)?;
+        let added_at = expect_field(&mut f, 0x04).and_then(codec::u64_value)?;
+        let signing_public = expect_field(&mut f, 0x05).and_then(codec::fixed::<32>)?;
+        let endorser = expect_field(&mut f, 0x06).and_then(codec::fixed::<16>)?;
+        let signature = expect_field(&mut f, 0x07).and_then(codec::fixed::<64>)?;
+        expect_end(&mut f)?;
+        if device_id_for(&signing_public) != device_id || endorser == device_id {
+            return Err(VaultError::Corrupt("device announcement"));
+        }
+        Ok(DeviceAnnouncement {
+            device_id,
+            name,
+            x25519_public,
+            added_at,
+            signing_public,
+            endorser,
+            signature,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,24 +359,80 @@ impl EventKind {
     }
 }
 
+/// The first 16 bytes of an event's hash (docs/vault-format.md, 5.2); it covers the origin, the
+/// content and the origin's signing key, so it stays the same through every re-write.
+pub(crate) type EventId = [u8; 16];
+
 /// An event with its merge identity. `origin` stays the same when an event is re-written
-/// under a new key generation, so the merge order never changes through a rotation.
+/// under a new key generation, so the merge order never changes through a rotation. The origin
+/// device signs it, so no other device can write an event in its name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Event {
     pub(crate) kind: EventKind,
     pub(crate) origin_author: DeviceId,
     pub(crate) origin_lamport: u64,
+    /// Ed25519 key of the origin device; the origin id is derived from it.
+    pub(crate) signer: [u8; 32],
+    pub(crate) signature: [u8; 64],
 }
 
 impl Event {
-    pub(crate) fn encode_body(&self) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    pub(crate) fn signed(
+        kind: EventKind,
+        origin_author: DeviceId,
+        origin_lamport: u64,
+        seed: &[u8; 32],
+        vault_id: &[u8; 16],
+    ) -> Result<Event, VaultError> {
+        let mut e = Event {
+            kind,
+            origin_author,
+            origin_lamport,
+            signer: hirz_crypto::ed25519::public_from_seed(seed)?,
+            signature: [0u8; 64],
+        };
+        e.signature =
+            hirz_crypto::ed25519::sign_with_seed(seed, &signature_message(vault_id, &e.digest()?))?;
+        Ok(e)
+    }
+
+    /// SHA-256 of the signed fields (everything but the signature and the author tag).
+    pub(crate) fn digest(&self) -> Result<[u8; 32], VaultError> {
+        Ok(hirz_crypto::sha256(&self.signed_part()?))
+    }
+
+    pub(crate) fn id(&self, vault_id: &[u8; 16]) -> Result<EventId, VaultError> {
+        Ok(event_id(vault_id, &self.digest()?))
+    }
+
+    /// The origin id matches the signing key and the signature over `digest` verifies.
+    pub(crate) fn signature_valid(&self, vault_id: &[u8; 16], digest: &[u8; 32]) -> bool {
+        device_id_for(&self.signer) == self.origin_author
+            && hirz_crypto::ed25519::verify(
+                &self.signer,
+                &signature_message(vault_id, digest),
+                &self.signature,
+            )
+            .is_ok()
+    }
+
+    fn signed_part(&self) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         let payload = self.encode_payload()?;
         let mut w = Writer::new(EVENT_VERSION);
         w.u8_field(0x01, self.kind.code())?;
         w.field(0x02, &self.origin_author)?;
         w.u64_field(0x03, self.origin_lamport)?;
         w.field(0x04, &payload)?;
+        w.field(0x05, &self.signer)?;
         Ok(w.finish())
+    }
+
+    pub(crate) fn encode_body(&self) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        let mut body = self.signed_part()?;
+        body.push(0x06);
+        body.extend_from_slice(&64u16.to_be_bytes());
+        body.extend_from_slice(&self.signature);
+        Ok(body)
     }
 
     fn encode_payload(&self) -> Result<Zeroizing<Vec<u8>>, VaultError> {
@@ -292,17 +446,7 @@ impl Event {
                 w.field(0x01, id)?;
                 Ok(w.finish())
             }
-            EventKind::DeviceAdded(d) => {
-                if d.name.len() > MAX_DEVICE_NAME_LEN {
-                    return Err(VaultError::InvalidRecord("device name"));
-                }
-                let mut w = Writer::new(1);
-                w.field(0x01, &d.device_id)?;
-                w.field(0x02, d.name.as_bytes())?;
-                w.field(0x03, &d.x25519_public)?;
-                w.u64_field(0x04, d.added_at)?;
-                Ok(w.finish())
-            }
+            EventKind::DeviceAdded(d) => d.encode(),
             EventKind::DeviceRemoved { device_id, at } => {
                 let mut w = Writer::new(1);
                 w.field(0x01, device_id)?;
@@ -325,6 +469,8 @@ impl Event {
         let mut author = None;
         let mut lamport = None;
         let mut payload = None;
+        let mut signer = None;
+        let mut signature = None;
         let mut tag_value = None;
         let mut body_len = data.len();
         loop {
@@ -337,6 +483,8 @@ impl Event {
                 0x02 => author = Some(codec::fixed::<16>(v)?),
                 0x03 => lamport = Some(codec::u64_value(v)?),
                 0x04 => payload = Some(v),
+                0x05 => signer = Some(codec::fixed::<32>(v)?),
+                0x06 => signature = Some(codec::fixed::<64>(v)?),
                 0x7f => {
                     tag_value = Some(codec::fixed::<32>(v)?);
                     body_len = data.len().saturating_sub(before);
@@ -360,21 +508,7 @@ impl Event {
                 expect_end(&mut f)?;
                 EventKind::Tombstone(id)
             }
-            3 => {
-                let mut f = Fields::new(payload, 1)?;
-                let device_id = expect_field(&mut f, 0x01).and_then(codec::fixed::<16>)?;
-                let name = expect_field(&mut f, 0x02)
-                    .and_then(|v| codec::string_value(v, MAX_DEVICE_NAME_LEN))?;
-                let x25519_public = expect_field(&mut f, 0x03).and_then(codec::fixed::<32>)?;
-                let added_at = expect_field(&mut f, 0x04).and_then(codec::u64_value)?;
-                expect_end(&mut f)?;
-                EventKind::DeviceAdded(DeviceAnnouncement {
-                    device_id,
-                    name,
-                    x25519_public,
-                    added_at,
-                })
-            }
+            3 => EventKind::DeviceAdded(DeviceAnnouncement::decode(payload)?),
             4 => {
                 let mut f = Fields::new(payload, 1)?;
                 let device_id = expect_field(&mut f, 0x01).and_then(codec::fixed::<16>)?;
@@ -394,9 +528,24 @@ impl Event {
             kind,
             origin_author: author.ok_or(missing.clone())?,
             origin_lamport: lamport.ok_or(missing.clone())?,
+            signer: signer.ok_or(missing.clone())?,
+            signature: signature.ok_or(missing.clone())?,
         };
         Ok((event, body_len, tag_value.ok_or(missing)?))
     }
+}
+
+pub(crate) fn event_id(vault_id: &[u8; 16], digest: &[u8; 32]) -> EventId {
+    let h = hirz_crypto::sha256(&codec::aad("hirz event id v1", &[vault_id, digest]));
+    let mut out = [0u8; 16];
+    for (o, b) in out.iter_mut().zip(h.iter()) {
+        *o = *b;
+    }
+    out
+}
+
+fn signature_message(vault_id: &[u8; 16], digest: &[u8; 32]) -> Vec<u8> {
+    codec::aad("hirz event signature v1", &[vault_id, digest])
 }
 
 pub(crate) fn append_tag(body: &mut Zeroizing<Vec<u8>>, tag: &[u8; 32]) {

@@ -34,18 +34,19 @@ them: the vault is a folder of immutable files, so concurrent writers are safe b
 
 | Crate | Kind | Purpose | Allowed dependencies |
 |---|---|---|---|
-| `hirz-proto` | lib | CBOR (encode + strict decode), COSE_Key, authenticatorData, attestation object (`none`), clientDataJSON serializer, base64url, minimal strict JSON reader/writer | none |
+| `hirz-proto` | lib | CBOR (encode + strict decode), COSE_Key, authenticatorData, attestation object (`none`), clientDataJSON serializer, base64url, minimal strict JSON reader/writer | zeroize (wipes parser scratch and parsed values) |
 | `hirz-crypto` | lib | The only crate that touches crypto crates: ES256 and Ed25519 keygen/sign/verify, PKCS#8, SHA-256, HMAC, HKDF, AEAD (AES-256-GCM), X25519, RNG, Argon2id, secret types that zeroize | aws-lc-rs, argon2, zeroize |
-| `hirz-sys` | lib | The only crate with `unsafe`: prctl, rlimit, mlock, peer credentials, uhid event structs, fd passing | libc |
+| `hirz-sys` | lib | The only crate with `unsafe`: prctl, rlimit, mlock, peer credentials, flock, uhid event structs, fd passing, terminal echo (restored on Ctrl-C) and an unbuffered read of standard input | libc |
 | `hirz-vault` | lib | Vault folder format, record encryption, merge, device registry, recovery key | hirz-proto, hirz-crypto |
 | `hirz-ctap` | lib | CTAPHID framing, CTAP2 command decode/encode, PIN/UV protocols for hmac-secret, U2F later | hirz-proto, hirz-core, hirz-crypto |
 | `hirz-webauthn` | lib | Client role for the extension path: origin parsing, RP ID validation with the public suffix list, options and response JSON | hirz-proto, hirz-crypto, hirz-core |
 | `hirz-core` | lib | Authenticator engine, independent of transport | hirz-proto, hirz-crypto, hirz-vault |
 | `hirz-uv` | lib | Approval methods (polkit, fprintd, hirz PIN, click-to-allow) and trusted prompts | hirz-core, hirz-crypto, hirz-sys |
+| `hirz-session` | lib | Where the vault lives (`HIRZ_VAULT`, `HIRZ_STATE`, XDG folders) and one opened vault with its approver; shared by `hirzd` and `hirz-nmh` | hirz-core, hirz-vault, hirz-uv |
 | `hirzd` | bin | User daemon: uhid frontend | all libs |
 | `hirz-uhid-broker` | bin | Root helper: owns `/dev/uhid`, creates only a FIDO device, relays reports | hirz-sys |
 | `hirz-nmh` | bin | Native messaging host for the extension | all libs |
-| `hirz-cli` (`hirz`) | bin | `init`, `list`, `delete`, `devices`, `export`, `import`, `status` | all libs (serde_json allowed here only, for CXF) |
+| `hirz-cli` (`hirz`) | bin | `init`, `list`, `delete`, `devices`, `repair`, `export`, `import`, `status` | all libs (serde_json allowed here only, for CXF) |
 
 Rules: `unsafe_code` is forbidden in every crate except `hirz-sys`. No async runtime, no
 TLS, no D-Bus library, no URL library, no proc macros in the authenticator binaries.
@@ -142,8 +143,15 @@ vault, so credentials another frontend or the folder sync tool wrote meanwhile a
   approver is asked again with the rest, or `NoCredentials` is returned: protected credentials
   stay invisible without UV, as in CTAP.
 - **No applicable credential**: `NoCredentials` at once, without a prompt (CTAP 2.2
-  getAssertion step 7). A client role that must hide this from pages (WebAuthn privacy
-  considerations) has to delay or prompt on its own.
+  getAssertion step 7). The extension path must not tell pages (WebAuthn privacy
+  considerations): `hirz-nmh` answers it with `NotHandled`, so Firefox runs its own
+  ceremony and user interface, and a "no credential" that follows a prompt becomes a
+  refusal instead. A refusal that comes before any window was shown (the prompt budget is used
+  up, no verification method works, zenity or a helper is missing, the config is broken; the
+  approver says `ApprovalError::NothingShown`) gets the same answer, `NotHandled`: with a
+  matching credential and without one, a page sees the same thing, and only a window the user
+  saw can end in a refusal. The uhid path returns `CTAP2_ERR_NO_CREDENTIALS`, which the
+  browser, as the client, hides from the page, and `CTAP2_ERR_NOT_ALLOWED` for a refusal.
 - **Allow list**: the first applicable credential in allow-list order is used, without a
   choice (CTAP: "select any credential"). Without an allow list the user picks among the
   discoverable credentials, newest first.
@@ -154,12 +162,44 @@ vault, so credentials another frontend or the folder sync tool wrote meanwhile a
 - **User entity**: returned for flows without an allow list; name and display name only when
   the approval included UV (CTAP getAssertion, user identifiable information).
 - **Machine login**: RP ids starting with `pam://` (pam-u2f for login, sudo and screen
-  unlock) are refused with `ApprovalError::Unavailable` (CTAP2_ERR_NOT_ALLOWED) before any
+  unlock), `io.systemd.home` (systemd-homed) and `io.systemd.cryptsetup` (systemd-cryptenroll;
+  the list is `hirz_core::machine_login`) are refused with `ApprovalError::Unavailable` (CTAP2_ERR_NOT_ALLOWED) before any
   prompt or vault access, silent probes included. hirz passkeys are synced software keys and
   must not become a login factor for the computer they run on, and an unlock that waits for a
   hirz approval could deadlock.
 - **hmac-secret**: with a wrap (CTAP path) the output is encrypted into the authData
-  extensions; without one (extension path) it is returned raw in `hmac_secret_output`.
+  extensions; without one (extension path) it is returned raw in `hmac_secret_output`. As CTAP
+  specifies, a credential has two secrets, one used when the approval verified the user and one
+  when it did not. With `userVerification: "preferred"` a click approval and a password or PIN
+  approval therefore give different PRF or hmac-secret results for the same credential. A site
+  that derives keys from the output must request `required`; hirz does not force verification
+  when only `preferred` was asked.
+- **Before the prompt**: a device that was removed is refused (`ApprovalError::Unavailable`)
+  and so is a registration while the vault is read-only (a fork, a rotation conflict, or a key
+  change this device holds no key for: saving would fail), so nobody approves something that
+  cannot be stored. Signing in with existing passkeys still works in a fork. The daemons look at
+  the vault folder once per request (`hirz-session`, which tells the engine so with
+  `Engine::with_loaded_vault`); the engine reloads on its own only when it was not told. A vault
+  that reports `VaultError::Fork` or `VaultError::Removed` while a request is served is answered
+  like any other refusal (CTAP2_ERR_NOT_ALLOWED in hirzd, `NotAllowedError` in hirz-nmh) and the
+  vault stays open; hirz-nmh answers a registration with `NotHandled` when it knows beforehand
+  that it cannot be saved. A fork is logged once when it starts and once when it ends, by both
+  daemons. Requests that only read and never ask the user (`list` and capability checks in
+  hirz-nmh, silent probes in hirzd) do not scan the folder each time: they reuse the last look
+  when it is less than 3 seconds old (`Session::ensure_vault_recent`), so a page or a client
+  cannot make every request read the whole folder and run its maintenance. Anything that
+  signs, registers or prompts always looks first.
+- **After the prompt**: a prompt stays open for up to two minutes, so the engine looks again
+  once the user has approved. It checks that the request is still wanted (a cancel that arrived
+  meanwhile stops it), reloads the vault, and refuses when this device was removed meanwhile or
+  the chosen credential was deleted; the excludeList is checked against the reloaded vault. A new
+  credential is deleted again when a cancel arrives right after it was stored, and the older
+  credential of the same account is replaced only after that last check (`Engine::with_commit`).
+  hirz-nmh makes that check and the reader's handling of `cancel` exclusive under one lock: a
+  registration that is reported as cancelled was never stored, and one that is stored can no
+  longer be cancelled (a cancel that comes later finds nothing waiting, and the extension drops
+  the late answer). On the uhid path the transport drops the answer of a cancelled request, but
+  a cancel that arrives after the answer was sent cannot be undone.
 
 ## Trust boundaries
 
@@ -181,7 +221,7 @@ vault, so credentials another frontend or the folder sync tool wrote meanwhile a
 
 - Vault (synced): `$XDG_DATA_HOME/hirz/vault/` by default, or a user-chosen folder that
   `hirz init` / `hirz join` record in `$XDG_STATE_HOME/hirz/vault-path`. hirzd and
-  hirz-nmh resolve it the same way (`crates/hirzd/src/session.rs`, shared by both), with
+  hirz-nmh resolve it the same way (`crates/hirz-session`, shared by both), with
   `HIRZ_VAULT` and `HIRZ_STATE` as overrides for tests. Without a vault, hirzd refuses
   every ceremony and hirz-nmh hands every ceremony back to Firefox.
 - Device state (never synced): `$XDG_STATE_HOME/hirz/` holds the device secret, the

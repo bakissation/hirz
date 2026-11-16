@@ -5,8 +5,9 @@
 
 mod authenticator;
 mod selftest;
-mod session;
+mod trace;
 
+use std::io::IsTerminal;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use hirz_ctap::Ctap2Handler;
 use hirz_ctap::hid::{self, LoopEvent, StreamReportIo};
-use hirz_proto::hex::encode as hex;
+use hirz_session as session;
 use hirz_uv::{HirzApprover, SystemRunner};
 
 use authenticator::{Notice, VaultAuthenticator};
@@ -24,6 +25,9 @@ use session::{Session, Settings};
 const DEFAULT_SOCKET: &str = "/run/hirz/uhid.sock";
 const SOCKET_ENV: &str = "HIRZ_BROKER_SOCKET";
 const MLOCK_ENV: &str = "HIRZ_MLOCK";
+/// The ceremony timeout is capped below the CTAPHID transaction limit, so a prompt ends before the
+/// browser is told the request timed out (docs/approval.md).
+const APPROVAL_MARGIN: Duration = Duration::from_secs(5);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const STABLE_CONNECTION: Duration = Duration::from_secs(30);
@@ -60,31 +64,64 @@ pub(crate) fn log_event(event: LoopEvent) {
             "CTAPHID CBOR response status 0x{status:02x}, {len} bytes"
         )),
         LoopEvent::Cancelled => log(format_args!("request cancelled")),
+        LoopEvent::Busy => log(format_args!(
+            "request refused: an earlier cancelled request is still waiting for its prompt"
+        )),
     }
 }
 
-/// `HIRZ_DEBUG_CTAP=1` logs every CTAP2 request and response in hex. Requests carry client
-/// data hashes, relying party ids and credential ids, never keys; still, keep it off normally.
+/// `HIRZ_DEBUG_CTAP=1` traces every CTAP2 request and response in hex (`trace.rs`). Requests and
+/// responses name the sites the user has accounts at, so the trace is only ever printed to a
+/// terminal: a service started with the variable set (journal, a log file) gets this notice and
+/// no trace.
 fn debug_ctap() -> bool {
-    std::env::var_os("HIRZ_DEBUG_CTAP").is_some_and(|v| v == "1")
+    if !std::env::var_os("HIRZ_DEBUG_CTAP").is_some_and(|v| v == "1") {
+        return false;
+    }
+    if std::io::stderr().is_terminal() {
+        log(format_args!(
+            "HIRZ_DEBUG_CTAP=1: tracing CTAP2 requests and responses to this terminal; account \
+             names are left out, site ids and credential ids are not"
+        ));
+        true
+    } else {
+        log(format_args!(
+            "HIRZ_DEBUG_CTAP=1 is ignored: the trace is printed to a terminal only, never to a \
+             journal or a file"
+        ));
+        false
+    }
 }
 
 struct DebugHandler(Arc<dyn hid::CborHandler>);
 
 impl hid::CborHandler for DebugHandler {
     fn handle(&self, request: &[u8], ctx: &hid::RequestContext) -> Vec<u8> {
-        log(format_args!("debug request {}", hex(request)));
+        log(format_args!("debug request {}", trace::request(request)));
         let response = self.0.handle(request, ctx);
-        log(format_args!("debug response {}", hex(&response)));
+        log(format_args!(
+            "debug response {}",
+            trace::response(request.first().copied(), &response)
+        ));
         response
     }
 
     fn wink(&self) {
         self.0.wink();
     }
+
+    fn may_block(&self, request: &[u8]) -> bool {
+        self.0.may_block(request)
+    }
 }
 
-fn serve(path: &Path, handler: Arc<dyn hid::CborHandler>) {
+/// `fresh_connection` runs after every connect to the broker, before the first report is read.
+fn serve(
+    path: &Path,
+    handler: Arc<dyn hid::CborHandler>,
+    debug: bool,
+    fresh_connection: &dyn Fn(),
+) {
     let mut delay = MIN_BACKOFF;
     loop {
         match UnixStream::connect(path) {
@@ -94,8 +131,9 @@ fn serve(path: &Path, handler: Arc<dyn hid::CborHandler>) {
                     path.display()
                 ));
                 let started = Instant::now();
+                fresh_connection();
                 let mut io = StreamReportIo::new(stream);
-                let served: Arc<dyn hid::CborHandler> = if debug_ctap() {
+                let served: Arc<dyn hid::CborHandler> = if debug {
                     Arc::new(DebugHandler(Arc::clone(&handler)))
                 } else {
                     Arc::clone(&handler)
@@ -156,8 +194,10 @@ fn main() -> ExitCode {
     }
 
     let settings = Settings::from_process();
+    let transaction = hid::Config::default().processing_timeout;
     let approver = match settings.uv_paths() {
-        Ok(paths) => HirzApprover::new(SystemRunner, &paths),
+        Ok(paths) => HirzApprover::new(SystemRunner, &paths)
+            .with_timeout_cap(transaction.saturating_sub(APPROVAL_MARGIN)),
         Err(e) => {
             log(format_args!("cannot locate the hirz folders: {e}"));
             return ExitCode::FAILURE;
@@ -168,6 +208,10 @@ fn main() -> ExitCode {
     let path = std::env::var_os(SOCKET_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));
-    serve(&path, Arc::new(Ctap2Handler::new(authenticator)));
+    let handler = Arc::new(Ctap2Handler::new(authenticator));
+    let renewed = Arc::clone(&handler);
+    serve(&path, handler, debug_ctap(), &|| {
+        renewed.regenerate_key_agreement();
+    });
     ExitCode::FAILURE
 }

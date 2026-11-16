@@ -13,6 +13,6 @@ fuzz_target!(|data: &[u8]| {
     };
     assert!(r.validate().is_ok(), "imported records are valid");
     assert!(r.algorithm == COSE_ALG_ES256 || r.algorithm == COSE_ALG_EDDSA);
-    assert!(hirz_uv::config::valid_rp_id(&r.rp_id));
+    assert!(hirz_uv::config::valid_rp_id(&r.rp_id) || r.rp_id.starts_with("ssh:"));
     assert!(r.discoverable && r.backup_eligible);
 });

@@ -21,6 +21,8 @@ hirz-webauthn = { path = "../crates/hirz-webauthn" }
 hirz-vault = { path = "../crates/hirz-vault" }
 hirz-uv = { path = "../crates/hirz-uv" }
 hirz-nmh = { path = "../crates/hirz-nmh" }
+# The CXF reader of hirz-cli also writes JSON; the same crate and features as the main workspace.
+serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 debug = 1
@@ -158,13 +160,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "vault_backup"
-path = "fuzz_targets/vault_backup.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "uv_config"
 path = "fuzz_targets/uv_config.rs"
 test = false
@@ -216,6 +211,27 @@ bench = false
 [[bin]]
 name = "import_keepassxc"
 path = "fuzz_targets/import_keepassxc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hex"
+path = "fuzz_targets/hex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope_open"
+path = "fuzz_targets/envelope_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cxf_parse"
+path = "fuzz_targets/cxf_parse.rs"
 test = false
 doc = false
 bench = false

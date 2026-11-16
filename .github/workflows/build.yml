@@ -69,6 +69,22 @@ jobs:
           mv dist/rpm/SOURCES/hirz-*.tar.gz dist/rpm/SOURCES/hirz-*-vendor.tar.xz dist/hirz-*.xpi out/
           ls -l out
 
+      - name: Rebuild the source files and compare
+        if: inputs.verify-reproducible
+        run: |
+          (cd out && sha256sum -- *) >first-sources.sha256
+          rm -rf dist
+          scripts/package-rpm.sh --sources-only
+          scripts/build-xpi.sh
+          mkdir out-second
+          mv dist/rpm/SOURCES/hirz-*.tar.gz dist/rpm/SOURCES/hirz-*-vendor.tar.xz dist/hirz-*.xpi out-second/
+          if (cd out-second && sha256sum -- *) | diff -u first-sources.sha256 -; then
+            echo "reproducible: the source tarballs and the XPI came out identical twice"
+          else
+            echo "::error::the second packaging of the sources or the XPI differs from the first"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source
@@ -108,16 +124,26 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: scripts/set-version.sh "$VERSION"
 
+      # A local path left in a binary fails the build: such a binary cannot be rebuilt elsewhere.
       - name: Build (cargo auditable, locked, remapped paths)
+        env:
+          HIRZ_REQUIRE_CLEAN_PATHS: "1"
         run: scripts/build-release.sh --auditable
 
-      - name: Rebuild from scratch and compare
+      # Another checkout path and another Cargo home, so a path or environment dependency shows up.
+      - name: Rebuild from scratch elsewhere and compare
         if: inputs.verify-reproducible
+        env:
+          HIRZ_REQUIRE_CLEAN_PATHS: "1"
         run: |
           cp dist/hirz-*-linux.sha256 first.sha256
-          rm -rf target dist/hirz-*-linux dist/hirz-*-linux.tar.gz dist/hirz-*-linux.sha256
-          scripts/build-release.sh --auditable
-          if diff -u first.sha256 dist/hirz-*-linux.sha256; then
+          second=/tmp/hirz-second-build
+          rm -rf "$second"
+          mkdir "$second"
+          tar --exclude=./target --exclude=./dist --exclude=./first.sha256 -cf - . | tar -xf - -C "$second"
+          git config --global --add safe.directory "$second"
+          (cd "$second" && CARGO_HOME=/tmp/cargo-home-second scripts/build-release.sh --auditable)
+          if diff -u first.sha256 "$second"/dist/hirz-*-linux.sha256; then
             echo "reproducible: both builds produced identical binaries and tarball"
           else
             echo "::error::the second build differs from the first"
@@ -132,6 +158,19 @@ jobs:
 
       - name: .deb
         run: scripts/package-deb.sh --no-build
+
+      - name: Repack the .deb and compare
+        if: inputs.verify-reproducible
+        run: |
+          first=$(sha256sum dist/hirz_*.deb | cut -d' ' -f1)
+          rm -f dist/hirz_*.deb dist/hirz_*.deb.sha256
+          scripts/package-deb.sh --no-build >/dev/null
+          second=$(sha256sum dist/hirz_*.deb | cut -d' ' -f1)
+          if [ "$first" != "$second" ]; then
+            echo "::error::the .deb differs between two packagings of the same binaries"
+            exit 1
+          fi
+          echo "reproducible: the .deb came out identical twice"
 
       - name: Collect
         run: |

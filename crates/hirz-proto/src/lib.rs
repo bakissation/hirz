@@ -1,6 +1,8 @@
 //! Wire formats for hirz: strict CBOR, COSE_Key, authenticatorData, `none` attestation objects,
 //! clientDataJSON, base64url, hex and strict JSON. Every decoder is a pure function over `&[u8]`
-//! with explicit limits so it can be fuzzed directly; no dependencies, no cryptography.
+//! with explicit limits so it can be fuzzed directly; no cryptography. The one dependency,
+//! `zeroize`, wipes the text and bytes a parser builds when it fails part way, and the values
+//! it returns when they are dropped.
 #![forbid(unsafe_code)]
 
 pub mod attestation;
@@ -12,6 +14,7 @@ pub mod cose;
 pub mod hex;
 pub mod json;
 pub mod time;
+mod wipe;
 
 pub const MAX_USER_ID_LEN: usize = 64;
 

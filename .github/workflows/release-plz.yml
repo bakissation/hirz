@@ -16,7 +16,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # The binary is downloaded by scripts/ci/install-release-plz.sh and checked against this hash
+  # (release-plz-x86_64-unknown-linux-musl.tar.gz); change both together (docs/release.md).
   RELEASE_PLZ_VERSION: "0.4.3"
+  RELEASE_PLZ_SHA256: "4a4cfa92ea2abaee02b40daa596a95ca2725816a6a32cb03a8f48ddead287681"
 
 jobs:
   release:
@@ -24,6 +27,8 @@ jobs:
     if: ${{ !github.event.repository.fork }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # Holds the App key and the tag signing key; the environment only allows the main branch.
+    environment: release-plz
     permissions:
       contents: write
       actions: write
@@ -34,18 +39,6 @@ jobs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
       releases: ${{ steps.release-plz.outputs.releases }}
     steps:
-      # A tag or pull request made with GITHUB_TOKEN starts no workflow. The App token makes
-      # the tag start release.yml and lets CI run on the release PR.
-      - name: GitHub App token
-        id: app
-        if: env.HAS_APP == 'true'
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -54,15 +47,36 @@ jobs:
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install
 
+      - name: Install release-plz (pinned SHA-256)
+        run: scripts/ci/install-release-plz.sh "$RELEASE_PLZ_VERSION" "$RELEASE_PLZ_SHA256" "$RUNNER_TEMP/bin"
+
+      # A tag or pull request made with GITHUB_TOKEN starts no workflow. The App token makes
+      # the tag start release.yml. Tagging and the draft release need contents write; deciding
+      # whether a commit was the release PR only reads pull requests.
+      - name: GitHub App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - name: Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       # release-plz creates the tag with the git CLI when tag.gpgSign is true (the GitHub API
-      # cannot create signed tags), so git needs the key and push access for this step only.
+      # cannot create signed tags), so git needs the key. Push access reaches git through the
+      # environment of the release-plz step below; the token is never written to the git config.
       - name: Tag signing
         if: env.HAS_TAG_KEY == 'true'
         env:
           TAG_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
           TAGGER_NAME: ${{ vars.RELEASE_TAGGER_NAME }}
           TAGGER_EMAIL: ${{ vars.RELEASE_TAGGER_EMAIL }}
-          TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: |
           key="$RUNNER_TEMP/tag-signing-key"
           (umask 077 && printf '%s\n' "$TAG_KEY" >"$key")
@@ -71,23 +85,27 @@ jobs:
           git config gpg.format ssh
           git config user.signingkey "$key"
           git config tag.gpgSign true
-          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
-          git config "http.https://github.com/.extraheader" "AUTHORIZATION: basic $auth"
 
       - name: release-plz release
         id: release-plz
-        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
-        with:
-          command: release
-          version: ${{ env.RELEASE_PLZ_VERSION }}
         env:
-          GITHUB_TOKEN: ${{ steps.app.outputs.token || github.token }}
-
-      - name: Forget the signing key and token
-        if: always()
+          GIT_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: |
-          rm -f "$RUNNER_TEMP/tag-signing-key"
-          git config --unset-all "http.https://github.com/.extraheader" || true
+          if [ "$HAS_TAG_KEY" = true ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 -w0)"
+            export GIT_CONFIG_VALUE_0
+          fi
+          out=$("$RUNNER_TEMP/bin/release-plz" release --forge github -o json)
+          echo "release_output: $out"
+          releases=$(jq -c .releases <<<"$out")
+          echo "releases=$releases" >>"$GITHUB_OUTPUT"
+          if [ "$(jq length <<<"$releases")" != 0 ]; then created=true; else created=false; fi
+          echo "releases_created=$created" >>"$GITHUB_OUTPUT"
+
+      - name: Forget the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/tag-signing-key"
 
       # Without the App, the tag was pushed with GITHUB_TOKEN and starts nothing; dispatch
       # the release workflow on the tag instead (workflow_dispatch is allowed).
@@ -106,6 +124,7 @@ jobs:
     if: ${{ !github.event.repository.fork }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    environment: release-plz
     permissions:
       contents: write
       pull-requests: write
@@ -113,7 +132,19 @@ jobs:
       HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
     outputs:
       pr: ${{ steps.release-plz.outputs.pr }}
+      head_sha: ${{ steps.head.outputs.head_sha }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Install release-plz (pinned SHA-256)
+        run: scripts/ci/install-release-plz.sh "$RELEASE_PLZ_VERSION" "$RELEASE_PLZ_SHA256" "$RUNNER_TEMP/bin"
+
       - name: GitHub App token
         id: app
         if: env.HAS_APP == 'true'
@@ -124,42 +155,102 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Rust toolchain from rust-toolchain.toml
-        run: rustup toolchain install
+      - name: Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       # The commit is made through the GraphQL API, so it is verified (signed by GitHub).
       - name: release-plz release-pr
         id: release-plz
-        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
-        with:
-          command: release-pr
-          version: ${{ env.RELEASE_PLZ_VERSION }}
         env:
-          GITHUB_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GIT_TOKEN: ${{ steps.app.outputs.token || github.token }}
+        run: |
+          out=$("$RUNNER_TEMP/bin/release-plz" release-pr \
+            --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --forge github -o json)
+          echo "release_pr_output: $out"
+          prs=$(jq -c .prs <<<"$out")
+          echo "prs=$prs" >>"$GITHUB_OUTPUT"
+          if [ "$(jq length <<<"$prs")" != 0 ]; then
+            echo "pr=$(jq -c '.[0]' <<<"$prs")" >>"$GITHUB_OUTPUT"
+            echo "prs_created=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "pr={}" >>"$GITHUB_OUTPUT"
+            echo "prs_created=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      # sync-versions reads exactly this commit, as data. A push to the branch after this step
+      # makes the commit that sync-versions makes fail (the API checks the expected head).
+      - name: Pin the head commit of the release PR
+        id: head
+        if: steps.release-plz.outputs.pr != '' && steps.release-plz.outputs.pr != '{}'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          PR: ${{ steps.release-plz.outputs.pr }}
+        run: |
+          branch=$(jq -r .head_branch <<<"$PR")
+          if ! [[ "$branch" =~ ^release-plz-[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::unexpected release branch name: $branch"
+            exit 1
+          fi
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&head=$GITHUB_REPOSITORY_OWNER:$branch" |
+            jq -r --arg repo "$GITHUB_REPOSITORY" --arg base "$GITHUB_REF_NAME" '
+              if length == 1 and .[0].base.ref == $base and .[0].head.repo.full_name == $repo
+              then .[0].head.sha else empty end')
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::no single open pull request from $branch into $GITHUB_REF_NAME in this repository"
+            exit 1
+          fi
+          echo "head_sha=$sha" >>"$GITHUB_OUTPUT"
 
       - name: Without the App, CI does not start on the release PR
         if: env.HAS_APP != 'true' && steps.release-plz.outputs.pr != '' && steps.release-plz.outputs.pr != '{}'
         run: |
           echo "::warning::the release PR was made with GITHUB_TOKEN, so the required ci check will not run on it; configure the release GitHub App (docs/release.md)"
 
+  # The release PR branch can be pushed to by anyone with write access, so here it is data only.
+  # Both scripts come from a checkout of this run's commit on main (trusted/), run on a second
+  # checkout of the exact head commit release-pr reported (data/), and only the fixed list of
+  # version files is committed. The App token is created after the data was processed.
   sync-versions:
     name: stamp the version on the release PR
     needs: release-pr
-    if: needs.release-pr.outputs.pr != '' && needs.release-pr.outputs.pr != '{}'
+    if: needs.release-pr.outputs.pr != '' && needs.release-pr.outputs.pr != '{}' && needs.release-pr.outputs.head_sha != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: release-plz
     permissions:
       contents: read
     env:
       HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
       BRANCH: ${{ fromJSON(needs.release-pr.outputs.pr).head_branch }}
       VERSION: ${{ fromJSON(needs.release-pr.outputs.pr).releases[0].version }}
+      HEAD_SHA: ${{ needs.release-pr.outputs.head_sha }}
     steps:
+      - name: Scripts, from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+
+      - name: Release PR files, as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          path: data
+          persist-credentials: false
+
+      - name: Stamp the version
+        env:
+          NO_APP: ${{ env.HAS_APP != 'true' }}
+        run: |
+          if [ "$NO_APP" = true ]; then
+            echo "::warning::no release GitHub App: stamp $VERSION on $BRANCH by hand (docs/release.md, A stable release)"
+            exit 0
+          fi
+          [ "$(git -C data rev-parse HEAD)" = "$HEAD_SHA" ]
+          trusted/scripts/set-version.sh --root data "$VERSION"
+
       - name: GitHub App token
         id: app
         if: env.HAS_APP == 'true'
@@ -169,26 +260,28 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.BRANCH }}
-          persist-credentials: false
-
-      - name: Stamp and commit
+      - name: Commit the stamped files
+        if: env.HAS_APP == 'true'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::no release GitHub App: run scripts/set-version.sh $VERSION on $BRANCH by hand"
-            exit 0
-          fi
-          scripts/set-version.sh "$VERSION"
-          mapfile -t files < <(git diff --name-only)
+          mapfile -t allowed < <(trusted/scripts/set-version.sh --list)
+          cd data
+          files=()
+          while IFS= read -r path; do
+            case " ${allowed[*]} " in
+              *" $path "*) files+=("$path") ;;
+              *)
+                echo "::error::the version script changed $path, which is not a version file"
+                exit 1
+                ;;
+            esac
+          done < <(git status --porcelain --untracked-files=all | cut -c4-)
           if [ ${#files[@]} -eq 0 ]; then
             echo "every file already carries $VERSION"
             exit 0
           fi
-          scripts/ci/commit-via-api.sh "$GITHUB_REPOSITORY" "$BRANCH" \
+          "$GITHUB_WORKSPACE/trusted/scripts/ci/commit-via-api.sh" "$GITHUB_REPOSITORY" "$BRANCH" \
             "chore: set version $VERSION in packaging files" "${files[@]}"
 
   backmerge:
@@ -198,4 +291,3 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/backmerge.yml
-    secrets: inherit

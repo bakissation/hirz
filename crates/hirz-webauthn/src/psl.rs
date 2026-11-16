@@ -16,6 +16,9 @@ const EXCEPTION: u8 = 4;
 #[derive(Debug)]
 struct Rules {
     map: HashMap<Cow<'static, str>, u8>,
+    /// Rules that could not be converted to ASCII. A dropped rule would make a public suffix
+    /// acceptable as an RP ID, so a test requires none.
+    dropped: usize,
 }
 
 fn rules() -> &'static Rules {
@@ -25,6 +28,7 @@ fn rules() -> &'static Rules {
 
 fn parse(data: &'static str) -> Rules {
     let mut map: HashMap<Cow<'static, str>, u8> = HashMap::with_capacity(10_000);
+    let mut dropped = 0usize;
     for line in data.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with("//") {
@@ -48,13 +52,21 @@ fn parse(data: &'static str) -> Rules {
         } else {
             match punycode::domain_to_ascii(body) {
                 Some(ascii) => Cow::Owned(ascii),
-                None => continue,
+                None => {
+                    dropped = dropped.saturating_add(1);
+                    continue;
+                }
             }
         };
         let entry = map.entry(key).or_insert(0);
         *entry |= kind;
     }
-    Rules { map }
+    Rules { map, dropped }
+}
+
+/// Rules of the bundled list that could not be converted to ASCII and are therefore not in the table.
+pub fn dropped_rules() -> usize {
+    rules().dropped
 }
 
 fn well_formed(host: &str) -> bool {
@@ -122,6 +134,11 @@ mod tests {
     use super::*;
 
     const VECTORS: &str = include_str!("../data/test_psl.txt");
+    // Updating the list means updating these four values and the README.
+    const LIST_VERSION: &str = "2026-11-15_20-28-43_UTC";
+    const LIST_COMMIT: &str = "fd22c6c8b3fd7e854c1eff2194cfd4ebc9854b88";
+    const LIST_RULES: usize = 10_453;
+    const LIST_IDN_RULES: usize = 459;
 
     fn normalize(s: &str) -> String {
         punycode::domain_to_ascii(&s.to_ascii_lowercase()).unwrap()
@@ -167,12 +184,31 @@ mod tests {
     #[test]
     fn table_is_complete() {
         let r = rules();
-        assert!(r.map.len() > 9_000, "{}", r.map.len());
+        assert_eq!(dropped_rules(), 0);
+        assert_eq!(r.map.len(), LIST_RULES);
         assert_eq!(r.map.get("com").copied(), Some(NORMAL));
         assert_eq!(r.map.get("github.io").copied(), Some(NORMAL));
         assert_eq!(r.map.get("ck").copied(), Some(WILDCARD));
         assert_eq!(r.map.get("www.ck").copied(), Some(EXCEPTION));
         assert!(r.map.contains_key("xn--fiqs8s"));
+    }
+
+    #[test]
+    fn bundled_list_is_the_documented_one() {
+        let header = |tag: &str| {
+            DATA.lines()
+                .find_map(|l| l.strip_prefix(tag))
+                .map(str::trim)
+                .unwrap()
+        };
+        assert_eq!(header("// VERSION:"), LIST_VERSION);
+        assert_eq!(header("// COMMIT:"), LIST_COMMIT);
+        let idn = DATA
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//") && !l.is_empty() && !l.is_ascii())
+            .count();
+        assert_eq!(idn, LIST_IDN_RULES);
     }
 
     #[test]

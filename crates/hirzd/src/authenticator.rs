@@ -11,8 +11,12 @@ use hirz_core::{
 use hirz_ctap::Authenticator;
 use hirz_ctap::hid::RequestContext;
 
+use hirz_uv::{CommandRunner, HirzApprover};
+
 use crate::log;
-use crate::session::{REMOVED_NOTICE, Session, VaultStatus};
+use crate::session::{
+    FORK_ENDED_NOTICE, FORK_NOTICE, READ_ONLY_MAX_AGE, REMOVED_NOTICE, Session, VaultStatus,
+};
 
 const NOTICE_INTERVAL: Duration = Duration::from_secs(600);
 const NO_VAULT: &str = "no hirz vault on this device; run `hirz init` first";
@@ -40,6 +44,18 @@ impl Notice {
         log(format_args!("{REMOVED_NOTICE}"));
         if self.desktop {
             notify_desktop(&format!("hirz: {REMOVED_NOTICE}."));
+        }
+    }
+
+    /// `active`: the vault folder started to report a fork (true) or stopped (false).
+    fn fork(&mut self, active: bool) {
+        if !active {
+            log(format_args!("{FORK_ENDED_NOTICE}"));
+            return;
+        }
+        log(format_args!("{FORK_NOTICE}"));
+        if self.desktop {
+            notify_desktop(&format!("hirz: {FORK_NOTICE}"));
         }
     }
 
@@ -77,6 +93,18 @@ fn notify_desktop(text: &str) {
     }
 }
 
+/// What getInfo says about user verification: whether some verifying method works right now.
+pub trait UvProbe {
+    fn uv_available(&self) -> bool;
+}
+
+impl<R: CommandRunner> UvProbe for HirzApprover<R> {
+    fn uv_available(&self) -> bool {
+        self.available_uv_methods()
+            .is_ok_and(|methods| !methods.is_empty())
+    }
+}
+
 #[derive(Debug)]
 pub struct VaultAuthenticator<A> {
     session: Session<A>,
@@ -88,11 +116,36 @@ impl<A: Approver> VaultAuthenticator<A> {
         VaultAuthenticator { session, notice }
     }
 
-    fn prepare(&mut self, ctx: &RequestContext) -> Result<(), CoreError> {
+    /// After `prepare`: the vault was looked at for this request already.
+    fn select_prepared(&mut self, ctx: &RequestContext) -> Result<(), CoreError> {
+        logged(
+            self.session
+                .with_engine(&|| ctx.is_cancelled(), |e| e.select()),
+        )
+    }
+
+    /// A fork is logged (and shown once on the desktop) when it starts and when it ends, not
+    /// with every request.
+    fn report_fork(&mut self) {
+        if let Some(active) = self.session.take_fork_change() {
+            self.notice.fork(active);
+        }
+    }
+
+    /// `probe`: a silent existence check (`up: false`), which asks nobody and writes nothing. The
+    /// browser sends one per listed credential on every page, so a probe uses the last look at the
+    /// vault folder when that is recent instead of scanning and maintaining it again.
+    fn prepare(&mut self, ctx: &RequestContext, probe: bool) -> Result<(), CoreError> {
         if ctx.is_cancelled() {
             return Err(CoreError::Approval(ApprovalError::Denied));
         }
-        match self.session.ensure_vault() {
+        let status = if probe {
+            self.session.ensure_vault_recent(READ_ONLY_MAX_AGE)
+        } else {
+            self.session.ensure_vault()
+        };
+        self.report_fork();
+        match status {
             VaultStatus::Ready => Ok(()),
             VaultStatus::Missing => {
                 self.notice.no_vault();
@@ -118,13 +171,14 @@ fn is_touch_request(req: &MakeCredentialRequest) -> bool {
     req.rp.id == "make.me.blink" || req.rp.id.starts_with('.')
 }
 
-/// pam-u2f asks with `pam://HOST`. Refused before the vault is opened or anything is shown;
-/// the engine refuses it as well.
+/// Relying party ids of machine login and disk unlock (`pam://HOST` from pam-u2f, and the ids
+/// systemd-homed and systemd-cryptenroll use; the list is in `hirz_core::machine_login`). Refused
+/// before the vault is opened or anything is shown; the engine refuses them as well.
 fn refuse_machine_login(rp_id: &str) -> Result<(), CoreError> {
     if hirz_core::engine::is_machine_login_rp_id(rp_id) {
         log(format_args!(
-            "refused rp id {rp_id:?}: hirz passkeys cannot be a login factor for this computer \
-             (pam-u2f); use a hardware security key for that"
+            "refused rp id {rp_id:?}: hirz passkeys cannot unlock or log in to this computer \
+             (pam-u2f, systemd-homed, systemd-cryptenroll); use a hardware security key for that"
         ));
         return Err(CoreError::Approval(ApprovalError::Unavailable));
     }
@@ -138,22 +192,24 @@ fn logged<T>(r: Result<T, CoreError>) -> Result<T, CoreError> {
     r
 }
 
-impl<A: Approver + Send> Authenticator for VaultAuthenticator<A> {
+impl<A: Approver + UvProbe + Send> Authenticator for VaultAuthenticator<A> {
     fn make_credential(
         &mut self,
         req: &MakeCredentialRequest,
         ctx: &RequestContext,
     ) -> Result<MakeCredentialResponse, CoreError> {
         refuse_machine_login(&req.rp.id)?;
-        self.prepare(ctx)?;
+        self.prepare(ctx, false)?;
         if is_touch_request(req) {
-            self.select(ctx)?;
+            self.select_prepared(ctx)?;
             return Err(CoreError::Approval(ApprovalError::Denied));
         }
-        logged(
+        let result = logged(
             self.session
                 .with_engine(&|| ctx.is_cancelled(), |e| e.make_credential(req, None)),
-        )
+        );
+        self.report_fork();
+        result
     }
 
     fn get_assertion(
@@ -163,18 +219,21 @@ impl<A: Approver + Send> Authenticator for VaultAuthenticator<A> {
         ctx: &RequestContext,
     ) -> Result<AssertionResponse, CoreError> {
         refuse_machine_login(&req.rp_id)?;
-        self.prepare(ctx)?;
-        logged(
+        self.prepare(ctx, !req.up)?;
+        let result = logged(
             self.session
                 .with_engine(&|| ctx.is_cancelled(), |e| e.get_assertion(req, None, hmac)),
-        )
+        );
+        self.report_fork();
+        result
     }
 
     fn select(&mut self, ctx: &RequestContext) -> Result<(), CoreError> {
-        self.prepare(ctx)?;
-        logged(
-            self.session
-                .with_engine(&|| ctx.is_cancelled(), |e| e.select()),
-        )
+        self.prepare(ctx, false)?;
+        self.select_prepared(ctx)
+    }
+
+    fn user_verification_available(&mut self) -> bool {
+        self.session.approver().uv_available()
     }
 }

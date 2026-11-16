@@ -88,6 +88,7 @@ grep -Eq '^ExecStart=/usr/bin/hirzd( |$)' "$pkg/usr/lib/systemd/user/hirzd.servi
 
 put 0644 packaging/udev/70-hirz.rules /usr/lib/udev/rules.d/70-hirz.rules
 put 0644 packaging/udev/72-hirz.rules /usr/lib/udev/rules.d/72-hirz.rules
+put 0644 packaging/udev/99-zzz-hirz.rules /usr/lib/udev/rules.d/99-zzz-hirz.rules
 put 0644 packaging/polkit/dev.hirz.authenticate.policy \
   /usr/share/polkit-1/actions/dev.hirz.authenticate.policy
 put 0644 assets/brand/hirz-app-icon.svg /usr/share/icons/hicolor/scalable/apps/hirz.svg
@@ -173,7 +174,7 @@ Version: $debver
 Architecture: $arch
 Maintainer: $MAINTAINER
 Installed-Size: $installed_size
-Depends: $libdeps, polkitd, zenity
+Depends: $libdeps, polkitd, zenity (>= 4)
 Recommends: fprintd
 Suggests: xdg-native-messaging-proxy
 Section: utils

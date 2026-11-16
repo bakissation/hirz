@@ -10,7 +10,7 @@ pub(crate) const WORD_COUNT: usize = 24;
 
 const INFO_X25519: &[u8] = b"hirz recovery x25519 v1";
 const INFO_AUTH: &[u8] = b"hirz recovery auth v1";
-const INFO_BACKUP: &[u8] = b"hirz recovery backup v1";
+const INFO_SIGN: &[u8] = b"hirz recovery ed25519 v1";
 
 pub(crate) fn word_at(index: u16) -> Option<&'static str> {
     WORDLIST.lines().nth(usize::from(index))
@@ -18,7 +18,7 @@ pub(crate) fn word_at(index: u16) -> Option<&'static str> {
 
 /// Exact match, or a unique prefix of at least four letters (BIP-39 words are unique in
 /// their first four letters).
-fn index_of(word: &str) -> Option<u16> {
+pub(crate) fn index_of(word: &str) -> Option<u16> {
     let mut found = None;
     for (i, w) in WORDLIST.lines().enumerate() {
         if w == word {
@@ -169,8 +169,15 @@ impl RecoveryPhrase {
         self.derive(INFO_AUTH)
     }
 
-    pub(crate) fn backup_ikm(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
-        self.derive(INFO_BACKUP)
+    /// Ed25519 seed that endorses devices joining with the phrase (docs/vault-format.md, 4.4).
+    pub(crate) fn signing_seed(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
+        self.derive(INFO_SIGN)
+    }
+
+    pub(crate) fn signing_public(&self) -> Result<[u8; 32], VaultError> {
+        Ok(hirz_crypto::ed25519::public_from_seed(
+            &*self.signing_seed()?,
+        )?)
     }
 }
 

@@ -1,6 +1,8 @@
 //! The hirz PIN: a verifier kept in the state directory and checked by the host. The failure
 //! counter is written to disk before the PIN is checked, so killing the process mid-check never
-//! yields a free guess. File format and retry policy: docs/approval.md, "hirz PIN".
+//! yields a free guess, and a lock file serializes every read-modify-write of the verifier across
+//! processes (hirzd, hirz-nmh and the CLI share one state directory). File format and retry
+//! policy: docs/approval.md, "hirz PIN".
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -18,7 +20,7 @@ pub const FREE_FAILURES: u32 = 3;
 pub const MAX_DELAY: Duration = Duration::from_secs(30);
 
 const FILE_NAME: &str = "pin";
-const TMP_NAME: &str = "pin.tmp";
+const LOCK_NAME: &str = "pin.lock";
 const HEADER: &str = "hirz-pin 1";
 const SALT_LEN: usize = 16;
 const MAX_FILE_BYTES: usize = 1024;
@@ -33,6 +35,8 @@ pub enum PinError {
     TooShort,
     TooLong,
     NotUtf8,
+    /// Only printable ASCII is accepted, so the bytes do not depend on the input method.
+    NotPrintableAscii,
     NotSet,
     AlreadySet,
     /// Wrong PIN; `remaining` attempts before the lock.
@@ -45,13 +49,17 @@ pub enum PinError {
     Crypto,
 }
 
-/// CTAP rules: at least 4 code points, at most 63 bytes.
+/// 4 to 63 printable ASCII characters (CTAP allows more, but a PIN typed through zenity and
+/// through a terminal must be the same bytes, and hirz has no Unicode normalization).
 pub fn validate_pin(pin: &[u8]) -> Result<(), PinError> {
     let s = core::str::from_utf8(pin).map_err(|_| PinError::NotUtf8)?;
+    if !s.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return Err(PinError::NotPrintableAscii);
+    }
     if s.len() > MAX_PIN_BYTES {
         return Err(PinError::TooLong);
     }
-    if s.chars().count() < MIN_PIN_CODE_POINTS {
+    if s.len() < MIN_PIN_CODE_POINTS {
         return Err(PinError::TooShort);
     }
     Ok(())
@@ -208,51 +216,80 @@ impl PinStore {
 
     pub fn set_pin(&self, new_pin: &[u8]) -> Result<(), PinError> {
         validate_pin(new_pin)?;
-        if self.path().exists() {
-            return Err(PinError::AlreadySet);
-        }
-        self.write_new(new_pin)
+        self.locked(|| {
+            if self.path().exists() {
+                return Err(PinError::AlreadySet);
+            }
+            self.write_new(new_pin)
+        })
     }
 
     /// Counts a failure on a wrong `old_pin`, like any other check.
     pub fn change_pin(&self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), PinError> {
         validate_pin(new_pin)?;
         self.verify(old_pin)?;
-        self.write_new(new_pin)
+        self.locked(|| self.write_new(new_pin))
     }
 
     /// Also clears a lock; the caller decides what proof the user must give first.
     pub fn reset(&self) -> Result<(), PinError> {
-        match fs::remove_file(self.path()) {
+        self.locked(|| match fs::remove_file(self.path()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(PinError::Io(e.kind())),
-        }
+        })
     }
 
     pub fn verify(&self, pin: &[u8]) -> Result<(), PinError> {
         validate_pin(pin)?;
-        let mut v = self.load()?;
-        if v.failures >= MAX_FAILURES {
-            return Err(PinError::Locked);
-        }
-        let before = v.failures;
-        v.failures = before.saturating_add(1);
-        self.store(&v)?;
+        let (v, before) = self.locked(|| {
+            let mut v = self.load()?;
+            if v.failures >= MAX_FAILURES {
+                return Err(PinError::Locked);
+            }
+            let before = v.failures;
+            v.failures = before.saturating_add(1);
+            self.store(&v)?;
+            Ok((v, before))
+        })?;
         let delay = failure_delay(before);
         if !delay.is_zero() {
             (self.sleep)(delay);
         }
         let derived = kdf::argon2id(pin, &v.salt, v.params).map_err(|_| PinError::Crypto)?;
         if hirz_crypto::ct_eq(&derived, &v.hash) {
-            v.failures = 0;
-            self.store(&v)?;
-            Ok(())
+            self.locked(|| {
+                let mut now = self.load()?;
+                if now.salt == v.salt && now.hash == v.hash {
+                    now.failures = 0;
+                    self.store(&now)?;
+                }
+                Ok(())
+            })
         } else {
             Err(PinError::Wrong {
                 remaining: MAX_FAILURES.saturating_sub(v.failures),
             })
         }
+    }
+
+    /// Runs `f` while holding the exclusive lock on `pin.lock`; the lock ends when the file closes.
+    fn locked<T>(&self, f: impl FnOnce() -> Result<T, PinError>) -> Result<T, PinError> {
+        let _guard = self.lock_file().map_err(|e| PinError::Io(e.kind()))?;
+        f()
+    }
+
+    fn lock_file(&self) -> std::io::Result<fs::File> {
+        ensure_private_dir(&self.dir)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(self.dir.join(LOCK_NAME))?;
+        hirz_sys::lock_exclusive(&file)?;
+        Ok(file)
     }
 
     fn write_new(&self, pin: &[u8]) -> Result<(), PinError> {
@@ -296,7 +333,8 @@ impl PinStore {
 
     pub(crate) fn store(&self, v: &Verifier) -> Result<(), PinError> {
         ensure_private_dir(&self.dir).map_err(|e| PinError::Io(e.kind()))?;
-        write_atomic(&self.dir, &serialize_verifier(v)).map_err(|e| PinError::Io(e.kind()))
+        write_atomic(&self.dir, FILE_NAME, &serialize_verifier(v))
+            .map_err(|e| PinError::Io(e.kind()))
     }
 }
 
@@ -312,19 +350,27 @@ pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_atomic(dir: &Path, content: &str) -> std::io::Result<()> {
-    let tmp = dir.join(TMP_NAME);
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.set_permissions(fs::Permissions::from_mode(0o600))?;
-    f.write_all(content.as_bytes())?;
-    f.sync_all()?;
-    drop(f);
-    fs::rename(&tmp, dir.join(FILE_NAME))?;
+/// Writes `content` to `dir/name` through a fresh, randomly named file (`O_EXCL`, mode 0600) and a
+/// rename, so no reader ever sees a partial file and writers never share a temporary name.
+pub(crate) fn write_atomic(dir: &Path, name: &str, content: &str) -> std::io::Result<()> {
+    let mut suffix = [0u8; 8];
+    hirz_crypto::random_fill(&mut suffix)
+        .map_err(|_| std::io::Error::other("no random numbers for a temporary name"))?;
+    let tmp = dir.join(format!("{name}.{}.tmp", hex_encode(&suffix)));
+    let written = (|| {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, dir.join(name))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written?;
     if let Ok(d) = fs::File::open(dir) {
         let _ = d.sync_all();
     }
@@ -386,20 +432,30 @@ pub(crate) mod tests {
     fn pin_rules() {
         assert_eq!(validate_pin(b"1234"), Ok(()));
         assert_eq!(validate_pin(b"123"), Err(PinError::TooShort));
-        assert_eq!(
-            validate_pin("\u{00E9}\u{00E9}\u{00E9}".as_bytes()),
-            Err(PinError::TooShort)
-        );
-        assert_eq!(
-            validate_pin("\u{00E9}\u{00E9}\u{00E9}\u{00E9}".as_bytes()),
-            Ok(())
-        );
+        assert_eq!(validate_pin(b"ab c"), Ok(()));
+        assert_eq!(validate_pin(b"~!@#$%^&*()_+"), Ok(()));
         assert_eq!(validate_pin(&[b'1'; 63]), Ok(()));
         assert_eq!(validate_pin(&[b'1'; 64]), Err(PinError::TooLong));
-        assert_eq!(
-            validate_pin("\u{1F600}".repeat(16).as_bytes()),
-            Err(PinError::TooLong)
-        );
+        for not_ascii in [
+            "\u{00E9}\u{00E9}\u{00E9}\u{00E9}",
+            "caf\u{00E9}1",
+            "e\u{0301}e\u{0301}e\u{0301}",
+            "\u{1F600}\u{1F600}\u{1F600}\u{1F600}",
+            "12\u{3000}34",
+        ] {
+            assert_eq!(
+                validate_pin(not_ascii.as_bytes()),
+                Err(PinError::NotPrintableAscii),
+                "{not_ascii:?}"
+            );
+        }
+        for control in ["12\n34", "12\t34", "1234\u{7f}", "1234\0"] {
+            assert_eq!(
+                validate_pin(control.as_bytes()),
+                Err(PinError::NotPrintableAscii),
+                "{control:?}"
+            );
+        }
         assert_eq!(validate_pin(b"\xff\xfe\xfd\xfc"), Err(PinError::NotUtf8));
     }
 
@@ -589,7 +645,12 @@ pub(crate) mod tests {
             & 0o777;
         let fm = fs::metadata(s.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!((dm, fm), (0o700, 0o600));
-        assert!(!d.0.join("state").join(TMP_NAME).exists());
+        let leftovers: Vec<_> = fs::read_dir(d.0.join("state"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]
@@ -616,16 +677,75 @@ pub(crate) mod tests {
             s.change_pin(b"0000", b"5678"),
             Err(PinError::Wrong { remaining: 7 })
         );
-        s.change_pin(b"1234", "p\u{00EF}n\u{1F600}".as_bytes())
-            .unwrap();
+        s.change_pin(b"1234", b"p!n gu4rd").unwrap();
         assert_eq!(s.verify(b"1234"), Err(PinError::Wrong { remaining: 7 }));
-        assert_eq!(s.verify("p\u{00EF}n\u{1F600}".as_bytes()), Ok(()));
+        assert_eq!(s.verify(b"p!n gu4rd"), Ok(()));
         for left in (0..MAX_FAILURES).rev() {
             assert_eq!(s.verify(b"9999"), Err(PinError::Wrong { remaining: left }));
         }
-        assert_eq!(
-            s.verify("p\u{00EF}n\u{1F600}".as_bytes()),
-            Err(PinError::Locked)
-        );
+        assert_eq!(s.verify(b"p!n gu4rd"), Err(PinError::Locked));
+    }
+
+    #[test]
+    fn concurrent_checks_lose_no_failure() {
+        let d = TempDir::new("concurrent");
+        let s = store(&d);
+        s.store(&sample(0)).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                scope.spawn(|| {
+                    let _ = s.verify(b"0000");
+                });
+            }
+        });
+        assert_eq!(s.status().unwrap().unwrap().failures, 6);
+    }
+
+    #[test]
+    fn readers_never_see_a_partial_verifier() {
+        let d = TempDir::new("readers");
+        let s = store(&d);
+        s.store(&sample(0)).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for i in 0..150 {
+                    s.store(&sample(i % 8)).unwrap();
+                }
+            });
+            for _ in 0..1500 {
+                assert!(s.load().is_ok());
+            }
+        });
+    }
+
+    #[test]
+    fn a_planted_temp_name_is_never_followed() {
+        use std::os::unix::fs::symlink;
+        let d = TempDir::new("planted");
+        let s = store(&d);
+        let state = d.0.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let target = d.0.join("victim");
+        fs::write(&target, "keep").unwrap();
+        symlink(&target, state.join("pin.tmp")).unwrap();
+        symlink(&target, state.join("pin.pin.tmp")).unwrap();
+        s.store(&sample(0)).unwrap();
+        s.store(&sample(1)).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        assert_eq!(s.load().unwrap().failures, 1);
+    }
+
+    #[test]
+    fn a_correct_pin_resets_the_counter_under_the_lock() {
+        if !crypto_ready() {
+            return;
+        }
+        let d = TempDir::new("changed");
+        let s = store(&d);
+        s.set_pin(b"1234").unwrap();
+        s.verify(b"0000").unwrap_err();
+        assert_eq!(s.load().unwrap().failures, 1);
+        s.verify(b"1234").unwrap();
+        assert_eq!(s.load().unwrap().failures, 0);
     }
 }

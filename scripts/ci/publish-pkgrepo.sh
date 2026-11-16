@@ -30,7 +30,12 @@ rpms=("$pkgs"/*.x86_64.rpm "$pkgs"/*.aarch64.rpm)
 [ ${#debs[@]} -gt 0 ] || die "no .deb files in $pkgs"
 [ ${#rpms[@]} -gt 0 ] || die "no binary .rpm files in $pkgs"
 
-# apt: reprepro keeps one version per architecture and drops the files it replaces.
+# apt: rebuilt from this release's packages on every run, so it lists the newest version only
+# (older .deb files stay on the GitHub Releases) and nothing replaced stays in the pool. The
+# reprepro database and configuration are working files and are removed before publishing. The
+# Release file has no Valid-Until: releases can be months apart and nothing re-signs it on a
+# schedule, so an expiry would break apt for users in between (docs/release.md).
+rm -rf "$site/apt"
 mkdir -p "$site/apt/conf"
 cat >"$site/apt/conf/distributions" <<EOF
 Origin: hirz
@@ -50,6 +55,7 @@ for deb in "${debs[@]}"; do
 done
 reprepro -b "$site/apt" export stable
 reprepro -b "$site/apt" list stable
+rm -rf "$site/apt/db" "$site/apt/conf"
 
 # dnf: one repository per architecture, the newest KEEP_RPM_VERSIONS versions of each.
 for arch in x86_64 aarch64; do

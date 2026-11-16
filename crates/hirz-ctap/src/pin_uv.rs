@@ -2,6 +2,7 @@
 //! hmac-secret needs. hirz has no clientPin and issues no pinUvAuthToken.
 
 use core::fmt;
+use std::time::{Duration, Instant};
 
 use hirz_core::{CoreError, HmacSecretSalts, HmacSecretWrap};
 use hirz_crypto::{CryptoError, Secret, Zeroizing, ctap_pin_uv};
@@ -152,10 +153,26 @@ impl KeyPair {
     }
 }
 
-/// One per protocol; they live for the process lifetime (one "power cycle") and are created on first use.
-#[derive(Default)]
+/// How long a key agreement key is handed out before the next getKeyAgreement makes a new one.
+pub const KEY_LIFETIME: Duration = Duration::from_secs(600);
+
+/// One per protocol, created on first use. Replaced when the platform asks for a key after
+/// [`KEY_LIFETIME`] and by [`KeyAgreementKeys::regenerate`], which the daemon calls on every
+/// reconnect to the broker (the "power cycle" of CTAP 2.2, 6.5.5.1).
 pub struct KeyAgreementKeys {
     keys: [Option<KeyPair>; 2],
+    created: Option<Instant>,
+    lifetime: Duration,
+}
+
+impl Default for KeyAgreementKeys {
+    fn default() -> Self {
+        KeyAgreementKeys {
+            keys: Default::default(),
+            created: None,
+            lifetime: KEY_LIFETIME,
+        }
+    }
 }
 
 impl fmt::Debug for KeyAgreementKeys {
@@ -169,6 +186,13 @@ impl KeyAgreementKeys {
         Self::default()
     }
 
+    pub fn with_lifetime(lifetime: Duration) -> Self {
+        KeyAgreementKeys {
+            lifetime,
+            ..Self::default()
+        }
+    }
+
     fn pair(&mut self, protocol: PinUvAuthProtocol) -> Result<&KeyPair, CryptoError> {
         let slot = self
             .keys
@@ -176,6 +200,7 @@ impl KeyAgreementKeys {
             .ok_or(CryptoError::Invalid)?;
         if slot.is_none() {
             *slot = Some(KeyPair::generate()?);
+            self.created.get_or_insert_with(Instant::now);
         }
         slot.as_ref().ok_or(CryptoError::Invalid)
     }
@@ -184,6 +209,9 @@ impl KeyAgreementKeys {
         &mut self,
         protocol: PinUvAuthProtocol,
     ) -> Result<([u8; 32], [u8; 32]), CryptoError> {
+        if self.created.is_some_and(|t| t.elapsed() >= self.lifetime) {
+            self.regenerate();
+        }
         let pair = self.pair(protocol)?;
         Ok((pair.x, pair.y))
     }
@@ -200,6 +228,7 @@ impl KeyAgreementKeys {
 
     pub fn regenerate(&mut self) {
         self.keys = Default::default();
+        self.created = None;
     }
 }
 
@@ -365,5 +394,14 @@ mod tests {
         assert_ne!(a, keys.public_key(PinUvAuthProtocol::One).unwrap());
         keys.regenerate();
         assert_ne!(a, keys.public_key(PinUvAuthProtocol::Two).unwrap());
+    }
+
+    #[test]
+    fn an_old_key_is_replaced_when_the_platform_asks_for_a_new_one() {
+        let mut keys = KeyAgreementKeys::with_lifetime(Duration::ZERO);
+        let first = keys.public_key(PinUvAuthProtocol::Two).unwrap();
+        let second = keys.public_key(PinUvAuthProtocol::Two).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(KEY_LIFETIME, Duration::from_secs(600));
     }
 }

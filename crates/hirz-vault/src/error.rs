@@ -30,6 +30,10 @@ pub enum VaultError {
     /// Two key rotations removed each other's creators; see `ScanReport::rotation_conflict`.
     RotationConflict,
     InvalidParameters,
+    /// The line of key generations this device follows removed it; see `ScanReport::this_device_removed`.
+    Removed,
+    /// A key generation this device followed is missing or rewritten; see `ScanReport::fork_detected`.
+    Fork,
 }
 
 impl fmt::Display for VaultError {
@@ -66,6 +70,10 @@ impl fmt::Display for VaultError {
                 f.write_str("conflicting key rotations; remove the untrusted device again")
             }
             VaultError::InvalidParameters => f.write_str("parameters out of bounds"),
+            VaultError::Removed => f.write_str("this device was removed from the vault"),
+            VaultError::Fork => f.write_str(
+                "the vault folder no longer holds the key generations this device followed",
+            ),
         }
     }
 }

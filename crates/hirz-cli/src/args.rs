@@ -18,6 +18,15 @@ pub enum PinAction {
     Status,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepairAction {
+    /// Only show the fork or conflict state and what can be done about it.
+    Show,
+    /// Delete the named key change (a folder name as `hirz repair` lists it).
+    Discard(String),
+    AcceptFork,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportFormat {
     Cxf,
@@ -63,6 +72,10 @@ pub enum Command {
         yes: bool,
     },
     ForgetLocal,
+    Repair {
+        action: RepairAction,
+        yes: bool,
+    },
     Pin(PinAction),
     Export {
         file: PathBuf,
@@ -71,6 +84,7 @@ pub enum Command {
     Import {
         format: ImportFormat,
         file: PathBuf,
+        yes: bool,
     },
     BackupConfirm {
         yes: bool,
@@ -107,6 +121,7 @@ const VALUE_OPTS: &[&str] = &[
     "--bitwarden",
     "--keepassxc",
     "--nmh-path",
+    "--discard",
 ];
 const BOOL_OPTS: &[&str] = &[
     "--json",
@@ -115,6 +130,7 @@ const BOOL_OPTS: &[&str] = &[
     "--plain",
     "--force",
     "--request",
+    "--accept-fork",
 ];
 
 fn split_raw(args: &[OsString]) -> CliResult<Raw> {
@@ -376,6 +392,29 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
             raw.finish("forget-local")?;
             Command::ForgetLocal
         }
+        "repair" => {
+            expect_args(rest, 0, "repair")?;
+            let discard = raw.string_value("--discard")?;
+            let accept = raw.flag("--accept-fork");
+            let yes = raw.flag("--yes");
+            raw.finish("repair")?;
+            let action = match (discard, accept) {
+                (Some(_), true) => {
+                    return Err(CliError::usage(
+                        "Use either --discard NAME or --accept-fork, not both.",
+                    ));
+                }
+                (Some(name), false) => RepairAction::Discard(name),
+                (None, true) => RepairAction::AcceptFork,
+                (None, false) => RepairAction::Show,
+            };
+            if yes && action == RepairAction::Show {
+                return Err(CliError::usage(
+                    "--yes only goes with --discard NAME or --accept-fork.",
+                ));
+            }
+            Command::Repair { action, yes }
+        }
         "pin" => {
             expect_args(rest, 1, "pin")?;
             raw.finish("pin")?;
@@ -413,6 +452,7 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
             ]
             .into_iter()
             .filter_map(|(f, v)| Some((f, v?)));
+            let yes = raw.flag("--yes");
             raw.finish("import")?;
             let (format, file) = given.next().ok_or_else(|| {
                 CliError::usage(
@@ -426,6 +466,7 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
             Command::Import {
                 format,
                 file: PathBuf::from(file),
+                yes,
             }
         }
         "backup" => {

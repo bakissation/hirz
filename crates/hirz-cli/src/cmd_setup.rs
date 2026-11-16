@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 const TEMPLATE: &str = include_str!("../../../packaging/native-messaging/hirz.json");
 const PLACEHOLDER: &str = "\"@HIRZ_NMH_PATH@\"";
 pub const MANIFEST_NAME: &str = "hirz.json";
+/// The scope name of the manifest locations that packages install into.
+pub const SYSTEM_SCOPE: &str = "system";
 const NMH_BINARY: &str = "hirz-nmh";
 const MAX_MANIFEST_LEN: u64 = 64 * 1024;
 
@@ -36,7 +38,7 @@ pub fn manifest_locations(env: &Env) -> Vec<(PathBuf, &'static str)> {
         "/usr/lib/x86_64-linux-gnu/mozilla/native-messaging-hosts",
         "/usr/lib/aarch64-linux-gnu/mozilla/native-messaging-hosts",
     ] {
-        v.push((env.sys_path(sys).join(MANIFEST_NAME), "system"));
+        v.push((env.sys_path(sys).join(MANIFEST_NAME), SYSTEM_SCOPE));
     }
     v
 }
@@ -103,7 +105,29 @@ pub fn flatpak_firefox(env: &Env) -> bool {
             .is_dir()
 }
 
+/// The root-owned manifest a package installed, whatever state it is in: a per-user copy would
+/// take precedence over it (docs/extension.md, "Native manifest and install locations").
+fn packaged_manifest(env: &Env) -> Option<PathBuf> {
+    manifest_locations(env)
+        .into_iter()
+        .filter(|(_, scope)| *scope == SYSTEM_SCOPE)
+        .map(|(path, _)| path)
+        .find(|path| manifest_state(path) != ManifestState::Missing)
+}
+
 pub fn firefox(ctx: &mut Ctx<'_>, nmh_path: Option<PathBuf>, force: bool) -> CliResult<Exit> {
+    let packaged = packaged_manifest(ctx.env);
+    if let (Some(system), false) = (&packaged, force) {
+        return Err(CliError::failed(format!(
+            "A package already connected Firefox to hirz for every user ({}). A copy in your \
+             home folder would take precedence over it, and any program running as you could \
+             change what it starts, so nothing was changed. Package users do not need this \
+             command.\nIf you build hirz from source and want your own copy anyway, run `{} \
+             setup firefox --force`.",
+            system.display(),
+            ctx.program
+        )));
+    }
     let nmh = match nmh_path {
         Some(p) => ctx.env.absolute(&p)?,
         None => ctx
@@ -149,7 +173,7 @@ pub fn firefox(ctx: &mut Ctx<'_>, nmh_path: Option<PathBuf>, force: bool) -> Cli
         }
         Ok(_) => {
             let what = match manifest_state(&target) {
-                ManifestState::Ok(p) => p.display().to_string(),
+                ManifestState::Ok(p) => crate::ui::path_text(&p),
                 ManifestState::BrokenTarget(p) => crate::ui::clean(&p, 200),
                 _ => "something else".to_string(),
             };
@@ -183,6 +207,14 @@ pub fn firefox(ctx: &mut Ctx<'_>, nmh_path: Option<PathBuf>, force: bool) -> Cli
             "Installed {} for your user.\nIt starts {}.",
             target.display(),
             nmh.display()
+        ))?;
+    }
+    if let Some(system) = &packaged {
+        ctx.say(&format!(
+            "\nWarning: this copy takes precedence over the packaged manifest {}. To go back to\n\
+             the packaged connection, delete {}.",
+            system.display(),
+            target.display()
         ))?;
     }
     ctx.say(

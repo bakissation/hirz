@@ -4,8 +4,9 @@
 #   scripts/package-rpm.sh                 sources, then rpmbuild if available
 #   scripts/package-rpm.sh --sources-only  only write the two source tarballs to dist/rpm/
 #
-# The source tarball holds the files git tracks plus untracked files that are not ignored,
-# so a local build includes uncommitted changes. Releases build from the tag tarball.
+# The source tarball holds exactly the files git tracks (their content in the working tree, so
+# uncommitted edits and a version stamp are included). Untracked files are left out and
+# reported: git add them first. Releases build from a clean checkout of the tag.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -55,11 +56,17 @@ export SOURCE_DATE_EPOCH LC_ALL=C TZ=UTC
 
 top="$ROOT/dist/rpm"
 mkdir -p "$top/SOURCES" "$top/SPECS"
+mkdir -p "$ROOT/target"
 tmp=$(mktemp -d "$ROOT/target/rpm-src.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 prefix="hirz-$version"
-git ls-files -z --cached --others --exclude-standard |
+untracked=$(git ls-files --others --exclude-standard | head -n 5)
+if [ -n "$untracked" ]; then
+  echo "package-rpm: untracked files are not in the source tarball (git add them):" >&2
+  echo "$untracked" >&2
+fi
+git ls-files -z --cached |
   LC_ALL=C sort -z |
   tar --null --files-from=- --transform="s#^#$prefix/#" --sort=name \
     --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner -cf - |

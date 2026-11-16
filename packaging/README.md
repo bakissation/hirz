@@ -12,7 +12,7 @@ manifest points to the same `hirz-nmh` path everywhere.
 | uhid broker (root) | `/usr/libexec/hirz/hirz-uhid-broker` | `/usr/libexec/hirz/hirz-uhid-broker` | `/usr/lib/hirz/hirz-uhid-broker` | 0755 |
 | Broker units | `/usr/lib/systemd/system/hirz-uhid-broker.{socket,service}` | same | same | 0644 |
 | User unit | `/usr/lib/systemd/user/hirzd.service` | same | same | 0644 |
-| udev rules | `/usr/lib/udev/rules.d/70-hirz.rules` and `72-hirz.rules` | same | same | 0644 |
+| udev rules | `/usr/lib/udev/rules.d/70-hirz.rules`, `72-hirz.rules` and `99-zzz-hirz.rules` | same | same | 0644 |
 | polkit action | `/usr/share/polkit-1/actions/dev.hirz.authenticate.policy` | same | same | 0644 |
 | App icon (prompt windows) | `/usr/share/icons/hicolor/scalable/apps/hirz.svg` and `256x256/apps/hirz.png` | same | same | 0644 |
 | Module list (`uhid`) | `/usr/lib/modules-load.d/hirz.conf` | same | same | 0644 |
@@ -30,7 +30,7 @@ and nothing in a home directory.
 | `hirz-uhid-broker.service` | `packaging/systemd/hirz-uhid-broker.service` | `ExecStart` path set to the distribution's broker path |
 | `hirz-uhid-broker.socket` | `packaging/systemd/hirz-uhid-broker.socket` | none |
 | `hirzd.service` | `packaging/systemd/hirzd.service` | `ExecStart` path set to `/usr/bin/hirzd` |
-| `70-hirz.rules`, `72-hirz.rules` | `packaging/udev/` | none |
+| `70-hirz.rules`, `72-hirz.rules`, `99-zzz-hirz.rules` | `packaging/udev/` | none |
 | `dev.hirz.authenticate.policy` | `packaging/polkit/dev.hirz.authenticate.policy` | none |
 | `hirz.svg`, `hirz.png` | `assets/brand/hirz-app-icon.svg`, `assets/brand/app-icon-256.png` | renamed |
 | `hirz.json` | `packaging/native-messaging/hirz.json` | `@HIRZ_NMH_PATH@` replaced by `/usr/lib/hirz/hirz-nmh` |
@@ -60,7 +60,7 @@ suggest removing it.
 | Step | Debian / Ubuntu | Fedora | Arch |
 |---|---|---|---|
 | After install | enable `hirz-uhid-broker.socket` with `deb-systemd-helper` (first install, or again if it was enabled before), `daemon-reload`, `udevadm control --reload`, `modprobe uhid`, start the socket | `%systemd_post` with the preset, `%udev_rules_update`, `modprobe uhid`, start the socket | pacman hooks reload systemd and udev; `hirz.install` loads `uhid` and prints the command to enable the socket |
-| Upgrade | restart the broker if it runs; an administrator's `disable` is kept | `%systemd_postun_with_restart` | prints a reminder to restart the broker |
+| Upgrade | restart the broker if it runs and `hirzd` for every logged-in user; an administrator's `disable` is kept | `%systemd_postun_with_restart` for the broker and `%systemd_user_postun_with_restart` for `hirzd` | restarts the broker and `hirzd` of every logged-in user, and prints a reminder |
 | Before removal | stop the broker socket and service | `%systemd_preun` | `systemctl disable --now` the socket and service |
 | After removal | mask the socket on `remove` (state kept for a reinstall), forget it on `purge`; `daemon-reload`, `udevadm control --reload` | `%udev_rules_update` | pacman hooks |
 

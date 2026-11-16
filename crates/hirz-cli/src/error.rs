@@ -107,10 +107,19 @@ pub fn vault_error(e: &VaultError) -> CliError {
              vault on another device. To use it here again, run `hirz join` with your \
              recovery phrase (after removing this computer's old setup).",
         ),
+        VaultError::Fork => CliError::failed(
+            "The vault folder no longer holds the key changes this computer followed, so \
+             nothing new can be saved. Passkeys still work. Run `hirz status`, then `hirz repair`.",
+        ),
+        VaultError::Removed => CliError::failed(format!(
+            "{} Run `hirz status` to see more.",
+            crate::app::REMOVED
+        )),
         VaultError::RotationConflict => CliError::failed(
             "Two devices removed each other from the vault, so hirz does not know which one \
              to trust. First stop sharing the vault folder with the device you do not trust, \
-             then run `hirz remove-device` for it again on a device you trust.",
+             then run `hirz remove-device` for it again on a device you trust. `hirz repair` \
+             shows the key changes and can delete one.",
         ),
         VaultError::LockTimeout => {
             CliError::failed("Another hirz program is busy with the vault. Try again in a moment.")

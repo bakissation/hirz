@@ -88,7 +88,10 @@ pub fn prepare_get(options: &Json, origin: &Origin) -> core::result::Result<GetP
     let mut salts = None;
     let mut prf = false;
     if let Some(ext) = o.opt_obj("extensions")? {
-        ext.opt_str("appid", 2048)?;
+        // The U2F application parameter and the `appid` result are not implemented.
+        if ext.opt_str("appid", 2048)?.is_some() {
+            return Err(Error::NotHandled("appid extension"));
+        }
         if let Some(p) = ext.opt_obj("prf")? {
             salts = prf_salts(&p, &allow_list, listed)?;
             prf = true;

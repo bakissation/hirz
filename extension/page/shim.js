@@ -68,6 +68,12 @@
   const detailOf = getter(CE.prototype, "detail");
   const signalAborted = getter(AbortSignal.prototype, "aborted");
   const signalReason = getter(AbortSignal.prototype, "reason");
+  const AS = AbortSignal;
+  const signalAny = AS.any;
+  const AC = w.AbortController;
+  const acSignal = getter(AC.prototype, "signal");
+  const acAbort = AC.prototype.abort;
+  const then = P.prototype.then;
   const addListener = EventTarget.prototype.addEventListener;
   const removeListener = EventTarget.prototype.removeEventListener;
   const dispatch = EventTarget.prototype.dispatchEvent;
@@ -90,13 +96,16 @@
   const topDoc = w.top === w ? doc : w.top.document;
   const loc = w.location;
   if (typeof toBase64 !== "function" || typeof fromBase64 !== "function") return;
+  if (typeof signalAny !== "function" || typeof AC !== "function") return;
 
   const BOOT = "hirz-bootstrap";
   const MAX_OPTIONS_CHARS = 64 * 1024;
   const MAX_RESPONSE_CHARS = 1536 * 1024;
   const MAX_DESCRIPTORS = 64;
   const MAX_ID_BYTES = 1023;
-  const MAX_CHALLENGE_BYTES = 4096;
+  const MIN_CHALLENGE_BYTES = 16;
+  const MAX_CHALLENGE_BYTES = 1024;
+  const MAX_PRF_BYTES = 4096;
   const MAX_TEXT = 1024;
   const MAX_TIMEOUT_MS = 600000;
   const GUARD_EXTRA_MS = 60000;
@@ -254,7 +263,7 @@
       push(
         out,
         jobj([
-          ["id", jbytes(id, 0, MAX_ID_BYTES)],
+          ["id", jbytes(id, 1, MAX_ID_BYTES)],
           ["transports", transports === undefined ? undefined : jtextList(textList(transports, 16, 32))],
           ["type", q(text(type, 32))],
         ]),
@@ -269,8 +278,8 @@
     const second = d.second;
     if (first === undefined) fail();
     return jobj([
-      ["first", jbytes(first, 0, MAX_CHALLENGE_BYTES)],
-      ["second", optBytes(second, MAX_CHALLENGE_BYTES)],
+      ["first", jbytes(first, 0, MAX_PRF_BYTES)],
+      ["second", optBytes(second, MAX_PRF_BYTES)],
     ]);
   }
 
@@ -397,7 +406,7 @@
     ]);
 
     if (challengeV === undefined || rpV === undefined || userV === undefined || paramsV === undefined) fail();
-    const challenge = jbytes(challengeV, 0, MAX_CHALLENGE_BYTES);
+    const challenge = jbytes(challengeV, MIN_CHALLENGE_BYTES, MAX_CHALLENGE_BYTES);
     const exclude = descriptors(excludeV);
     const ext = extensions(extV, true);
     const hintList = hints(hintsV);
@@ -469,7 +478,7 @@
 
     if (challengeV === undefined) fail();
     const allow = descriptors(allowV);
-    const challenge = jbytes(challengeV, 0, MAX_CHALLENGE_BYTES);
+    const challenge = jbytes(challengeV, MIN_CHALLENGE_BYTES, MAX_CHALLENGE_BYTES);
     const ext = extensions(extV, false);
     const hintList = hints(hintsV);
     const rpId = rpIdV === undefined ? undefined : text(rpIdV, 253);
@@ -689,13 +698,11 @@
     });
   }
 
-  // A conditional request has no timeout: it stays pending until the user picks a suggestion, the
-  // signal aborts it, or the document goes away. Without an account for the site Firefox takes over.
+  // A modal request. `NotHandled` hands it to Firefox once the tab has focus.
   function ceremony(kind, plan, fallback) {
     return new P((resolve, reject) => {
       const rid = nextRid++;
       const signal = plan.signal;
-      const conditional = plan.conditional === true;
       let settled = false;
       let guard = null;
 
@@ -724,10 +731,6 @@
           }
           return;
         }
-        if (msg.error === "NotHandled" && conditional) {
-          if (finish()) resolve(fallback());
-          return;
-        }
         if (msg.error === "NotHandled") {
           delete pending[rid];
           if (guard !== null) clearTimer(guard);
@@ -743,16 +746,87 @@
       };
 
       if (signal !== undefined) call(addListener, signal, "abort", onAbort, { once: true });
-      if (!conditional) {
-        const limit = (plan.timeout === undefined ? MAX_TIMEOUT_MS : plan.timeout) + GUARD_EXTRA_MS;
-        guard = setTimer(() => {
-          guard = null;
-          if (!finish()) return;
-          send("cancel", rid, undefined);
-          reject(toError("NotAllowedError"));
-        }, limit);
+      const limit = (plan.timeout === undefined ? MAX_TIMEOUT_MS : plan.timeout) + GUARD_EXTRA_MS;
+      guard = setTimer(() => {
+        guard = null;
+        if (!finish()) return;
+        send("cancel", rid, undefined);
+        reject(toError("NotAllowedError"));
+      }, limit);
+      send(kind, rid, plan.json);
+    });
+  }
+
+  // A conditional request is always Firefox's own request: it starts at once with the page's
+  // options, whether or not hirz has a passkey for the site, so the page cannot tell. hirz offers
+  // its passkeys in a list once the user touches a field; if the user picks one and approves, that
+  // credential settles the promise and Firefox's request is aborted through an internal signal.
+  function conditionalCeremony(plan, self, args, nativeFn) {
+    return new P((resolve, reject) => {
+      const rid = nextRid++;
+      const signal = plan.signal;
+      const own = new AC();
+      let settled = false;
+
+      const onAbort = () => {
+        if (!finish()) return;
+        call(acAbort, own);
+        reject(call(signalReason, signal));
+      };
+
+      function finish() {
+        if (settled) return false;
+        settled = true;
+        delete pending[rid];
+        if (signal !== undefined) call(removeListener, signal, "abort", onAbort);
+        send("cancel", rid, undefined);
+        return true;
       }
-      send(conditional ? "conditional" : kind, rid, plan.json);
+
+      pending[rid] = (msg) => {
+        if (msg.ok !== true) return;
+        let credential;
+        try {
+          credential = buildCredential("get", msg.credential);
+        } catch {
+          if (finish()) {
+            call(acAbort, own);
+            reject(toError("UnknownError"));
+          }
+          return;
+        }
+        if (!finish()) return;
+        call(acAbort, own);
+        resolve(credential);
+      };
+
+      if (signal !== undefined) call(addListener, signal, "abort", onAbort, { once: true });
+      // Everything the page set is inherited; only the signal is replaced.
+      const options = create(args[0]);
+      const ownSignal = call(acSignal, own);
+      const combined = signal === undefined ? ownSignal : apply(signalAny, AS, [[signal, ownSignal]]);
+      defineProperty(options, "signal", { value: combined, writable: true, enumerable: true, configurable: true });
+      const nativeArgs = [options];
+      for (let i = 1; i < args.length; i++) push(nativeArgs, args[i]);
+      let result;
+      try {
+        result = apply(nativeFn, self, nativeArgs);
+      } catch (e) {
+        finish();
+        reject(e);
+        return;
+      }
+      call(
+        then,
+        result,
+        (value) => {
+          if (finish()) resolve(value);
+        },
+        (reason) => {
+          if (finish()) reject(reason);
+        },
+      );
+      send("conditional", rid, plan.json);
     });
   }
 
@@ -766,6 +840,7 @@
       plan = null;
     }
     if (plan === null) return passthrough();
+    if (plan.conditional) return conditionalCeremony(plan, self, args, nativeFn);
     return ceremony(kind, plan, passthrough);
   }
 
@@ -840,8 +915,7 @@
       out.conditionalGet = true;
       return out;
     },
-    // With the host reachable, hirz offers its own suggestions and falls back to Firefox's conditional
-    // request when it has none for the site.
+    // With the host reachable, hirz can offer suggestions next to Firefox's own conditional request.
     async isConditionalMediationAvailable() {
       if (await hostCapabilities()) return true;
       return apply(nativeCma, PKC, []);

@@ -26,7 +26,11 @@ doubling up to 60 seconds; a connection that lasted 30 seconds resets the delay.
 .PP
 Requests whose relying party id starts with
 .B pam://
-(pam\-u2f, used for login, sudo and screen unlock) are refused with CTAP2_ERR_NOT_ALLOWED
+(pam\-u2f, used for login, sudo and screen unlock) or is
+.B io.systemd.home
+or
+.B io.systemd.cryptsetup
+(systemd\-homed and systemd\-cryptenroll) are refused with CTAP2_ERR_NOT_ALLOWED
 before the vault is opened and without a prompt, and one line is logged.
 hirz passkeys are synced software keys and are not a login factor for the computer they run
 on.
@@ -35,6 +39,15 @@ OpenSSH keys made with
 or
 .B \-t ed25519\-sk
 are shown as "SSH key" in the approval window.
+.PP
+When the vault folder reports a fork (the key changes this computer followed are missing or
+were rewritten), hirzd logs it once, shows a desktop notification once, and logs again when it
+ends.
+Existing passkeys still work; new registrations are refused with CTAP2_ERR_NOT_ALLOWED before a
+prompt.
+.B hirz repair
+shows and settles it, see
+.BR hirz (1).
 .PP
 hirzd is normally started as the systemd user unit
 .BR hirzd.service ,
@@ -84,9 +97,15 @@ Base folders; relative values are ignored.
 Set to 1 to lock all memory with mlockall.
 .TP
 .B HIRZ_DEBUG_CTAP
-Set to 1 to log every CTAP2 request and response in hex.
-They hold client data hashes, relying party ids and credential ids, never keys; keep it off
-normally.
+Set to 1 to trace every CTAP2 request and response in hex on standard error, only when
+standard error is a terminal (run
+.B hirzd
+by hand).
+The trace holds client data hashes, relying party ids and credential ids, and leaves out user
+names, display names and every key; started as a service (the journal) or with standard error
+in a file, the variable is ignored and
+.B hirzd
+logs one line saying so, because a log would keep the sites you have accounts at.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/hirz/config
@@ -103,7 +122,10 @@ Keys:
 (comma\-separated relying party ids where a click is enough when the site does not require
 verification),
 .B timeout
-(seconds for a whole request, 10 to 600, default 120) and
+(seconds for a whole request, 10 to 600, default 120;
+.B hirzd
+caps it at 115, because the browser ends a CTAPHID transaction after 120 seconds and the
+prompt must be gone before that) and
 .B prompts_per_minute
 (per site, 1 to 60, default 5).
 An invalid file makes every approval fail until it is fixed.

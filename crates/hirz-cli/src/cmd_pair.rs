@@ -55,6 +55,7 @@ pub fn join_request(ctx: &mut Ctx<'_>, name: Option<String>) -> CliResult<Exit> 
         Err(e) => return Err(e.into()),
     };
     let req = pending.request().clone();
+    let name = req.name.clone();
     ctx.say(&format!(
         "This computer (\"{}\") is asking to join the vault in {}.\n\nVerification words:",
         clean(&name, NAME_CHARS),
@@ -127,21 +128,50 @@ fn finish(ctx: &mut Ctx<'_>, dir: &Path, name: &str, vault: &Vault) -> CliResult
     Ok(Exit::Ok)
 }
 
-fn request_table(ctx: &Ctx<'_>, reqs: &[PairingRequest]) -> String {
+/// The four words of a request, as they are shown, or a dash when they cannot be worked out (the
+/// request cannot be approved then either).
+fn words_shown(vault: &Vault, req: &PairingRequest) -> String {
+    vault
+        .pairing_words(req)
+        .map_or_else(|_| "-".to_owned(), |w| w.to_uppercase())
+}
+
+/// Several requests are told apart by their words, which is what the person compares with the
+/// other screen, and never by the name: a name is chosen by the device that asks, and a request
+/// planted next to the real one can call itself anything. The name appears only after the words
+/// were confirmed.
+fn request_table(ctx: &Ctx<'_>, vault: &Vault, reqs: &[PairingRequest]) -> String {
     let now = ctx.sys.now();
+    let ids: Vec<&[u8]> = reqs.iter().map(|r| r.request_id.as_slice()).collect();
+    let digits = ui::distinct_digits(&ids);
     let rows: Vec<Vec<String>> = reqs
         .iter()
         .enumerate()
         .map(|(i, r)| {
             vec![
                 i.saturating_add(1).to_string(),
-                clean(&r.name, NAME_CHARS),
+                words_shown(vault, r),
                 asked_ago(r.created_at, now),
-                short_id(&r.request_id),
+                ui::id_prefix(&r.request_id, digits),
             ]
         })
         .collect();
-    ui::table(&["#", "NAME", "ASKED", "REQUEST"], &rows)
+    ui::table(&["#", "WORDS", "ASKED", "REQUEST"], &rows)
+}
+
+/// The request list is capped; the rest is not shown, and a flood of requests is how a folder
+/// writer buries the real one.
+pub(crate) fn say_hidden_requests(ctx: &mut Ctx<'_>, hidden: usize) -> CliResult {
+    if hidden == 0 {
+        return Ok(());
+    }
+    ctx.say(&format!(
+        "{} more not listed. Waiting requests are listed up to a limit, and that many at once\n\
+         is unusual: someone with access to your synced folder may be planting them. Deny the\n\
+         ones you do not recognise (`{} devices deny REQUEST`) to see the rest.",
+        count(hidden, "request"),
+        ctx.program
+    ))
 }
 
 fn no_requests() -> CliError {
@@ -164,27 +194,51 @@ fn by_prefix(reqs: Vec<PairingRequest>, prefix: &str) -> CliResult<Vec<PairingRe
         .collect())
 }
 
+const SEVERAL_WAITING: &str = "Several devices are waiting. If you started only one, the others may have been\n\
+     planted by someone with access to your synced folder: deny them with\n\
+     `hirz devices deny REQUEST`.";
+
+fn no_match(hidden: usize) -> CliError {
+    let more = if hidden > 0 {
+        format!(
+            " {} not listed may match: deny the ones you do not recognise first.",
+            count(hidden, "waiting request")
+        )
+    } else {
+        String::new()
+    };
+    CliError::failed(format!(
+        "No waiting device matches. Run `hirz devices approve` to see them.{more}"
+    ))
+}
+
+/// `hidden`: requests the list was cut short by (`Vault::hidden_pairing_requests`).
 fn choose(
     ctx: &mut Ctx<'_>,
+    vault: &Vault,
     reqs: Vec<PairingRequest>,
+    hidden: usize,
     prefix: Option<&str>,
 ) -> CliResult<PairingRequest> {
+    let waiting = reqs.clone();
     let reqs = match prefix {
         Some(p) => by_prefix(reqs, p)?,
         None => reqs,
     };
     match reqs.as_slice() {
-        [] => Err(CliError::failed(
-            "No waiting device matches. Run `hirz devices approve` to see them.",
-        )),
-        [one] => Ok(one.clone()),
+        [] => Err(no_match(hidden)),
+        [one] => {
+            if waiting.len() > 1 {
+                ctx.write_raw(&request_table(ctx, vault, &waiting))?;
+                ctx.say(SEVERAL_WAITING)?;
+                say_hidden_requests(ctx, hidden)?;
+            }
+            Ok(one.clone())
+        }
         several => {
-            ctx.write_raw(&request_table(ctx, several))?;
-            ctx.say(
-                "Several devices are waiting. If you started only one, the others may have been\n\
-                 planted by someone with access to your synced folder: deny them with\n\
-                 `hirz devices deny REQUEST`.",
-            )?;
+            ctx.write_raw(&request_table(ctx, vault, several))?;
+            ctx.say(SEVERAL_WAITING)?;
+            say_hidden_requests(ctx, hidden)?;
             let answer = prompt::read_line(ctx.prompt, "Which one do you want to check? Number: ")?;
             answer
                 .trim()
@@ -231,7 +285,9 @@ pub(crate) fn check_verdict(
         Ok(_) => Err(CliError::failed(format!(
             "hirz could not verify that it is you. {unchanged}"
         ))),
-        Err(ApprovalError::Unavailable) => Err(no_uv(&ctx.program, change)),
+        Err(ApprovalError::Unavailable | ApprovalError::NothingShown) => {
+            Err(no_uv(&ctx.program, change))
+        }
         Err(ApprovalError::Denied) => Err(CliError::cancelled(format!(
             "The window was cancelled or the check failed. {unchanged}"
         ))),
@@ -269,8 +325,8 @@ fn pairing_change(ctx: &Ctx<'_>, req: Option<&PairingRequest>) -> Change<'static
 /// The second, verified confirmation, in a window drawn by hirz-uv. Anything but a passed UV leaves the request waiting.
 fn verify_user(ctx: &mut Ctx<'_>, req: &PairingRequest, words: &str) -> CliResult {
     ctx.say(
-        "Confirm in the hirz window: it shows the same four words, then asks for your system\n\
-         password, your fingerprint or your hirz PIN.",
+        "Confirm in the hirz window: it shows the four words again, then the device's name, and\n\
+         then asks for your system password, your fingerprint or your hirz PIN.",
     )?;
     let words: Vec<&str> = words.split(' ').collect();
     let pairing = PairingApprovalContext {
@@ -295,15 +351,15 @@ pub(crate) fn ensure_uv_possible(ctx: &Ctx<'_>, change: &Change<'_>) -> CliResul
 pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
     let (mut vault, _) = ctx.open_active_vault()?;
     let reqs = vault.pairing_requests()?;
+    let hidden = vault.hidden_pairing_requests();
     if reqs.is_empty() {
         return Err(no_requests());
     }
     ensure_uv_possible(ctx, &pairing_change(ctx, None))?;
-    let req = choose(ctx, reqs, prefix.as_deref())?;
-    let name = clean(&req.name, NAME_CHARS);
+    let req = choose(ctx, &vault, reqs, hidden, prefix.as_deref())?;
     let now = ctx.sys.now();
     ctx.say(&format!(
-        "A new device called \"{name}\" asked to join this vault {} (request {}).\n\
+        "A new device asked to join this vault {} (request {}).\n\
          Approving gives it every passkey in the vault.\n\n\
          Compare the words below with the words on the new device's screen:",
         asked_ago(req.created_at, now),
@@ -316,12 +372,26 @@ pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
          on that device yourself in the last 15 minutes. If anything differs, someone with\n\
          access to your synced folder may be trying to get your passkeys: answer no.",
     )?;
-    if !confirm_word(ctx.prompt, "Do all four words match?", "yes")? {
+    let refused = |vault: &Vault| {
         let _ = vault.deny_pairing(&req.request_id);
-        return Err(CliError::cancelled(
+        CliError::cancelled(
             "Not approved. hirz removed the request. If you started `hirz join --request` on a\n\
              new device yourself, start it again there for new words.",
-        ));
+        )
+    };
+    if !confirm_word(ctx.prompt, "Do all four words match?", "yes")? {
+        return Err(refused(&vault));
+    }
+    ctx.say(&format!(
+        "The words match. That device calls itself (hirz cannot check the name): [{}]",
+        hirz_uv::display::pairing_name_label(&req.name)
+    ))?;
+    if !confirm_word(
+        ctx.prompt,
+        "Is that the name of the device you are setting up?",
+        "yes",
+    )? {
+        return Err(refused(&vault));
     }
     verify_user(ctx, &req, &words)?;
     match vault.approve_pairing(&req) {
@@ -345,6 +415,7 @@ pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
         }
         Err(e) => return Err(e.into()),
     }
+    let name = clean(&req.name, NAME_CHARS);
     ctx.say(&format!(
         "Approved \"{name}\". It finishes joining as soon as your sync tool has copied the\n\
          files to it. If you ever lose it, remove it with `{} remove-device`.",
@@ -356,15 +427,13 @@ pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
 pub fn deny(ctx: &mut Ctx<'_>, prefix: &str) -> CliResult<Exit> {
     let (mut vault, _) = ctx.open_active_vault()?;
     let reqs = by_prefix(vault.pairing_requests()?, prefix)?;
+    let hidden = vault.hidden_pairing_requests();
     let req = match reqs.as_slice() {
-        [] => {
-            return Err(CliError::failed(
-                "No waiting device matches. Run `hirz devices approve` to see them.",
-            ));
-        }
+        [] => return Err(no_match(hidden)),
         [one] => one.clone(),
         several => {
-            ctx.write_raw(&request_table(ctx, several))?;
+            ctx.write_raw(&request_table(ctx, &vault, several))?;
+            say_hidden_requests(ctx, hidden)?;
             return Err(CliError::usage(
                 "Several requests match. Give a longer request id.",
             ));

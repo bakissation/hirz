@@ -9,6 +9,7 @@ members = [
   "crates/hirz-webauthn",
   "crates/hirz-core",
   "crates/hirz-uv",
+  "crates/hirz-session",
   "crates/hirzd",
   "crates/hirz-uhid-broker",
   "crates/hirz-nmh",
@@ -33,6 +34,7 @@ hirz-ctap = { path = "crates/hirz-ctap" }
 hirz-webauthn = { path = "crates/hirz-webauthn" }
 hirz-core = { path = "crates/hirz-core" }
 hirz-uv = { path = "crates/hirz-uv" }
+hirz-session = { path = "crates/hirz-session" }
 
 # External crates. Every addition needs a line in docs/dependencies.md.
 aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }

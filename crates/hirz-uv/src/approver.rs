@@ -7,19 +7,22 @@ use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use hirz_core::{
-    Approval, ApprovalContext, ApprovalError, Approver, Ceremony, PairingApprovalContext,
-    RemovalApprovalContext,
+    Approval, ApprovalContext, ApprovalError, Approver, Ceremony, ExportApprovalContext,
+    PairingApprovalContext, RemovalApprovalContext, RepairApprovalContext,
 };
 use hirz_crypto::Secret;
 use hirz_proto::time::unix_now;
 
 use crate::config::{self, Config, Paths, UvMethod};
 use crate::display::{self, Step};
-use crate::fprint::{self, Retry, VerifyOutcome};
+use crate::fprint::{self, MissCounter, Retry, VerifyOutcome};
 use crate::pin::{PinError, PinStore};
 use crate::polkit::{self, PkcheckOutcome};
 use crate::ratelimit::RateLimiter;
-use crate::runner::{CommandRunner, CommandSpec, EnvPolicy, Race, RunResult, SystemRunner, Tool};
+use crate::runner::{
+    CommandRunner, CommandSpec, EnvPolicy, MIN_ZENITY_MAJOR, Race, RunResult, SystemRunner,
+    TRUSTED_DIRS, Tool,
+};
 
 /// Extra time a zenity child gets past its own `--timeout` before hirz kills it.
 const DIALOG_GRACE: Duration = Duration::from_secs(2);
@@ -28,13 +31,32 @@ const FINGER_ATTEMPTS: u32 = 3;
 /// Scans the reader could not read (too short, off centre, ...) do not count as attempts, up to this many per request.
 const FINGER_RESCANS: u32 = 5;
 const PIN_PROMPTS: u32 = 5;
-/// Rate limit key for pairing prompts. Not a valid RP id, so it never shares a site's budget.
+/// pkcheck without user interaction answers at once; this only guards against a hung polkitd.
+const PKCHECK_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A zenity that cannot reach a display exits at once; a window the user closed lived longer.
+const DISPLAY_FAILURE_WINDOW: Duration = Duration::from_secs(1);
+/// Not valid RP ids, so these never share a site's budget.
 const PAIRING_RATE_KEY: &str = "hirz pairing";
 const REMOVAL_RATE_KEY: &str = "hirz removal";
+const EXPORT_RATE_KEY: &str = "hirz export";
+const REPAIR_RATE_KEY: &str = "hirz repair";
+const SELECTION_RATE_KEY: &str = "hirz selection";
 const PAIRING_WORDS: usize = 4;
 const NO_FINGERS_HINT: &str = "No fingerprint is set up for your user. Set up your fingerprint in Settings > Users, or run fprintd-enroll.";
-const ZENITY_MISSING: &str =
-    "zenity was not found in /usr/bin or /bin; install zenity to approve passkey requests";
+const POLKIT_GRANTS_NOTE: &str = "Your system lets hirz through without asking for a password, so that does not count as verification.";
+const POLKIT_REFUSES_NOTE: &str =
+    "Your system does not offer a password prompt for hirz in this session.";
+const PIN_DAMAGED_NOTE: &str =
+    "The hirz PIN file is damaged. Reset it with `hirz pin reset`, then set a new PIN.";
+const PIN_FORMAT_NOTE: &str =
+    "A hirz PIN has 4 to 63 characters: letters, digits, spaces and punctuation, no accents.";
+
+fn zenity_missing() -> String {
+    format!(
+        "zenity was not found in a trusted system directory ({}); install zenity {MIN_ZENITY_MAJOR} or newer to approve passkey requests",
+        TRUSTED_DIRS.join(", ")
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -80,8 +102,9 @@ pub fn map_dialog(r: RunResult) -> Result<Secret, ApprovalError> {
         RunResult::Exited {
             code: Some(1),
             stderr,
+            elapsed,
             ..
-        } if mentions_display(&stderr) => {
+        } if is_display_error(&stderr, elapsed) => {
             diag("zenity could not open the display");
             Err(ApprovalError::Unavailable)
         }
@@ -95,17 +118,28 @@ pub fn map_dialog(r: RunResult) -> Result<Secret, ApprovalError> {
         ))),
         RunResult::TimedOut => Err(ApprovalError::Timeout),
         RunResult::NotFound => {
-            diag(ZENITY_MISSING);
+            diag(&zenity_missing());
             Err(ApprovalError::Unavailable)
         }
         RunResult::Failed(m) => Err(ApprovalError::Internal(format!("zenity: {m}"))),
     }
 }
 
-fn mentions_display(stderr: &[u8]) -> bool {
-    String::from_utf8_lossy(stderr)
-        .to_ascii_lowercase()
-        .contains("display")
+/// GTK and GDK say one of these when there is no display. Exit status 1 is also what Cancel
+/// gives, and GTK prints unrelated warnings that mention a display, so the message alone is not
+/// enough: the window must also have failed at once.
+const DISPLAY_ERRORS: [&str; 4] = [
+    "cannot open display",
+    "failed to open display",
+    "could not open display",
+    "unable to open display",
+];
+
+fn is_display_error(stderr: &[u8], elapsed: Duration) -> bool {
+    elapsed < DISPLAY_FAILURE_WINDOW && {
+        let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+        DISPLAY_ERRORS.iter().any(|m| text.contains(m))
+    }
 }
 
 /// pkcheck exit status per pkcheck(1). Errors that mean "polkit cannot be used here" map to
@@ -133,20 +167,46 @@ pub fn map_pkcheck(r: RunResult) -> Result<(), ApprovalError> {
     }
 }
 
-/// Structure of unexpected dialog output for diagnostics: digits and separators are kept,
-/// every other character becomes `a`, so no account name reaches the log.
-fn shape(out: &[u8]) -> String {
-    String::from_utf8_lossy(out)
-        .chars()
-        .take(64)
-        .map(|c| {
-            if c.is_ascii_digit() || matches!(c, '|' | '\n' | ' ' | '.' | '-') {
-                c
-            } else {
-                'a'
+/// The answer of pkcheck without user interaction (see [`HirzApprover::polkit_preflight`]).
+fn map_preflight(r: RunResult) -> Result<(), Fail> {
+    match r {
+        RunResult::Exited { code, .. } => match polkit::classify_pkcheck(code) {
+            PkcheckOutcome::NoAgent => Ok(()),
+            PkcheckOutcome::Authorized => {
+                diag("polkit grants the action without a password; not counted as verification");
+                Err(Fail::next(
+                    ApprovalError::Unavailable,
+                    Some(POLKIT_GRANTS_NOTE.to_owned()),
+                ))
             }
-        })
-        .collect()
+            PkcheckOutcome::NotAuthorized => {
+                diag("polkit refuses the action for this session without asking");
+                Err(Fail::next(
+                    ApprovalError::Unavailable,
+                    Some(POLKIT_REFUSES_NOTE.to_owned()),
+                ))
+            }
+            PkcheckOutcome::CheckError => {
+                diag("polkit: check failed; is the dev.hirz.authenticate action installed?");
+                Err(Fail::next(ApprovalError::Unavailable, None))
+            }
+            PkcheckOutcome::Dismissed | PkcheckOutcome::BadArguments | PkcheckOutcome::Unknown => {
+                Err(Fail::Stop(ApprovalError::Internal(format!(
+                    "pkcheck exited with {code:?}"
+                ))))
+            }
+        },
+        RunResult::TimedOut => Err(Fail::Stop(ApprovalError::Timeout)),
+        RunResult::NotFound => Err(Fail::next(ApprovalError::Unavailable, None)),
+        RunResult::Failed(m) => Err(Fail::Stop(ApprovalError::Internal(format!("pkcheck: {m}")))),
+    }
+}
+
+/// Size and field count of unexpected dialog output, for diagnostics: no part of the text, so no
+/// account name or number reaches the log.
+fn shape(out: &[u8]) -> String {
+    let fields = out.split(|b| *b == b'|').count();
+    format!("{} bytes in {fields} fields", out.len())
 }
 
 fn outcome(r: &Result<(), Fail>) -> &'static str {
@@ -229,6 +289,8 @@ fn run_methods<M: Copy>(
 enum DeviceChange<'a> {
     Pair(&'a PairingApprovalContext<'a>),
     Remove(&'a RemovalApprovalContext<'a>),
+    Export(&'a ExportApprovalContext),
+    Repair(&'a RepairApprovalContext<'a>),
 }
 
 impl DeviceChange<'_> {
@@ -236,6 +298,8 @@ impl DeviceChange<'_> {
         match self {
             DeviceChange::Pair(_) => PAIRING_RATE_KEY,
             DeviceChange::Remove(_) => REMOVAL_RATE_KEY,
+            DeviceChange::Export(_) => EXPORT_RATE_KEY,
+            DeviceChange::Repair(_) => REPAIR_RATE_KEY,
         }
     }
 
@@ -243,6 +307,8 @@ impl DeviceChange<'_> {
         match self {
             DeviceChange::Pair(_) => display::PAIRING_TITLE,
             DeviceChange::Remove(_) => display::REMOVAL_TITLE,
+            DeviceChange::Export(_) => display::EXPORT_TITLE,
+            DeviceChange::Repair(_) => display::REPAIR_TITLE,
         }
     }
 
@@ -250,13 +316,30 @@ impl DeviceChange<'_> {
         match self {
             DeviceChange::Pair(c) => display::pairing_context(c),
             DeviceChange::Remove(c) => display::removal_context(c),
+            DeviceChange::Export(c) => display::export_context(c),
+            DeviceChange::Repair(c) => display::repair_context(c),
         }
     }
 
-    fn question(self, now: u64, step: Step, notice: Option<&str>, rem: Duration) -> Vec<String> {
+    /// A window that comes before the question and shows nothing but what the person must
+    /// compare: the pairing words, with no name the other device chose.
+    fn comparison(self, now: u64, rem: Duration) -> Vec<String> {
         match self {
-            DeviceChange::Pair(c) => display::pairing_question_args(c, now, step, notice, rem),
+            DeviceChange::Pair(c) => display::pairing_words_args(c, now, rem),
+            _ => Vec::new(),
+        }
+    }
+
+    fn has_comparison(self) -> bool {
+        matches!(self, DeviceChange::Pair(_))
+    }
+
+    fn question(self, step: Step, notice: Option<&str>, rem: Duration) -> Vec<String> {
+        match self {
+            DeviceChange::Pair(c) => display::pairing_question_args(c, step, notice, rem),
             DeviceChange::Remove(c) => display::removal_question_args(c, step, notice, rem),
+            DeviceChange::Export(c) => display::export_question_args(c, step, notice, rem),
+            DeviceChange::Repair(c) => display::repair_question_args(c, step, notice, rem),
         }
     }
 
@@ -264,6 +347,8 @@ impl DeviceChange<'_> {
         match self {
             DeviceChange::Pair(c) => display::pairing_pin_args(c, notice, rem),
             DeviceChange::Remove(c) => display::removal_pin_args(c, notice, rem),
+            DeviceChange::Export(c) => display::export_pin_args(c, notice, rem),
+            DeviceChange::Repair(c) => display::repair_pin_args(c, notice, rem),
         }
     }
 
@@ -271,6 +356,8 @@ impl DeviceChange<'_> {
         match self {
             DeviceChange::Pair(_) => "pairing approval",
             DeviceChange::Remove(_) => "device removal",
+            DeviceChange::Export(_) => "export approval",
+            DeviceChange::Repair(_) => "repair approval",
         }
     }
 }
@@ -302,6 +389,16 @@ impl Deadline {
     }
 }
 
+/// What the request in progress has shown so far, and the prompt budget it still owes for showing
+/// it. The budget is spent when the first window is about to open, so a request that ends before
+/// that (no method works, polkit decides by itself, a helper is missing) costs nothing, and
+/// `approve` can tell its caller that nothing was shown.
+#[derive(Debug, Default)]
+struct Window {
+    shown: u32,
+    budget: Option<(String, u32)>,
+}
+
 #[derive(Debug, Clone)]
 enum ConfigSource {
     File(PathBuf),
@@ -317,7 +414,10 @@ pub struct HirzApprover<R: CommandRunner = SystemRunner> {
     pins: PinStore,
     limiter: Mutex<RateLimiter>,
     busy: Mutex<()>,
+    window: Mutex<Window>,
     no_fingers_hinted: AtomicBool,
+    misses: MissCounter,
+    timeout_cap: Option<Duration>,
 }
 
 impl HirzApprover<SystemRunner> {
@@ -336,8 +436,23 @@ impl<R: CommandRunner> HirzApprover<R> {
             pins: PinStore::new(paths.state_dir.clone()),
             limiter: Mutex::new(RateLimiter::new()),
             busy: Mutex::new(()),
+            window: Mutex::new(Window::default()),
             no_fingers_hinted: AtomicBool::new(false),
+            misses: MissCounter::new(paths.state_dir.clone()),
+            timeout_cap: None,
         }
+    }
+
+    /// No ceremony lasts longer than `cap`, whatever the config file says. hirzd uses it to end a
+    /// prompt before the CTAPHID transaction it belongs to times out.
+    pub fn with_timeout_cap(mut self, cap: Duration) -> Self {
+        self.timeout_cap = Some(cap);
+        self
+    }
+
+    fn ceremony_timeout(&self, config: &Config) -> Duration {
+        self.timeout_cap
+            .map_or(config.timeout, |cap| config.timeout.min(cap))
     }
 
     pub fn with_config(mut self, config: Config) -> Self {
@@ -371,9 +486,7 @@ impl<R: CommandRunner> HirzApprover<R> {
             .methods
             .iter()
             .copied()
-            .filter(|m| {
-                self.runner.tool_available(Tool::Zenity) && self.uv_available(*m, &deadline)
-            })
+            .filter(|m| self.zenity_usable() && self.uv_available(*m, &deadline))
             .collect())
     }
 
@@ -390,6 +503,10 @@ impl<R: CommandRunner> HirzApprover<R> {
             UvMethod::Polkit => self.polkit_ready(),
             UvMethod::Fingerprint => {
                 if !self.runner.tool_available(Tool::FprintdVerify) {
+                    return false;
+                }
+                if self.misses.paused(unix_now()) {
+                    diag("the fingerprint reader is paused after too many misses");
                     return false;
                 }
                 let (Some(user), Ok(remaining)) = (self.runner.username(), deadline.remaining())
@@ -418,6 +535,16 @@ impl<R: CommandRunner> HirzApprover<R> {
 
     fn polkit_ready(&self) -> bool {
         self.runner.tool_available(Tool::Pkcheck) && self.runner.polkit_action_installed()
+    }
+
+    /// zenity is installed in a trusted directory and is version 4 or newer. A version that cannot
+    /// be read does not block: the prompts then rely on what zenity 4 does (docs/approval.md).
+    fn zenity_usable(&self) -> bool {
+        self.runner.tool_available(Tool::Zenity)
+            && self
+                .runner
+                .zenity_major_version()
+                .is_none_or(|v| v >= MIN_ZENITY_MAJOR)
     }
 
     /// The first of `rest` usable without running anything; fingerprint never follows itself.
@@ -456,10 +583,51 @@ impl<R: CommandRunner> HirzApprover<R> {
         build: impl FnOnce(Duration) -> Vec<String>,
     ) -> Result<Secret, ApprovalError> {
         let remaining = deadline.remaining()?;
-        map_dialog(
+        self.will_show()?;
+        let r = map_dialog(
             self.runner
                 .run(&self.zenity_spec(build(remaining), remaining)),
-        )
+        );
+        if matches!(r, Err(ApprovalError::Unavailable)) {
+            self.window_failed();
+        }
+        r
+    }
+
+    fn window_state(&self) -> MutexGuard<'_, Window> {
+        self.window.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn start_request(&self) {
+        *self.window_state() = Window::default();
+    }
+
+    fn owe_budget(&self, key: &str, per_minute: u32) {
+        self.window_state().budget = Some((key.to_owned(), per_minute));
+    }
+
+    /// Called right before a window opens. The first one of a request spends its budget.
+    fn will_show(&self) -> Result<(), ApprovalError> {
+        let mut w = self.window_state();
+        if w.shown == 0
+            && let Some((key, per_minute)) = w.budget.take()
+            && !self.rate_allowed(&key, per_minute)
+        {
+            diag("too many prompts; try again in a minute");
+            return Err(ApprovalError::Denied);
+        }
+        w.shown = w.shown.saturating_add(1);
+        Ok(())
+    }
+
+    /// The window could not open (no display, zenity gone): nobody saw it.
+    fn window_failed(&self) {
+        let mut w = self.window_state();
+        w.shown = w.shown.saturating_sub(1);
+    }
+
+    fn showed_something(&self) -> bool {
+        self.window_state().shown > 0
     }
 
     /// Get with several accounts: the user picks one first. Also reports whether the context was shown.
@@ -477,8 +645,7 @@ impl<R: CommandRunner> HirzApprover<R> {
                     self.dialog(deadline, |rem| display::list_args(ctx, ctx.candidates, rem))?;
                 let idx = display::parse_list_selection(&out, n).ok_or_else(|| {
                     diag(&format!(
-                        "account list returned an unreadable selection ({} bytes, shape {:?})",
-                        out.len(),
+                        "account list returned an unreadable selection ({})",
                         shape(&out)
                     ));
                     ApprovalError::Denied
@@ -534,6 +701,7 @@ impl<R: CommandRunner> HirzApprover<R> {
                 )?);
             }
             Method::Uv(UvMethod::Polkit) => {
+                self.polkit_preflight(deadline)?;
                 if chosen && shown.is_some() {
                     *shown = Some(method.step());
                 }
@@ -566,14 +734,31 @@ impl<R: CommandRunner> HirzApprover<R> {
         r
     }
 
-    fn run_polkit(&self, deadline: &Deadline) -> Result<(), Fail> {
-        let id = self
-            .runner
+    fn process_identity(&self) -> Result<polkit::ProcessIdentity, ApprovalError> {
+        self.runner
             .process_identity()
-            .ok_or_else(|| ApprovalError::Internal("cannot read the process identity".into()))?;
+            .ok_or_else(|| ApprovalError::Internal("cannot read the process identity".into()))
+    }
+
+    /// Asks polkit, without letting it ask anyone, what it would do. Only "a password is needed"
+    /// lets the password method go on: an action polkit grants or refuses by itself says nothing
+    /// about who is at the keyboard, so it must not become a user verification, and it must not
+    /// end the request either.
+    fn polkit_preflight(&self, deadline: &Deadline) -> Result<(), Fail> {
+        let id = self.process_identity()?;
+        map_preflight(self.runner.run(&CommandSpec {
+            tool: Tool::Pkcheck,
+            args: polkit::pkcheck_args(&id, false),
+            env: EnvPolicy::System,
+            timeout: deadline.remaining()?.min(PKCHECK_PREFLIGHT_TIMEOUT),
+        }))
+    }
+
+    fn run_polkit(&self, deadline: &Deadline) -> Result<(), Fail> {
+        let id = self.process_identity()?;
         Ok(map_pkcheck(self.runner.run(&CommandSpec {
             tool: Tool::Pkcheck,
-            args: polkit::pkcheck_args(&id),
+            args: polkit::pkcheck_args(&id, true),
             env: EnvPolicy::System,
             timeout: deadline.remaining()?,
         }))?)
@@ -604,6 +789,7 @@ impl<R: CommandRunner> HirzApprover<R> {
         let mut misses = 0u32;
         let mut rescans = 0u32;
         let mut notice: Option<String> = note.map(str::to_owned);
+        self.will_show()?;
         loop {
             let remaining = deadline.remaining()?;
             let verify = CommandSpec {
@@ -628,6 +814,7 @@ impl<R: CommandRunner> HirzApprover<R> {
             match fprint::classify_verify(code, &stdout) {
                 VerifyOutcome::Match => return Ok(()),
                 VerifyOutcome::Retry(Retry::NoMatch) => {
+                    self.misses.record_miss(unix_now());
                     misses = misses.saturating_add(1);
                     let left = FINGER_ATTEMPTS.saturating_sub(misses);
                     if left == 0 {
@@ -673,11 +860,22 @@ impl<R: CommandRunner> HirzApprover<R> {
         first_notice: Option<&str>,
         build: impl Fn(Option<&str>, Duration) -> Vec<String>,
     ) -> Result<(), Fail> {
+        if matches!(self.pins.status(), Err(PinError::Corrupt)) {
+            diag("the PIN verifier file is damaged; reset it with the hirz CLI");
+            return Err(Fail::next(
+                ApprovalError::Unavailable,
+                Some(PIN_DAMAGED_NOTE.to_owned()),
+            ));
+        }
         let mut notice: Option<String> = first_notice.map(str::to_owned);
         for _ in 0..PIN_PROMPTS {
             let out = self.dialog(deadline, |rem| build(notice.as_deref(), rem))?;
             match self.pins.verify(display::strip_entry_newline(&out)) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    // The back-off and the key derivation run after the window closed.
+                    deadline.remaining()?;
+                    return Ok(());
+                }
                 Err(PinError::Wrong { remaining: 0 } | PinError::Locked) => {
                     diag(
                         "the hirz PIN is locked after too many wrong attempts; reset it with the hirz CLI",
@@ -689,16 +887,21 @@ impl<R: CommandRunner> HirzApprover<R> {
                         "Wrong PIN. {remaining} attempts left before the PIN locks."
                     ));
                 }
-                Err(PinError::TooShort | PinError::TooLong | PinError::NotUtf8) => {
-                    notice = Some(
-                        "A hirz PIN has at least 4 characters and at most 63 bytes.".to_owned(),
-                    );
+                Err(
+                    PinError::TooShort
+                    | PinError::TooLong
+                    | PinError::NotUtf8
+                    | PinError::NotPrintableAscii,
+                ) => {
+                    notice = Some(PIN_FORMAT_NOTE.to_owned());
                 }
                 Err(PinError::NotSet) => return Err(ApprovalError::Unavailable.into()),
                 Err(PinError::Corrupt) => {
-                    return Err(Fail::Stop(ApprovalError::Internal(
-                        "the PIN verifier file is damaged".into(),
-                    )));
+                    diag("the PIN verifier file is damaged; reset it with the hirz CLI");
+                    return Err(Fail::next(
+                        ApprovalError::Unavailable,
+                        Some(PIN_DAMAGED_NOTE.to_owned()),
+                    ));
                 }
                 Err(PinError::Io(kind)) => {
                     return Err(Fail::Stop(ApprovalError::Internal(format!(
@@ -723,6 +926,8 @@ impl<R: CommandRunner> HirzApprover<R> {
         }
     }
 
+    /// Counts one prompt against `key` and the global budget; false when either is used up. Called
+    /// only when a dialog is about to be shown, so requests that end as unavailable cost nothing.
     fn rate_allowed(&self, key: &str, per_minute: u32) -> bool {
         self.limiter
             .lock()
@@ -730,12 +935,27 @@ impl<R: CommandRunner> HirzApprover<R> {
             .allow(key, Instant::now(), per_minute)
     }
 
+    /// Like [`Self::rate_allowed`] without counting, to refuse a flood before any helper runs.
+    fn rate_open(&self, key: &str, per_minute: u32) -> bool {
+        self.limiter
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .check(key, Instant::now(), per_minute)
+    }
+
     fn require_zenity(&self) -> Result<(), ApprovalError> {
-        if self.runner.tool_available(Tool::Zenity) {
-            Ok(())
-        } else {
-            diag(ZENITY_MISSING);
-            Err(ApprovalError::Unavailable)
+        if !self.runner.tool_available(Tool::Zenity) {
+            diag(&zenity_missing());
+            return Err(ApprovalError::Unavailable);
+        }
+        match self.runner.zenity_major_version() {
+            Some(v) if v < MIN_ZENITY_MAJOR => {
+                diag(&format!(
+                    "zenity {v} is too old: the prompts need zenity {MIN_ZENITY_MAJOR} or newer"
+                ));
+                Err(ApprovalError::Unavailable)
+            }
+            _ => Ok(()),
         }
     }
 
@@ -754,10 +974,16 @@ impl<R: CommandRunner> HirzApprover<R> {
         shown: &mut bool,
         deadline: &Deadline,
     ) -> Result<(), Fail> {
+        if method == UvMethod::Polkit {
+            self.polkit_preflight(deadline)?;
+        }
         let step = Step::Uv(method);
         let question = !*shown || (method == UvMethod::Polkit && note.is_some() && !chosen);
         if question {
-            self.dialog(deadline, |rem| change.question(now, step, note, rem))?;
+            if !*shown && change.has_comparison() {
+                self.dialog(deadline, |rem| change.comparison(now, rem))?;
+            }
+            self.dialog(deadline, |rem| change.question(step, note, rem))?;
             *shown = true;
         }
         let note = if question { None } else { note };
@@ -782,19 +1008,29 @@ impl<R: CommandRunner> HirzApprover<R> {
     /// change, whatever the config says. Nothing is shown when no UV method is available.
     fn confirm_device(&self, change: DeviceChange<'_>) -> Result<Approval, ApprovalError> {
         let _busy = self.take_busy()?;
+        self.start_request();
         let config = self.config()?;
-        if !self.rate_allowed(change.rate_key(), config.prompts_per_minute) {
+        if !self.rate_open(change.rate_key(), config.prompts_per_minute) {
             diag("too many device prompts; try again in a minute");
             return Err(ApprovalError::Denied);
         }
         self.require_zenity()?;
-        let deadline = Deadline::start(config.timeout);
+        let deadline = Deadline::start(self.ceremony_timeout(&config));
         let now = unix_now();
         let methods = config.methods;
-        let mut pos = 0usize;
+        let first = methods
+            .iter()
+            .position(|m| self.uv_available(*m, &deadline))
+            .ok_or(ApprovalError::Unavailable)?;
+        self.owe_budget(change.rate_key(), config.prompts_per_minute);
+        let mut pos = first.saturating_add(1);
+        let mut first_pending = true;
         let mut shown = false;
         run_methods(
             || {
+                if core::mem::take(&mut first_pending) {
+                    return methods.get(first).map(|m| (*m, pos));
+                }
                 while let Some(m) = methods.get(pos).copied() {
                     pos = pos.saturating_add(1);
                     if self.uv_available(m, &deadline) {
@@ -810,6 +1046,7 @@ impl<R: CommandRunner> HirzApprover<R> {
                 )
             },
         )?;
+        self.misses.clear();
         Ok(Approval {
             user_present: true,
             user_verified: true,
@@ -818,16 +1055,15 @@ impl<R: CommandRunner> HirzApprover<R> {
     }
 }
 
-impl<R: CommandRunner> Approver for HirzApprover<R> {
-    fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
-        let _busy = self.take_busy()?;
+impl<R: CommandRunner> HirzApprover<R> {
+    fn approve_request(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
         let config = self.config()?;
-        if !self.rate_allowed(ctx.rp_id, config.prompts_per_minute) {
-            diag("too many approval prompts for one site; try again in a minute");
+        if !self.rate_open(ctx.rp_id, config.prompts_per_minute) {
+            diag("too many approval prompts; try again in a minute");
             return Err(ApprovalError::Denied);
         }
         self.require_zenity()?;
-        let deadline = Deadline::start(config.timeout);
+        let deadline = Deadline::start(self.ceremony_timeout(&config));
         let plan = plan_methods(&config, ctx)?;
         let available = |m: &Method| match m {
             Method::ClickToAllow => !ctx.uv_required,
@@ -837,12 +1073,13 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
             .iter()
             .position(available)
             .ok_or(ApprovalError::Unavailable)?;
+        self.owe_budget(ctx.rp_id, config.prompts_per_minute);
         let (selected, list_shown) = self.select(ctx, &deadline)?;
-        // The list showed the site, so the first method needs no second context window.
-        let mut shown = if list_shown {
-            plan.get(first).map(|m| m.step())
-        } else {
-            None
+        // The list showed the site, so a UV method needs no second context window. A click on
+        // "Continue" in the list is not a decision to allow, so click-to-allow still asks.
+        let mut shown = match plan.get(first) {
+            Some(m) if list_shown && *m != Method::ClickToAllow => Some(m.step()),
+            _ => None,
         };
         let mut pos = first.saturating_add(1);
         let mut first_pending = true;
@@ -875,18 +1112,38 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
                 )
             },
         )?;
+        if matches!(method.0, Method::Uv(_)) {
+            self.misses.clear();
+        }
         Ok(Approval {
             user_present: true,
             user_verified: matches!(method.0, Method::Uv(_)),
             selected,
         })
     }
+}
+
+impl<R: CommandRunner> Approver for HirzApprover<R> {
+    /// Every way this ends without a window having been shown is `NothingShown`, whatever stopped
+    /// it: a front end that sees it must not be able to tell it from "no such credential".
+    fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        let Ok(_busy) = self.take_busy() else {
+            return Err(ApprovalError::NothingShown);
+        };
+        self.start_request();
+        match self.approve_request(ctx) {
+            Err(_) if !self.showed_something() => Err(ApprovalError::NothingShown),
+            other => other,
+        }
+    }
 
     fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
         let _busy = self.take_busy()?;
+        self.start_request();
         let config = self.config()?;
         self.require_zenity()?;
-        let deadline = Deadline::start(config.timeout);
+        self.owe_budget(SELECTION_RATE_KEY, config.prompts_per_minute);
+        let deadline = Deadline::start(self.ceremony_timeout(&config));
         self.dialog(&deadline, display::selection_args)?;
         Ok(Approval {
             user_present: true,
@@ -906,6 +1163,14 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
 
     fn confirm_removal(&self, ctx: &RemovalApprovalContext<'_>) -> Result<Approval, ApprovalError> {
         self.confirm_device(DeviceChange::Remove(ctx))
+    }
+
+    fn confirm_export(&self, ctx: &ExportApprovalContext) -> Result<Approval, ApprovalError> {
+        self.confirm_device(DeviceChange::Export(ctx))
+    }
+
+    fn confirm_repair(&self, ctx: &RepairApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        self.confirm_device(DeviceChange::Repair(ctx))
     }
 }
 
@@ -929,8 +1194,13 @@ mod tests {
         tools: Vec<Tool>,
         polkit_installed: bool,
         icon: Option<PathBuf>,
+        zenity_version: Option<u32>,
         script: Mutex<VecDeque<(Tool, RunResult)>>,
         calls: Mutex<Vec<CommandSpec>>,
+        /// Answers of pkcheck without user interaction, in order; "a password is needed" (exit
+        /// 2) when none is left. Not in `calls` unless `record_preflight` is set.
+        preflight: Mutex<VecDeque<RunResult>>,
+        record_preflight: bool,
     }
 
     impl Fake {
@@ -939,9 +1209,18 @@ mod tests {
                 tools: tools.to_vec(),
                 polkit_installed: true,
                 icon: None,
+                zenity_version: Some(4),
                 script: Mutex::new(script.into()),
                 calls: Mutex::new(Vec::new()),
+                preflight: Mutex::new(VecDeque::new()),
+                record_preflight: false,
             }
+        }
+
+        fn with_preflight(mut self, answers: Vec<RunResult>) -> Self {
+            self.preflight = Mutex::new(answers.into());
+            self.record_preflight = true;
+            self
         }
     }
 
@@ -953,6 +1232,19 @@ mod tests {
 
     impl CommandRunner for Fake {
         fn run(&self, spec: &CommandSpec) -> RunResult {
+            if spec.tool == Tool::Pkcheck && !spec.args.contains(&"--allow-user-interaction".into())
+            {
+                assert_eq!(spec.env, EnvPolicy::System);
+                if self.record_preflight {
+                    self.calls.lock().unwrap().push(spec.clone());
+                }
+                return self
+                    .preflight
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| exit(2, ""));
+            }
             self.calls.lock().unwrap().push(spec.clone());
             let (tool, r) = self
                 .script
@@ -1001,6 +1293,9 @@ mod tests {
         fn username(&self) -> Option<String> {
             Some("alice".into())
         }
+        fn zenity_major_version(&self) -> Option<u32> {
+            self.zenity_version
+        }
     }
 
     fn exit(code: i32, out: &str) -> RunResult {
@@ -1008,6 +1303,16 @@ mod tests {
             code: Some(code),
             stdout: Secret::new(out.as_bytes().to_vec()),
             stderr: Vec::new(),
+            elapsed: Duration::from_secs(5),
+        }
+    }
+
+    fn exit_stderr(code: i32, stderr: &str, elapsed: Duration) -> RunResult {
+        RunResult::Exited {
+            code: Some(code),
+            stdout: Secret::new(Vec::new()),
+            stderr: stderr.as_bytes().to_vec(),
+            elapsed,
         }
     }
 
@@ -1123,11 +1428,7 @@ mod tests {
             map_dialog(exit(-1, "")),
             Err(ApprovalError::Internal(_))
         ));
-        let nodisplay = RunResult::Exited {
-            code: Some(1),
-            stdout: Secret::new(vec![]),
-            stderr: b"cannot open display".to_vec(),
-        };
+        let nodisplay = exit_stderr(1, "Gtk-WARNING **: cannot open display: ", Duration::ZERO);
         assert_eq!(
             map_dialog(nodisplay).unwrap_err(),
             ApprovalError::Unavailable
@@ -1144,11 +1445,41 @@ mod tests {
             code: None,
             stdout: Secret::new(vec![]),
             stderr: vec![],
+            elapsed: Duration::ZERO,
         };
         assert!(matches!(
             map_dialog(killed),
             Err(ApprovalError::Internal(_))
         ));
+    }
+
+    #[test]
+    fn cancel_is_never_taken_for_a_missing_display() {
+        let warning = "(zenity:7): Gdk-WARNING **: display :0 reported a scale change";
+        for (stderr, elapsed) in [
+            (warning, Duration::from_millis(20)),
+            (warning, Duration::from_secs(30)),
+            ("cannot open display: ", Duration::from_secs(30)),
+            ("cannot open display: ", DISPLAY_FAILURE_WINDOW),
+            ("", Duration::from_millis(10)),
+        ] {
+            assert_eq!(
+                map_dialog(exit_stderr(1, stderr, elapsed)).unwrap_err(),
+                ApprovalError::Denied,
+                "{stderr:?} {elapsed:?}"
+            );
+        }
+        for message in [
+            "Gtk-WARNING **: 10:00:00.000: cannot open display: ",
+            "Failed to open display",
+            "(zenity:7): Gdk-ERROR **: Could not open display :0",
+        ] {
+            assert_eq!(
+                map_dialog(exit_stderr(1, message, Duration::from_millis(80))).unwrap_err(),
+                ApprovalError::Unavailable,
+                "{message:?}"
+            );
+        }
     }
 
     #[test]
@@ -1171,6 +1502,7 @@ mod tests {
             code: None,
             stdout: Secret::new(vec![]),
             stderr: vec![],
+            elapsed: Duration::ZERO,
         };
         assert!(matches!(
             map_pkcheck(killed),
@@ -1220,7 +1552,7 @@ mod tests {
         let mut config = cfg(&[UvMethod::Pin]);
         config.click_to_allow = vec!["example.com".into()];
         let a = approver(Fake::new(ALL, vec![]), config, &d);
-        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Unavailable));
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
         assert!(calls(&a).is_empty());
         let mut shown = None;
         let deadline = Deadline::start(Duration::from_secs(5));
@@ -1289,11 +1621,14 @@ mod tests {
         );
         assert_eq!(
             cl[1].args,
-            polkit::pkcheck_args(&ProcessIdentity {
-                pid: 4242,
-                start_time: 987654,
-                uid: 1000
-            })
+            polkit::pkcheck_args(
+                &ProcessIdentity {
+                    pid: 4242,
+                    start_time: 987654,
+                    uid: 1000
+                },
+                true
+            )
         );
         assert_eq!(cl[1].env, EnvPolicy::System);
     }
@@ -1339,7 +1674,7 @@ mod tests {
         let mut fake = Fake::new(ALL, vec![]);
         fake.polkit_installed = false;
         let a = approver(fake, cfg(&[UvMethod::Polkit]), &d);
-        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Unavailable));
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
         assert!(calls(&a).is_empty());
     }
 
@@ -1416,13 +1751,16 @@ mod tests {
     }
 
     #[test]
-    fn list_counts_as_the_click() {
+    fn a_click_on_the_list_does_not_allow_a_click_to_allow_site() {
         let d = TempDir::new("list-click");
         let c = two();
         let mut config = cfg(&[UvMethod::Polkit]);
         config.click_to_allow = vec!["example.com".into()];
         let a = approver(
-            Fake::new(ALL, vec![(Tool::Zenity, exit(0, "1\n"))]),
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "1\n")), (Tool::Zenity, exit(0, ""))],
+            ),
             config,
             &d,
         );
@@ -1435,6 +1773,26 @@ mod tests {
                 selected: Some(0)
             }
         );
+        let cl = calls(&a);
+        assert_eq!(cl.len(), 2);
+        assert_eq!(cl[0].args[0], "--list");
+        assert_eq!(cl[1].args[0], "--question");
+        assert!(cl[1].args.contains(&"--ok-label=Allow".to_owned()));
+        assert!(cl[1].args.contains(&"--default-cancel".to_owned()));
+        assert!(texts(&a)[1].contains("Account: alice"));
+
+        let d = TempDir::new("list-click-cancel");
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.click_to_allow = vec!["example.com".into()];
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "1\n")), (Tool::Zenity, exit(1, ""))],
+            ),
+            config,
+            &d,
+        );
+        assert_eq!(a.approve(&get(&c, false)), Err(ApprovalError::Denied));
     }
 
     #[test]
@@ -1479,13 +1837,13 @@ mod tests {
     }
 
     #[test]
-    fn get_without_candidates_is_internal() {
+    fn get_without_candidates_shows_nothing() {
         let d = TempDir::new("nocand");
         let a = approver(Fake::new(ALL, vec![]), cfg(&[UvMethod::Polkit]), &d);
-        assert!(matches!(
+        assert_eq!(
             a.approve(&get(&[], false)),
-            Err(ApprovalError::Internal(_))
-        ));
+            Err(ApprovalError::NothingShown)
+        );
     }
 
     #[test]
@@ -1590,7 +1948,7 @@ mod tests {
             cfg(&[UvMethod::Fingerprint]),
             &d,
         );
-        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Unavailable));
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
     }
 
     #[test]
@@ -1602,7 +1960,7 @@ mod tests {
             cfg(&[UvMethod::Polkit]),
             &d,
         );
-        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Unavailable));
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
         assert!(calls(&a).is_empty());
     }
 
@@ -1649,7 +2007,11 @@ mod tests {
             &d,
         );
         assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
-        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
+        assert_eq!(
+            a.approve(&get(&c, true)),
+            Err(ApprovalError::NothingShown),
+            "the budget is used up, so nothing is shown and the caller is told so"
+        );
         assert_eq!(calls(&a).len(), 1);
     }
 
@@ -1664,10 +2026,9 @@ mod tests {
         };
         let a = HirzApprover::new(Fake::new(ALL, vec![]), &paths);
         let c = one();
-        assert!(matches!(
-            a.approve(&get(&c, true)),
-            Err(ApprovalError::Internal(_))
-        ));
+        assert!(matches!(a.config(), Err(ApprovalError::Internal(_))));
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+        assert!(calls(&a).is_empty());
     }
 
     #[test]
@@ -1675,7 +2036,7 @@ mod tests {
         let d = TempDir::new("pin-unset");
         let c = one();
         let a = approver(Fake::new(ALL, vec![]), cfg(&[UvMethod::Pin]), &d);
-        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Unavailable));
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
         assert_eq!(a.available_uv_methods().unwrap(), []);
     }
 
@@ -1727,12 +2088,7 @@ mod tests {
         );
         assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
         let cl = calls(&a);
-        assert!(
-            cl[1]
-                .args
-                .iter()
-                .any(|x| x.contains("at least 4 characters"))
-        );
+        assert!(cl[1].args.iter().any(|x| x.contains("4 to 63 characters")));
         assert_eq!(a.pin_store().status().unwrap().unwrap().failures, 0);
     }
 
@@ -1793,32 +2149,96 @@ mod tests {
     };
 
     #[test]
-    fn pairing_shows_words_then_polkit() {
+    fn pairing_shows_the_words_alone_then_the_name_then_polkit() {
         let d = TempDir::new("pair-polkit");
         let a = approver(
             Fake::new(
                 ALL,
-                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                ],
             ),
             cfg(&[UvMethod::Polkit, UvMethod::Pin]),
             &d,
         );
         assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
         let cl = calls(&a);
-        assert_eq!(cl.len(), 2);
-        assert_eq!(cl[0].args[0], "--question");
-        assert!(cl[0].args.contains(&"--default-cancel".to_owned()));
-        assert!(cl[0].args.contains(&"--no-markup".to_owned()));
-        let text = cl[0]
-            .args
-            .iter()
-            .find_map(|x| x.strip_prefix("--text="))
-            .unwrap();
-        assert!(text.contains("Device name: desk"));
-        assert!(text.contains("MAPLE    ORBIT    QUARTZ    EMBER"));
-        assert!(text.contains("Do these 4 words match the ones on the new device?"));
-        assert_eq!(cl[1].tool, Tool::Pkcheck);
-        assert_eq!(cl[1].env, EnvPolicy::System);
+        assert_eq!(cl.len(), 3);
+        for window in &cl[..2] {
+            assert_eq!(window.args[0], "--question");
+            assert!(window.args.contains(&"--default-cancel".to_owned()));
+            assert!(window.args.contains(&"--no-markup".to_owned()));
+        }
+        let text = |i: usize| {
+            cl[i]
+                .args
+                .iter()
+                .find_map(|x| x.strip_prefix("--text="))
+                .unwrap()
+                .to_owned()
+        };
+        let words = text(0);
+        assert!(words.contains("MAPLE    ORBIT    QUARTZ    EMBER"));
+        assert!(words.contains("Do these 4 words match the ones on the new device?"));
+        assert!(
+            !words.contains("desk"),
+            "no name before the words matched: {words}"
+        );
+        let name = text(1);
+        assert!(name.contains("[desk]"));
+        assert!(!name.contains("MAPLE"));
+        assert!(cl[1].args.contains(&"--ok-label=Approve".to_owned()));
+        assert_eq!(cl[2].tool, Tool::Pkcheck);
+        assert_eq!(cl[2].env, EnvPolicy::System);
+    }
+
+    #[test]
+    fn a_name_made_of_the_real_words_never_appears_in_the_comparison_window() {
+        let d = TempDir::new("pair-forged-name");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                ],
+            ),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        let ctx = PairingApprovalContext {
+            device_name: "laptop MAPLE ORBIT QUARTZ EMBER",
+            words: &["cedar", "delta", "falcon", "gravel"],
+            requested_at: 0,
+        };
+        assert_eq!(a.confirm_pairing(&ctx), Ok(VERIFIED));
+        let t = texts(&a);
+        assert!(!t[0].to_lowercase().contains("laptop"));
+        assert!(
+            !t[0].contains("MAPLE"),
+            "the real device's words must not be shown here"
+        );
+        assert!(t[0].contains("CEDAR"));
+        assert!(t[1].contains("[laptop maple orbit quartz ember]"));
+    }
+
+    #[test]
+    fn declining_the_name_stops_before_any_verification() {
+        let d = TempDir::new("pair-name-cancel");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Zenity, exit(1, ""))],
+            ),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_pairing(&pairing()), Err(ApprovalError::Denied));
+        assert!(calls(&a).iter().all(|c| c.tool == Tool::Zenity));
+        assert_eq!(calls(&a).len(), 2);
     }
 
     #[test]
@@ -1842,7 +2262,14 @@ mod tests {
         ] {
             let d = TempDir::new("pair-uv-no");
             let a = approver(
-                Fake::new(ALL, vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, r)]),
+                Fake::new(
+                    ALL,
+                    vec![
+                        (Tool::Zenity, exit(0, "")),
+                        (Tool::Zenity, exit(0, "")),
+                        (Tool::Pkcheck, r),
+                    ],
+                ),
                 cfg(&[UvMethod::Polkit]),
                 &d,
             );
@@ -1858,6 +2285,7 @@ mod tests {
                 ALL,
                 vec![
                     (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "")),
                     (Tool::Pkcheck, exit(2, "")),
                     (Tool::FprintdList, exit(0, ENROLLED)),
                     (Tool::FprintdVerify, exit(0, MATCH)),
@@ -1868,14 +2296,15 @@ mod tests {
         );
         assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
         let cl = calls(&a);
-        assert_eq!(cl.len(), 5);
+        assert_eq!(cl.len(), 6);
         assert!(
-            cl[4]
+            cl[5]
                 .args
                 .iter()
                 .any(|x| x.contains("Touch the fingerprint reader.")
-                    && x.contains("Approve the new device: desk")
-                    && x.contains("MAPLE"))
+                    && x.contains("Approve a new device.")
+                    && x.contains("[desk]")
+                    && !x.contains("MAPLE"))
         );
     }
 
@@ -1971,6 +2400,7 @@ mod tests {
                 ALL,
                 vec![
                     (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "")),
                     (Tool::Zenity, exit(0, "1234\n")),
                 ],
             ),
@@ -1992,6 +2422,7 @@ mod tests {
                 ALL,
                 vec![
                     (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "")),
                     (Tool::Zenity, exit(0, "0000\n")),
                     (Tool::Zenity, exit(0, "1234\n")),
                 ],
@@ -2003,12 +2434,13 @@ mod tests {
         assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
         let cl = calls(&a);
         assert_eq!(cl[0].args[0], "--question");
-        assert_eq!(&cl[1].args[..2], ["--entry", "--hide-text"]);
+        assert_eq!(cl[1].args[0], "--question");
+        assert_eq!(&cl[2].args[..2], ["--entry", "--hide-text"]);
         assert!(
-            cl[2]
+            cl[3]
                 .args
                 .iter()
-                .any(|x| x.contains("Wrong PIN.") && x.contains("Approve the new device: desk"))
+                .any(|x| x.contains("Wrong PIN.") && x.contains("Approve a new device."))
         );
     }
 
@@ -2338,6 +2770,135 @@ mod tests {
         assert_eq!(calls(&a).len(), 2);
     }
 
+    fn export() -> ExportApprovalContext {
+        ExportApprovalContext {
+            passkeys: 3,
+            plain: true,
+        }
+    }
+
+    #[test]
+    fn export_needs_verification_and_never_a_click() {
+        let d = TempDir::new("export-polkit");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+            ),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_export(&export()), Ok(VERIFIED));
+        let cl = calls(&a);
+        assert_eq!(cl.len(), 2);
+        assert!(cl[0].args.contains(&"--ok-label=Export".to_owned()));
+        assert!(cl[0].args.contains(&"--default-cancel".to_owned()));
+        assert!(texts(&a)[0].contains("Passkeys: 3"));
+        assert_eq!(cl[1].tool, Tool::Pkcheck);
+
+        let d = TempDir::new("export-cancel");
+        let a = approver(
+            Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_export(&export()), Err(ApprovalError::Denied));
+
+        for methods in [&[][..], &[UvMethod::Pin][..]] {
+            let d = TempDir::new("export-click");
+            let mut config = cfg(methods);
+            config.click_to_allow = vec!["example.com".into()];
+            let a = approver(Fake::new(ALL, vec![]), config, &d);
+            assert_eq!(a.confirm_export(&export()), Err(ApprovalError::Unavailable));
+            assert!(calls(&a).is_empty());
+        }
+    }
+
+    fn repair_discard() -> RepairApprovalContext<'static> {
+        RepairApprovalContext::DiscardGeneration {
+            generation: "0000000002-0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        }
+    }
+
+    #[test]
+    fn repair_needs_verification_and_never_a_click() {
+        for ctx in [repair_discard(), RepairApprovalContext::AcceptFork] {
+            let d = TempDir::new("repair-polkit");
+            let a = approver(
+                Fake::new(
+                    ALL,
+                    vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+                ),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(a.confirm_repair(&ctx), Ok(VERIFIED));
+            let cl = calls(&a);
+            assert_eq!(cl.len(), 2);
+            assert!(cl[0].args.contains(&"--default-cancel".to_owned()));
+            assert!(
+                cl[0]
+                    .args
+                    .contains(&format!("--title={}", display::REPAIR_TITLE))
+            );
+            assert_eq!(cl[1].tool, Tool::Pkcheck);
+
+            let d = TempDir::new("repair-cancel");
+            let a = approver(
+                Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(a.confirm_repair(&ctx), Err(ApprovalError::Denied));
+
+            for methods in [&[][..], &[UvMethod::Pin][..]] {
+                let d = TempDir::new("repair-click");
+                let mut config = cfg(methods);
+                config.click_to_allow = vec!["example.com".into()];
+                let a = approver(Fake::new(ALL, vec![]), config, &d);
+                assert_eq!(a.confirm_repair(&ctx), Err(ApprovalError::Unavailable));
+                assert!(calls(&a).is_empty());
+            }
+        }
+        let d = TempDir::new("repair-text");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+            ),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_repair(&repair_discard()), Ok(VERIFIED));
+        assert!(texts(&a)[0].contains("Key change: 0000000002-0a1b2c3d"));
+        assert!(calls(&a)[0].args.contains(&"--ok-label=Discard".to_owned()));
+    }
+
+    #[test]
+    fn repair_has_its_own_limit() {
+        let d = TempDir::new("repair-rate");
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.prompts_per_minute = 1;
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(1, "")), (Tool::Zenity, exit(1, ""))],
+            ),
+            config,
+            &d,
+        );
+        assert_eq!(a.confirm_export(&export()), Err(ApprovalError::Denied));
+        assert_eq!(
+            a.confirm_repair(&RepairApprovalContext::AcceptFork),
+            Err(ApprovalError::Denied)
+        );
+        assert_eq!(
+            a.confirm_repair(&RepairApprovalContext::AcceptFork),
+            Err(ApprovalError::Denied)
+        );
+        assert_eq!(calls(&a).len(), 2);
+    }
+
     #[test]
     fn list_hint_is_neutral() {
         let d = TempDir::new("list-hint");
@@ -2352,5 +2913,492 @@ mod tests {
         let t = texts(&a);
         assert!(t[0].ends_with("Choose an account, then confirm it is you."));
         assert!(!t[0].contains("PIN"));
+    }
+
+    fn kinds(a: &HirzApprover<Fake>) -> Vec<(Tool, bool)> {
+        calls(a)
+            .iter()
+            .map(|c| {
+                (
+                    c.tool,
+                    c.args.contains(&"--allow-user-interaction".to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn polkit_is_asked_what_it_would_do_before_any_window_is_shown() {
+        let d = TempDir::new("preflight-order");
+        let c = one();
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+            )
+            .with_preflight(vec![exit(2, "")]),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert!(a.approve(&get(&c, true)).unwrap().user_verified);
+        assert_eq!(
+            kinds(&a),
+            [
+                (Tool::Pkcheck, false),
+                (Tool::Zenity, false),
+                (Tool::Pkcheck, true)
+            ]
+        );
+
+        let d = TempDir::new("preflight-order-pair");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                ],
+            )
+            .with_preflight(vec![exit(2, "")]),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
+        assert_eq!(
+            kinds(&a),
+            [
+                (Tool::Pkcheck, false),
+                (Tool::Zenity, false),
+                (Tool::Zenity, false),
+                (Tool::Pkcheck, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_polkit_that_decides_by_itself_is_no_verification_and_no_dead_end() {
+        for (code, note) in [(0, POLKIT_GRANTS_NOTE), (1, POLKIT_REFUSES_NOTE)] {
+            let c = one();
+            let d = TempDir::new("preflight-only");
+            let a = approver(
+                Fake::new(ALL, vec![]).with_preflight(vec![exit(code, "")]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(
+                a.approve(&get(&c, true)),
+                Err(ApprovalError::NothingShown),
+                "{code}"
+            );
+            assert_eq!(kinds(&a), [(Tool::Pkcheck, false)]);
+
+            let d = TempDir::new("preflight-pair");
+            let a = approver(
+                Fake::new(ALL, vec![]).with_preflight(vec![exit(code, "")]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(
+                a.confirm_pairing(&pairing()),
+                Err(ApprovalError::Unavailable)
+            );
+            assert_eq!(kinds(&a), [(Tool::Pkcheck, false)]);
+
+            let d = TempDir::new("preflight-next");
+            write_verifier(&d, 0);
+            let a = approver(
+                Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))])
+                    .with_preflight(vec![exit(code, "")]),
+                cfg(&[UvMethod::Polkit, UvMethod::Pin]),
+                &d,
+            );
+            assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
+            assert_eq!(calls(&a)[1].args[0], "--entry");
+            assert!(texts(&a)[0].contains(note), "{code}");
+        }
+    }
+
+    #[test]
+    fn polkit_preflight_errors() {
+        type Make = fn() -> RunResult;
+        let cases: [(Make, ApprovalError); 3] = [
+            (|| exit(127, ""), ApprovalError::Unavailable),
+            (|| RunResult::NotFound, ApprovalError::Unavailable),
+            (|| RunResult::TimedOut, ApprovalError::Timeout),
+        ];
+        for (make, want) in cases {
+            let d = TempDir::new("preflight-err");
+            let c = one();
+            let a = approver(
+                Fake::new(ALL, vec![]).with_preflight(vec![make()]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(
+                a.approve(&get(&c, true)),
+                Err(ApprovalError::NothingShown),
+                "{want:?}: no window was shown"
+            );
+            let d = TempDir::new("preflight-err-pair");
+            let a = approver(
+                Fake::new(ALL, vec![]).with_preflight(vec![make()]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(a.confirm_pairing(&pairing()), Err(want));
+        }
+        for code in [3, 126, 4] {
+            let d = TempDir::new("preflight-internal");
+            let c = one();
+            let a = approver(
+                Fake::new(ALL, vec![]).with_preflight(vec![exit(code, "")]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+            let d = TempDir::new("preflight-internal-pair");
+            let a = approver(
+                Fake::new(ALL, vec![]).with_preflight(vec![exit(code, "")]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert!(matches!(
+                a.confirm_pairing(&pairing()),
+                Err(ApprovalError::Internal(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn selection_prompts_are_rate_limited() {
+        let d = TempDir::new("selection-rate");
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.prompts_per_minute = 2;
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Zenity, exit(0, ""))],
+            ),
+            config,
+            &d,
+        );
+        assert!(a.confirm_selection().is_ok());
+        assert!(a.confirm_selection().is_ok());
+        assert_eq!(a.confirm_selection(), Err(ApprovalError::Denied));
+        assert_eq!(calls(&a).len(), 2);
+    }
+
+    #[test]
+    fn many_site_names_share_one_global_budget() {
+        let d = TempDir::new("global-rate");
+        let c = one();
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.prompts_per_minute = 2;
+        let script = (0..6).map(|_| (Tool::Zenity, exit(1, ""))).collect();
+        let a = approver(Fake::new(ALL, script), config, &d);
+        for i in 0..8 {
+            let name = format!("sub{i}.example.com");
+            let mut ctx = get(&c, true);
+            ctx.rp_id = &name;
+            let want = if i < 6 {
+                ApprovalError::Denied
+            } else {
+                ApprovalError::NothingShown
+            };
+            assert_eq!(a.approve(&ctx), Err(want), "site {i}");
+        }
+        assert_eq!(
+            calls(&a).len(),
+            6,
+            "the seventh site found the budget used up"
+        );
+    }
+
+    #[test]
+    fn requests_that_show_nothing_use_no_budget() {
+        let d = TempDir::new("no-budget");
+        let c = one();
+        let mut config = cfg(&[UvMethod::Pin]);
+        config.prompts_per_minute = 1;
+        let a = approver(Fake::new(ALL, vec![]), config, &d);
+        for _ in 0..10 {
+            assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+            assert_eq!(
+                a.confirm_pairing(&pairing()),
+                Err(ApprovalError::Unavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_polkit_decides_without_a_window_spends_no_budget() {
+        let c = one();
+        let d = TempDir::new("preflight-budget");
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.prompts_per_minute = 1;
+        // "Grants" and "refuses" alternate, then a polkit that asks for a password.
+        let mut answers: Vec<RunResult> = (0..20).map(|i| exit(i % 2, "")).collect();
+        answers.push(exit(2, ""));
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+            )
+            .with_preflight(answers),
+            config,
+            &d,
+        );
+        for i in 0..20 {
+            assert_eq!(
+                a.approve(&get(&c, true)),
+                Err(ApprovalError::NothingShown),
+                "request {i}"
+            );
+        }
+        assert!(
+            a.approve(&get(&c, true)).unwrap().user_verified,
+            "twenty requests that showed nothing used none of the one prompt per minute"
+        );
+        assert_eq!(
+            a.approve(&get(&c, true)),
+            Err(ApprovalError::NothingShown),
+            "the window that was shown used it"
+        );
+        assert_eq!(
+            calls(&a).iter().filter(|x| x.tool == Tool::Zenity).count(),
+            1
+        );
+
+        let d = TempDir::new("preflight-budget-pair");
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.prompts_per_minute = 1;
+        let mut answers: Vec<RunResult> = (0..20).map(|i| exit(i % 2, "")).collect();
+        answers.push(exit(2, ""));
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                ],
+            )
+            .with_preflight(answers),
+            config,
+            &d,
+        );
+        for _ in 0..20 {
+            assert_eq!(
+                a.confirm_pairing(&pairing()),
+                Err(ApprovalError::Unavailable)
+            );
+        }
+        assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
+    }
+
+    #[test]
+    fn a_window_that_cannot_open_is_nothing_shown_but_a_cancel_is_not() {
+        let c = one();
+        let d = TempDir::new("no-display");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(
+                    Tool::Zenity,
+                    exit_stderr(1, "cannot open display: ", Duration::from_millis(30)),
+                )],
+            ),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+
+        let d = TempDir::new("cancelled");
+        let a = approver(
+            Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
+    }
+
+    #[test]
+    fn a_busy_approver_shows_nothing_for_the_second_request() {
+        let c = one();
+        let d = TempDir::new("busy");
+        let a = approver(Fake::new(ALL, vec![]), cfg(&[UvMethod::Polkit]), &d);
+        let _held = a.busy.lock().unwrap();
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+    }
+
+    #[test]
+    fn a_damaged_pin_file_moves_on_to_the_next_method() {
+        let d = TempDir::new("pin-damaged");
+        crate::pin::ensure_private_dir(&d.0.join("state")).unwrap();
+        std::fs::write(d.0.join("state").join("pin"), "garbage").unwrap();
+        let c = one();
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+            ),
+            cfg(&[UvMethod::Pin, UvMethod::Polkit]),
+            &d,
+        );
+        assert!(a.approve(&get(&c, true)).unwrap().user_verified);
+        let cl = calls(&a);
+        assert_eq!(cl.len(), 2, "no PIN window was shown");
+        assert!(texts(&a)[0].contains(PIN_DAMAGED_NOTE));
+
+        let d = TempDir::new("pin-damaged-only");
+        crate::pin::ensure_private_dir(&d.0.join("state")).unwrap();
+        std::fs::write(d.0.join("state").join("pin"), "garbage").unwrap();
+        let a = approver(Fake::new(ALL, vec![]), cfg(&[UvMethod::Pin]), &d);
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+    }
+
+    #[test]
+    fn a_pin_checked_after_the_deadline_does_not_approve() {
+        if !crypto_ready() {
+            eprintln!("skipped: hirz-crypto placeholder");
+            return;
+        }
+        fn slow(_: Duration) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let d = TempDir::new("pin-late");
+        let c = one();
+        let mut config = cfg(&[UvMethod::Pin]);
+        config.timeout = Duration::from_millis(350);
+        let paths = Paths {
+            config_file: d.0.join("config"),
+            state_dir: d.0.join("state"),
+        };
+        let a = HirzApprover::new(
+            Fake::new(ALL, vec![(Tool::Zenity, exit(0, "1234\n"))]),
+            &paths,
+        )
+        .with_config(config)
+        .with_pin_store(PinStore::with_params(d.0.join("state"), TEST_PARAMS).with_sleep(slow));
+        a.pin_store().set_pin(b"1234").unwrap();
+        for _ in 0..3 {
+            assert!(a.pin_store().verify(b"0000").is_err());
+        }
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Timeout));
+    }
+
+    #[test]
+    fn zenity_older_than_4_is_not_used() {
+        for (version, usable) in [
+            (Some(3), false),
+            (Some(4), true),
+            (Some(5), true),
+            (None, true),
+        ] {
+            let d = TempDir::new("zenity-version");
+            let c = one();
+            let mut fake = Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]);
+            fake.zenity_version = version;
+            let a = approver(fake, cfg(&[UvMethod::Polkit]), &d);
+            if usable {
+                assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
+                assert_eq!(a.available_uv_methods().unwrap(), [UvMethod::Polkit]);
+            } else {
+                assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+                assert_eq!(a.confirm_selection(), Err(ApprovalError::Unavailable));
+                assert!(calls(&a).is_empty());
+                assert_eq!(a.available_uv_methods().unwrap(), []);
+            }
+        }
+    }
+
+    #[test]
+    fn fingerprint_misses_add_up_across_requests() {
+        let d = TempDir::new("finger-misses");
+        let c = one();
+        let mut script = Vec::new();
+        for _ in 0..3 {
+            script.push((Tool::FprintdList, exit(0, ENROLLED)));
+            script.extend((0..3).map(|_| (Tool::FprintdVerify, exit(1, NO_MATCH))));
+        }
+        let a = approver(Fake::new(ALL, script), cfg(&[UvMethod::Fingerprint]), &d);
+        for _ in 0..3 {
+            assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
+        }
+        let before = calls(&a).len();
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::NothingShown));
+        assert_eq!(
+            a.confirm_pairing(&pairing()),
+            Err(ApprovalError::Unavailable)
+        );
+        assert_eq!(
+            calls(&a).len(),
+            before,
+            "the paused reader is not even probed"
+        );
+        assert_eq!(a.available_uv_methods().unwrap(), []);
+    }
+
+    #[test]
+    fn a_verified_approval_clears_the_fingerprint_misses() {
+        let d = TempDir::new("finger-misses-clear");
+        let c = one();
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (Tool::FprintdVerify, exit(1, NO_MATCH)),
+                    (Tool::FprintdVerify, exit(1, NO_MATCH)),
+                    (Tool::FprintdVerify, exit(0, MATCH)),
+                ],
+            ),
+            cfg(&[UvMethod::Fingerprint]),
+            &d,
+        );
+        assert!(a.approve(&get(&c, true)).unwrap().user_verified);
+        assert!(!d.0.join("state").join("fingerprint-misses").exists());
+        assert!(!a.misses.paused(unix_now()));
+    }
+
+    #[test]
+    fn diagnostics_say_nothing_about_the_output() {
+        let out = b"alice|bob 555-1234.\n";
+        assert_eq!(shape(out), format!("{} bytes in 2 fields", out.len()));
+        assert_eq!(shape(b""), "0 bytes in 1 fields");
+    }
+
+    #[test]
+    fn the_timeout_cap_shortens_every_ceremony() {
+        let d = TempDir::new("cap");
+        let c = one();
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.timeout = Duration::from_secs(600);
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(1, "")),
+                    (Tool::Zenity, exit(1, "")),
+                    (Tool::Zenity, exit(1, "")),
+                ],
+            ),
+            config,
+            &d,
+        )
+        .with_timeout_cap(Duration::from_secs(115));
+        let _ = a.approve(&get(&c, true));
+        let _ = a.confirm_selection();
+        let _ = a.confirm_pairing(&pairing());
+        for spec in calls(&a) {
+            let t = spec
+                .args
+                .iter()
+                .find_map(|x| x.strip_prefix("--timeout="))
+                .unwrap();
+            assert_eq!(t, "115", "{spec:?}");
+        }
+        assert_eq!(calls(&a).len(), 3);
     }
 }

@@ -76,13 +76,17 @@ These steps are for Ubuntu. Debian, Fedora, Arch and other routes are in [docs/i
    ```
    systemctl --user enable --now hirzd
    ```
-4. Optional, for passkey suggestions in sign-in boxes: install the hirz add-on for Firefox, then run `hirz setup firefox`.
+4. Optional, for passkey suggestions in sign-in boxes: install the hirz add-on for Firefox. The package already connected Firefox to hirz for every user, so do not run `hirz setup firefox` (that command is for builds from source and would override the packaged connection).
 5. Check that everything is ready:
    ```
    hirz status
    ```
 
 That's it. Next time a website offers "Sign in with a passkey", choose it and approve with your fingerprint or password.
+
+### Check the signing keys
+
+The hirz apt and dnf repository is signed with the key `5831 16C2 55B8 72AF 888C  A940 E599 5331 0261 779A`, and the source packages of the Ubuntu PPA are uploaded signed with `4580 9408 7F6D 1BFF 4550  8EEA A5E3 5D5E 1CCF F011` (Launchpad signs the PPA archive itself with its own key). Compare these with what `gpg --show-keys`, `gpg --verify` or dnf shows before you trust a key. The same fingerprints are in [docs/install.md](docs/install.md) and in the notes of every release; if one place differs from the others, do not install and [report it](SECURITY.md).
 
 More: [Sync between computers](docs/sync.md) · [All commands](docs/cli.md) · [Approving sign-ins](docs/approval.md) · [How it works](docs/architecture.md) · [Threat model](docs/threat-model.md) · [Firefox add-on](docs/extension.md) · [Virtual security key](docs/uhid.md) · [Vault format](docs/vault-format.md) · [Dependencies](docs/dependencies.md) · [Releases](docs/release.md) · [Packaging](packaging/README.md)
 

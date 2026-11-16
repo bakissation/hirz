@@ -209,6 +209,7 @@ dependencies = [
  "hirz-core",
  "hirz-crypto",
  "hirz-proto",
+ "hirz-session",
  "hirz-sys",
  "hirz-uv",
  "hirz-vault",
@@ -218,6 +219,19 @@ dependencies = [
 [[package]]
 name = "hirz-proto"
 version = "0.1.0-dev"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "hirz-session"
+version = "0.1.0-dev"
+dependencies = [
+ "hirz-core",
+ "hirz-crypto",
+ "hirz-uv",
+ "hirz-vault",
+]
 
 [[package]]
 name = "hirz-sys"
@@ -268,6 +282,7 @@ dependencies = [
  "hirz-crypto",
  "hirz-ctap",
  "hirz-proto",
+ "hirz-session",
  "hirz-sys",
  "hirz-uv",
  "hirz-vault",

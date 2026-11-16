@@ -16,8 +16,8 @@ fn check(p: &Parsed) {
             assert!(r.validate().is_ok(), "imported records are valid");
             assert_eq!(r.algorithm, COSE_ALG_ES256);
             assert!(hirz_crypto::es256::public_key(&r.private_key_pkcs8).is_ok());
-            assert!(hirz_uv::config::valid_rp_id(&r.rp_id));
-            assert!(r.created_at > 0 && r.created_at <= NOW + 86_400);
+            assert!(hirz_uv::config::valid_rp_id(&r.rp_id) || r.rp_id.starts_with("ssh:"));
+            assert!(r.created_at > 0 && r.created_at <= NOW);
             assert!(r.hmac_secret.is_none() && r.cred_protect.is_none());
         }
     }

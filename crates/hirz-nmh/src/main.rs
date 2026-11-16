@@ -3,13 +3,11 @@
 //! in order through `hirz_webauthn::handle` (docs/extension.md).
 #![forbid(unsafe_code)]
 
-#[path = "../../hirzd/src/session.rs"]
-mod session;
-
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hirz_core::{
@@ -20,6 +18,7 @@ use hirz_core::{
 use hirz_nmh::framing;
 use hirz_nmh::framing::{FrameError, INBOUND_MAX, read_frame, write_frame};
 use hirz_proto::json::{self, Json, Limits};
+use hirz_session as session;
 use hirz_uv::{CommandRunner, HirzApprover, SystemRunner};
 use hirz_vault::{CredentialRecord, Vault};
 use hirz_webauthn::envelope::{MAX_SAFE_INTEGER, error_reply};
@@ -31,7 +30,11 @@ const LIMITS: Limits = Limits {
     max_depth: 32,
     max_items: 65_536,
 };
+/// Requests that may wait behind a running prompt; more are refused at once.
 const QUEUE: usize = 64;
+/// Refusals waiting to be written. Beyond this the reader drops the request, and the extension's
+/// own timeout ends it.
+const REFUSALS: usize = 1024;
 
 fn diag(msg: std::fmt::Arguments<'_>) {
     let _ = writeln!(io::stderr(), "hirz-nmh: {msg}");
@@ -52,6 +55,8 @@ struct HostEngine<'s, A> {
     session: &'s mut Session<A>,
     uv: bool,
     cancelled: &'s dyn Fn() -> bool,
+    /// The last word before a registration is final (see [`commit_ceremony`]).
+    commit: Option<&'s dyn Fn() -> bool>,
 }
 
 impl<A: Approver> hirz_webauthn::Engine for HostEngine<'_, A> {
@@ -60,9 +65,11 @@ impl<A: Approver> hirz_webauthn::Engine for HostEngine<'_, A> {
         request: &MakeCredentialRequest,
         origin_for_display: &str,
     ) -> Result<MakeCredentialResponse, CoreError> {
-        self.session.with_engine(self.cancelled, |e| {
-            e.make_credential(request, Some(origin_for_display))
-        })
+        self.session
+            .with_engine_observed(self.cancelled, self.commit, |e| {
+                e.make_credential(request, Some(origin_for_display))
+            })
+            .0
     }
 
     fn get_assertion(
@@ -70,9 +77,18 @@ impl<A: Approver> hirz_webauthn::Engine for HostEngine<'_, A> {
         request: &GetAssertionRequest,
         origin_for_display: &str,
     ) -> Result<AssertionResponse, CoreError> {
-        self.session.with_engine(self.cancelled, |e| {
-            e.get_assertion(request, Some(origin_for_display), None)
-        })
+        let (result, asked) = self
+            .session
+            .with_engine_observed(self.cancelled, None, |e| {
+                e.get_assertion(request, Some(origin_for_display), None)
+            });
+        match result {
+            // "No credential" after a prompt is a refusal: Firefox must not ask the user again.
+            // A refusal before any window shows up as `NothingShown`, which looks like "no
+            // credential" to the page.
+            Err(CoreError::NoCredentials) if asked => Err(CoreError::UvRequiredUnavailable),
+            other => other,
+        }
     }
 
     fn user_verification_available(&self) -> bool {
@@ -141,6 +157,21 @@ fn lock(p: &Mutex<Pending>) -> MutexGuard<'_, Pending> {
     p.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The point where a registration becomes final. Under the lock the reader also takes for a
+/// `cancel`, either the request was cancelled before this (`false`: the engine deletes the new
+/// credential and has not replaced an older one) or it stops being cancellable (`true`: a `cancel`
+/// that arrives later finds nothing waiting, and the extension drops the late answer). Without
+/// this a cancel could land after the credential was stored and the older one replaced, and the
+/// page would be told `AbortError` for a registration that happened.
+fn commit_ceremony(pending: &Mutex<Pending>, id: u64) -> bool {
+    let mut p = lock(pending);
+    if p.cancelled.contains(&id) {
+        return false;
+    }
+    p.waiting.remove(&id);
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Hello,
@@ -181,14 +212,53 @@ fn type_name(msg: &Json) -> &str {
 
 enum Inbound {
     Message(Result<Json, ()>),
+    /// The reader could not queue this request: refuse it.
+    Refused(Option<u64>),
     Eof,
     Fatal(FrameError),
 }
 
+/// How many messages wait for the main thread, and how many refusals wait to be written. The
+/// reader never blocks on them, so `cancel` and the end of input are seen while a prompt is open.
+#[derive(Debug, Default)]
+struct Backlog {
+    queued: AtomicUsize,
+    refused: AtomicUsize,
+}
+
+impl Backlog {
+    /// Only the reader thread admits, so a count that overshoots for a moment is never seen by
+    /// another admission.
+    fn admit(&self) -> bool {
+        take(&self.queued, QUEUE)
+    }
+
+    fn released(&self) {
+        self.queued.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    fn refuse(&self) -> bool {
+        take(&self.refused, REFUSALS)
+    }
+
+    fn refusal_sent(&self) {
+        self.refused.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn take(counter: &AtomicUsize, limit: usize) -> bool {
+    if counter.fetch_add(1, Ordering::AcqRel) < limit {
+        return true;
+    }
+    counter.fetch_sub(1, Ordering::AcqRel);
+    false
+}
+
 fn reader<R: Read>(
     mut input: R,
-    tx: SyncSender<Inbound>,
+    tx: Sender<Inbound>,
     pending: Arc<Mutex<Pending>>,
+    backlog: Arc<Backlog>,
     debug: bool,
 ) {
     loop {
@@ -209,8 +279,11 @@ fn reader<R: Read>(
             }
         };
         let parsed = json::parse(&bytes, &LIMITS).map_err(|_| ());
+        let mut seen_id = None;
+        let mut ceremony_id = None;
         if let Ok(msg) = &parsed {
             let (id, kind) = classify(msg);
+            seen_id = id;
             if debug {
                 diag(format_args!(
                     "recv type={} id={} bytes={}",
@@ -228,13 +301,20 @@ fn reader<R: Read>(
                     continue;
                 }
                 (Kind::Cancel, None) => continue,
-                (Kind::Ceremony, Some(id)) => {
-                    lock(&pending).waiting.insert(id);
-                }
+                (Kind::Ceremony, Some(id)) => ceremony_id = Some(id),
                 _ => {}
             }
         } else if debug {
             diag(format_args!("recv rejected bytes={}", bytes.len()));
+        }
+        if !backlog.admit() {
+            if backlog.refuse() && tx.send(Inbound::Refused(seen_id)).is_err() {
+                return;
+            }
+            continue;
+        }
+        if let Some(id) = ceremony_id {
+            lock(&pending).waiting.insert(id);
         }
         if tx.send(Inbound::Message(parsed)).is_err() {
             return;
@@ -259,8 +339,30 @@ struct Host<A> {
 }
 
 impl<A: Approver + UvProbe> Host<A> {
+    /// Logged when the vault folder starts to report a fork and when it stops, not per request.
+    fn report_fork(&mut self) {
+        match self.session.take_fork_change() {
+            Some(true) => diag(format_args!("{}", session::FORK_NOTICE)),
+            Some(false) => diag(format_args!("{}", session::FORK_ENDED_NOTICE)),
+            None => {}
+        }
+    }
+
     fn vault_ready(&mut self) -> bool {
-        match self.session.ensure_vault() {
+        let status = self.session.ensure_vault();
+        self.vault_status(status)
+    }
+
+    /// For requests that only read and never ask the user (`list`, capabilities): the last look at
+    /// the folder is used again when it is recent, so a page cannot make each one scan it.
+    fn vault_ready_recent(&mut self) -> bool {
+        let status = self.session.ensure_vault_recent(session::READ_ONLY_MAX_AGE);
+        self.vault_status(status)
+    }
+
+    fn vault_status(&mut self, status: VaultStatus) -> bool {
+        self.report_fork();
+        match status {
             VaultStatus::Ready => true,
             VaultStatus::Missing => false,
             VaultStatus::Broken(why) => {
@@ -290,11 +392,11 @@ impl<A: Approver + UvProbe> Host<A> {
                 reply
             }
             (Kind::List, _) => {
-                self.vault_ready();
+                self.vault_ready_recent();
                 self.handle(msg, false, None)
             }
             (Kind::Capabilities, _) => {
-                let uv = self.vault_ready() && self.session.approver().uv_available();
+                let uv = self.vault_ready_recent() && self.session.approver().uv_available();
                 self.handle(msg, uv, None)
             }
             _ => self.handle(msg, false, None),
@@ -311,19 +413,31 @@ impl<A: Approver + UvProbe> Host<A> {
                 &Error::NotHandled("no usable hirz vault on this device"),
             );
         }
+        // Signing in still works; a registration would only fail after the user approved it.
+        if msg.get("type").and_then(Json::as_str) == Some("create") && self.session.read_only() {
+            return error_reply(
+                Some(id),
+                &Error::NotHandled("hirz cannot save new passkeys right now"),
+            );
+        }
         self.handle(msg, false, Some(id))
     }
 
     /// `ceremony`: the id whose `cancel` refuses the approval.
     fn handle(&mut self, msg: &Json, uv: bool, ceremony: Option<u64>) -> Json {
         let pending = Arc::clone(&self.pending);
+        let for_commit = Arc::clone(&pending);
         let cancelled = move || ceremony.is_some_and(|id| lock(&pending).cancelled.contains(&id));
+        let commit = move || ceremony.is_none_or(|id| commit_ceremony(&for_commit, id));
         let mut engine = HostEngine {
             session: &mut self.session,
             uv,
             cancelled: &cancelled,
+            commit: Some(&commit),
         };
-        hirz_webauthn::handle(msg, &mut engine)
+        let reply = hirz_webauthn::handle(msg, &mut engine);
+        self.report_fork();
+        reply
     }
 }
 
@@ -339,11 +453,13 @@ where
     A: Approver + UvProbe,
 {
     let pending = Arc::new(Mutex::new(Pending::default()));
-    let (tx, rx) = sync_channel(QUEUE);
+    let backlog = Arc::new(Backlog::default());
+    let (tx, rx) = channel();
     let reader_pending = Arc::clone(&pending);
+    let reader_backlog = Arc::clone(&backlog);
     std::thread::Builder::new()
         .name("stdin".into())
-        .spawn(move || reader(input, tx, reader_pending, debug))?;
+        .spawn(move || reader(input, tx, reader_pending, reader_backlog, debug))?;
     let mut host = Host {
         session,
         pending,
@@ -351,8 +467,18 @@ where
     };
     for inbound in rx {
         let reply = match inbound {
-            Inbound::Message(Ok(msg)) => host.answer(&msg),
-            Inbound::Message(Err(())) => error_reply(None, &Error::BadEnvelope("invalid JSON")),
+            Inbound::Message(Ok(msg)) => {
+                backlog.released();
+                host.answer(&msg)
+            }
+            Inbound::Message(Err(())) => {
+                backlog.released();
+                error_reply(None, &Error::BadEnvelope("invalid JSON"))
+            }
+            Inbound::Refused(id) => {
+                backlog.refusal_sent();
+                error_reply(id, &Error::Busy("host busy"))
+            }
             Inbound::Eof => return Ok(()),
             Inbound::Fatal(e) => return Err(e),
         };

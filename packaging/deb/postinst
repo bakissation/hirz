@@ -33,6 +33,18 @@ case "$1" in
             fi
             deb-systemd-invoke start "$UNIT" >/dev/null || true
         fi
+
+        # A running hirzd keeps the old binary until it restarts, which would leave a security
+        # fix unapplied until the next login: restart it for every logged-in user.
+        if [ -n "$2" ] && [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            for dir in /run/user/*; do
+                [ -d "$dir" ] || continue
+                user=$(getent passwd "${dir##*/}" | cut -d: -f1)
+                [ -n "$user" ] || continue
+                systemctl --user --machine="$user@.host" try-restart hirzd.service >/dev/null 2>&1 || true
+            done
+            echo "hirz was upgraded. If hirzd still runs the old version, restart it: systemctl --user restart hirzd"
+        fi
         ;;
 esac
 

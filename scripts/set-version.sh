@@ -3,18 +3,56 @@
 #
 #   scripts/set-version.sh VERSION   write VERSION (SemVer, e.g. 0.2.0 or 0.2.0-rc.1)
 #   scripts/set-version.sh --check   exit 1 if any file disagrees with Cargo.toml
+#   scripts/set-version.sh --list    print the files this script may change, one per line
+#   scripts/set-version.sh --self-test   write into copies of the files, with links in the way
+#   scripts/set-version.sh --root DIR VERSION|--check
+#                                    work on the tree in DIR instead of the one this script is in
 #
 # Files: Cargo.toml ([workspace.package] version), Cargo.lock (workspace members),
 # extension/manifest.json, packaging/rpm/hirz.spec, packaging/arch/PKGBUILD,
 # packaging/debian/changelog and packaging/snap/snapcraft.yaml. Firefox and pacman take
 # only the numeric part (0.2.0-rc.1 becomes 0.2.0); Debian and RPM write "-" as "~" so a
-# pre-release sorts before the release.
+# pre-release sorts before the release. Writing refuses a version file that is a symbolic link
+# or sits behind one, so a pull request branch checked out as data (--root, release-plz.yml)
+# cannot make this script write elsewhere.
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
 die() {
   echo "set-version: $*" >&2
   exit 1
+}
+
+FILES=(
+  Cargo.toml
+  Cargo.lock
+  extension/manifest.json
+  packaging/rpm/hirz.spec
+  packaging/arch/PKGBUILD
+  packaging/debian/changelog
+  packaging/snap/snapcraft.yaml
+)
+
+root="$(dirname "$0")/.."
+if [ "${1:-}" = --root ]; then
+  [ $# -ge 3 ] || die "--root needs a directory and a version or --check"
+  root=$2
+  shift 2
+fi
+if [ "${1:-}" = --list ]; then
+  printf '%s\n' "${FILES[@]}"
+  exit 0
+fi
+cd "$root" || die "cannot enter $root"
+
+# Every file written must be a regular file whose real path is inside the tree.
+confine() {
+  local top f
+  top=$(pwd -P)
+  for f in "${FILES[@]}"; do
+    [ -f "$f" ] || die "$f is missing"
+    [ ! -L "$f" ] || die "$f is a symbolic link"
+    [ "$(realpath -- "$f")" = "$top/$f" ] || die "$f resolves outside the tree"
+  done
 }
 
 semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.]*)?$'
@@ -114,9 +152,10 @@ replace() {
 }
 
 write() {
-  local v="$1" core deb old_deb date maint tmp members_re
+  local v="$1" core deb old_deb date epoch maint tmp members_re
   core=${v%%-*}
   deb="${v//-/\~}"
+  confine
 
   replace Cargo.toml "/^\[workspace\.package\]/,/^\[/s/^version = \".*\"$/version = \"$v\"/"
 
@@ -143,8 +182,10 @@ write() {
     *)
       maint=$(sed -n 's/^Maintainer: //p' packaging/debian/control)
       [ -n "$maint" ] || die "no Maintainer in packaging/debian/control"
-      if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
-        date=$(LC_ALL=C date -u -R -d "@$SOURCE_DATE_EPOCH")
+      # The date of the last commit, not the clock, so the same tag always stamps the same changelog.
+      epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || true)}
+      if [ -n "$epoch" ]; then
+        date=$(LC_ALL=C date -u -R -d "@$epoch")
       else
         date=$(LC_ALL=C date -u -R)
       fi
@@ -163,10 +204,47 @@ write() {
   check
 }
 
+# Writes into copies of the version files: a link must never make the script write elsewhere.
+self_test() {
+  local self t f victim
+  self=$(realpath -- "$0")
+  t=$(mktemp -d)
+  TMP_DIR=$t
+  trap 'rm -rf "$TMP_DIR"' EXIT
+  copy_tree() {
+    for f in "${FILES[@]}" packaging/debian/control crates/*/Cargo.toml; do
+      mkdir -p "$1/$(dirname "$f")"
+      cp "$f" "$1/$f"
+    done
+  }
+  copy_tree "$t/good"
+  "$self" --root "$t/good" 9.9.9 >/dev/null || die "self-test: a plain tree was refused"
+  "$self" --root "$t/good" --check >/dev/null || die "self-test: the written tree does not check"
+
+  copy_tree "$t/filelink"
+  victim=$t/victim
+  echo 'pkgver=1' >"$victim"
+  rm "$t/filelink/packaging/arch/PKGBUILD"
+  ln -s "$victim" "$t/filelink/packaging/arch/PKGBUILD"
+  if "$self" --root "$t/filelink" 9.9.9 >/dev/null 2>&1; then die "self-test: a linked version file was written"; fi
+  [ "$(cat "$victim")" = pkgver=1 ] || die "self-test: a file outside the tree was changed through a link"
+
+  copy_tree "$t/dirlink"
+  mkdir "$t/elsewhere"
+  cp "$t/dirlink/packaging/arch/PKGBUILD" "$t/elsewhere/PKGBUILD"
+  cp "$t/elsewhere/PKGBUILD" "$t/PKGBUILD.orig"
+  rm -r "$t/dirlink/packaging/arch"
+  ln -s "$t/elsewhere" "$t/dirlink/packaging/arch"
+  if "$self" --root "$t/dirlink" 9.9.9 >/dev/null 2>&1; then die "self-test: a version file behind a linked folder was written"; fi
+  cmp -s "$t/elsewhere/PKGBUILD" "$t/PKGBUILD.orig" || die "self-test: a file outside the tree was changed through a linked folder"
+  echo "set-version self-test passed"
+}
+
 case "${1:-}" in
+  --self-test) self_test ;;
   --check) check ;;
   -h | --help | "")
-    sed -n '2,11s/^# \{0,1\}//p' "$0"
+    sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"
     [ -n "${1:-}" ] || exit 2
     ;;
   -*) die "unknown option $1" ;;

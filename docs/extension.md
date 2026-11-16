@@ -5,9 +5,14 @@ replaces `navigator.credentials.create()` and `get()` for public key requests,
 hands them to the native messaging host `hirz-nmh`, and hands everything it does
 not handle back to Firefox's own WebAuthn implementation unchanged.
 
-The extension is deliberately thin. It holds no keys, builds no signed bytes and
-makes no decision with security meaning except reading the request origin from
-Firefox. The host re-validates every field.
+The extension is deliberately thin. It holds no keys and builds no signed bytes, and the
+host re-validates every field it can. The background does take decisions the host cannot
+re-check, all from data Firefox supplies in the parent process: the request origin
+(`sender.origin`), whether the frame is same-origin with all its ancestors (the frame
+tree), whether the tab is the active tab of the focused window, one ceremony at a time per
+tab, request budgets per document, and which credential ids a conditional selection may
+use (only ids from the list it fetched for that request). A compromised extension could
+misreport these, which is why every signature still needs the host's own prompt.
 
 Status: v0.1 plus conditional mediation and same-origin frames. The host
 answers `create` and `get` with real passkeys from the user's vault
@@ -23,9 +28,10 @@ to ceremonies and an empty list, so Firefox runs the ceremony itself.
 | `extension/manifest.json` | | MV3 manifest, Firefox only |
 | `extension/page/shim.js` | page (`MAIN`), `document_start`, every frame | Hooks `CredentialsContainer.prototype.create/get` and three `PublicKeyCredential` statics, snapshots options, builds result objects |
 | `extension/content/autofill.js` | content script (`ISOLATED`), `document_start`, every frame | Suggestion list for conditional mediation, in a closed shadow root |
-| `extension/content/relay.js` | content script (`ISOLATED`), `document_start`, every frame | Pipe between the shim and the background; hands account lists to `autofill.js` |
-| `extension/background.js` | background event page (ES module) | Origin, tab and frame-tree checks, one ceremony per tab, conditional requests, timeouts, the native port |
-| `crates/hirz-nmh` | native process | Framing, the reader thread for `cancel`, the vault session, replies through `hirz_webauthn::handle` |
+| `extension/content/relay.js` | content script (`ISOLATED`), `document_start`, every frame | Pipe between the shim and the background; keeps conditional requests and hands account lists to `autofill.js` |
+| `extension/background.js` | background event page (ES module) | Origin, tab and frame-tree checks, one ceremony per tab, request budgets, account lists on request, timeouts, the native port |
+| `crates/hirz-nmh` | native process | Framing, the reader thread for `cancel`, the vault session (`hirz-session`), replies through `hirz_webauthn::handle` |
+| `scripts/extension-test.mjs` | node | Tests of the files above without a browser (not part of the XPI) |
 | `packaging/native-messaging/hirz.json` | | Native manifest template |
 
 There is no build step: no npm packages, no bundler, no minification, no
@@ -39,7 +45,8 @@ written.
   native manifest's `allowed_extensions` must carry the same value.
 - `strict_min_version` is `140.0`: `world: "MAIN"` content scripts (128),
   `Uint8Array.prototype.toBase64` / `Uint8Array.fromBase64` (133),
-  `data_collection_permissions` (140).
+  `data_collection_permissions` (140). Also used, and older: `AbortSignal.any` (124),
+  `String.prototype.isWellFormed` (119), constructable stylesheets (101).
 - `data_collection_permissions.required` is `["none"]`. Request data goes only
   to a native program on the same machine, which is part of the same product,
   and nothing is sent to any server by the extension or the host.
@@ -91,7 +98,10 @@ written.
    all its ancestors (see "Frames"), the tab to be the active tab of the
    focused window, and no other ceremony in progress in the same tab. It then
    sends the request to the host with `origin`, `topOrigin` and `crossOrigin`
-   added and a clamped timeout.
+   added. The timeout the page gave (clamped to 30 to 600 s, default 300 s) only drives
+   the background's own timer; the prompt's time limit is the one in the hirz-uv
+   configuration. A document may start at most 20 requests per minute, and the
+   background hands further ones to Firefox.
 6. The host answers. The background keeps only the expected fields of a
    credential (anything else the host sends is dropped), maps unknown error
    codes to `UnknownError`, and replies to the relay, which hands the reply to
@@ -100,6 +110,18 @@ written.
    or on `NotHandled` waits until the tab has focus (the top document's
    `hasFocus()`, so it also works in frames) and calls Firefox's own
    `create`/`get` with the original arguments.
+
+A page that counts the reads of its options (a getter on `challenge`) can tell the two
+outcomes of a modal request apart. The shim reads each option once in step 3; when hirz
+takes the request Firefox never reads them, and when the host answers `NotHandled` (for
+example because hirz has no credential for the request) Firefox reads them again, so the
+page sees one read or two. This is a known limit and it is not silent: the user sees a
+window either way, hirz's or Firefox's own, and the page learns only which one. A fix would
+have the shim hand Firefox a copy of the options built from its one read, and that copy
+would have to reproduce Firefox's own option conversion member by member, which the shim
+cannot do without changing what Firefox sees. Conditional requests do not have this
+limit (see "Conditional mediation": Firefox's request starts at once whatever hirz holds,
+so the count is two in every case).
 
 ### What passes through to Firefox
 
@@ -125,11 +147,19 @@ The shim calls Firefox's own implementation, untouched, when:
   Requests, which Firefox implements. The host performs the authoritative
   public suffix check;
 - any value fails conversion or a cap (for example more than 64 credential
-  descriptors, a credential id over 1023 bytes, a challenge over 4096 bytes,
-  a `user.id` outside 1 to 64 bytes, strings over 1024 characters, options
-  JSON over 64 KiB). Firefox then produces the spec-defined error itself;
+  descriptors, a credential id outside 1 to 1023 bytes, a challenge outside 16 to
+  1024 bytes, a `user.id` outside 1 to 64 bytes, strings over 1024 characters,
+  options JSON over 64 Ki UTF-16 code units, nesting deeper than the host's JSON
+  reader allows, a string with a lone surrogate). The host applies the same limits
+  and answers anything outside them with `NotHandled`. Firefox then produces the
+  spec-defined error itself;
 - the relay is not linked, the extension context is gone, the host is not
-  installed or does not answer `hello`, or the host answers `NotHandled`.
+  installed or does not answer `hello`, or the host answers `NotHandled`. The host
+  does that when there is no usable vault, when no credential in the vault matches a
+  `get` (nothing was shown to the user, so the page learns nothing about the vault),
+  when `extensions.appid` is present, when the origin is one it cannot validate (for
+  example a host name with an underscore or a trailing dot, which Firefox accepts),
+  for related origins and for cross-origin frames.
 
 The background answers `NotHandled` (so Firefox decides) when the sender is not
 in a tab, the frame is not same-origin with all its ancestors according to the
@@ -148,50 +178,73 @@ literal, or the tab is not the active tab of the focused window.
 - `PublicKeyCredential.isConditionalMediationAvailable()` resolves `true`
   when the host answers `capabilities` (it is reachable), otherwise it returns
   Firefox's answer. `getClientCapabilities()` then also reports
-  `conditionalGet: true`. Both hold even without a vault: hirz then has no
-  accounts and hands the conditional request to Firefox.
+  `conditionalGet: true`. Both hold even without a vault: Firefox's own
+  conditional request runs in every case and hirz then simply has no suggestions.
 - The host's capabilities are fetched at most once per page (3 s budget) and
-  cached by the background for 60 s.
+  cached by the background for 60 s; a failed fetch is remembered for 5 s only,
+  and concurrent requests share one call.
 - `parseCreationOptionsFromJSON`, `parseRequestOptionsFromJSON` and the
   signal methods are left to Firefox.
 
 ### Conditional mediation (passkey autofill)
 
 A page that calls `navigator.credentials.get({mediation: "conditional",
-publicKey})` gets hirz's own suggestion list under its sign-in fields instead
-of Firefox's:
+publicKey})` gets Firefox's own conditional request, and hirz adds its own
+suggestion list under the page's sign-in fields. The two are independent, and
+the page cannot tell from anything it can observe before the user touches a
+field whether hirz holds a passkey for it:
 
-1. The shim snapshots the options as for a modal `get` and sends a
-   `conditional` request. The promise stays pending: no timeout applies.
-2. The background checks the frame like any request, then asks the host
-   `list` with the origin from `sender.origin` and only `rpId` and
+1. The shim snapshots the options as for a modal `get` and sends a `conditional`
+   request to the relay. It then starts Firefox's own `get` at once, in the same
+   call, whatever the state of the host or the vault. The call gets the page's
+   options object with only `signal` replaced by one that is aborted when the
+   page's own signal aborts or when hirz settles the request. The promise stays
+   pending: no timeout applies. Firefox's answer (a credential from Firefox, or
+   a rejection, for example because a newer request replaced this one) settles
+   the page's promise like any other conditional request.
+2. The relay keeps the request and hands it to `autofill.js`. Nothing is sent to
+   the background and nothing reaches the host. No answer ever goes back to the
+   page world except a credential the user chose in hirz's list.
+3. `autofill.js` waits for the user. A touch is one of these, aimed at an `input` or
+   `textarea` whose `autocomplete` attribute contains the token `webauthn`: a
+   trusted click on it, a trusted Tab key release that lands in it (the key goes down
+   in the element before and comes up in the field the focus moved to), or an
+   arrow key in it. Focus alone is not a touch, however it came about, and each touch
+   asks once. Only then it asks for the accounts: the relay sends
+   `suggest` with the options, and the background answers only for the active
+   tab of the focused window, checks the frame like any request, and asks the
+   host `list` with the origin from `sender.origin` and only `rpId` and
    `allowCredentials` of the options. The host validates the origin and RP ID
    exactly as for `get` and answers with ids and names, never key material.
-3. With no account (no vault, nothing for this site, the host unreachable or
-   any error), the page gets `NotHandled` and the shim calls Firefox's own
-   conditional `get` with the original arguments, so Firefox's behaviour is
-   kept.
-4. Otherwise the background keeps the request (one per document; a newer
-   conditional request ends the older one with `AbortError`) and sends the
-   account list to the relay, which gives it to `autofill.js`. The page never
-   receives it.
-5. `autofill.js` waits for the user: a trusted click into an `input` or
-   `textarea` whose `autocomplete` attribute contains the token `webauthn`,
-   a Tab into such a field, or an arrow key in it. It then shows the list next
-   to the field. Arrow keys and Enter, or a click on a row, choose an account;
-   Escape or leaving the field closes it.
-6. Choosing sends `select` with the credential id. The background accepts only
+   The background allows one `list` per 500 ms and 12 per minute per document,
+   one per second and 12 per minute per tab (the frames of a tab share that), and 60 per
+   minute overall; over a budget it answers an empty list. Every
+   failure (no vault, nothing for this site, host unreachable, any error)
+   is an empty list, and `autofill.js` remembers an answer, empty or not, for 5 s.
+4. With accounts, `autofill.js` shows the list next to the field the user
+   touched, if that field still has the focus. Arrow keys and Enter, or a click
+   on a row (ignored for 500 ms after the list appeared or moved), choose an
+   account; Escape or leaving the field closes it. The page never receives the
+   list.
+5. Choosing sends `select` with the credential id. The background accepts only
    an id from the list it got for that request, and runs a normal `get` with
    the page's options, `allowCredentials` narrowed to that id (and
    `prf.evalByCredential` to its entry), and no `mediation`. The host's prompt
    shows the site and the account; the user approves there.
-7. A credential resolves the pending promise. If the user cancels the prompt
-   or the ceremony fails, the request stays pending and the list can be opened
-   again, as with a dismissed browser suggestion. `NotHandled` hands the
-   request to Firefox.
-8. Aborting the page's `AbortSignal` rejects with its reason, removes the
-   list, and cancels a running host request. Navigation or closing the tab
-   ends everything with the page port.
+6. A credential from the host settles the page's promise and aborts Firefox's
+   request. If the user cancels the prompt or the ceremony fails, the page's
+   request stays pending and the list can be opened again, as with a dismissed
+   browser suggestion. When the host cannot serve the selection (`NotHandled`,
+   for example because the credential is gone) the list is dropped and fetched
+   again at the next touch; Firefox's request carries on.
+7. Aborting the page's `AbortSignal` rejects with its reason, aborts Firefox's
+   request, removes the list, and cancels a running host request. If Firefox
+   settles the request first, the shim cancels hirz's side the same way.
+   Navigation or closing the tab ends everything with the page port.
+8. The background keeps no state that matters across its own suspension: the
+   relay keeps the registered request and its options. When the port to the
+   background is lost (Firefox suspends the idle event page) the list is hidden,
+   and the next touch opens a new port and asks again.
 
 Security model:
 
@@ -200,24 +253,38 @@ Security model:
   and again for the `get`, and every signature needs the host's own prompt.
   A page that hides, covers, restyles or moves the list, or tricks the user
   into clicking it, at most starts a `get` the user then sees and can refuse
-  in the hirz prompt.
+  in the hirz prompt. The host element pins `opacity`, `visibility`,
+  `pointer-events`, `transform`, `filter`, `clip-path` and similar properties
+  with `!important`, and row clicks are ignored for 500 ms after the list
+  appears or moves, so a double-click bait does not reach a row.
 - The list is drawn in a closed shadow root attached to an element that
   `autofill.js` creates and fills before inserting it, from the isolated
   world, so page scripts never get a reference to its inside and patched DOM
-  prototypes do not affect it. Names are drawn as CSS generated content
-  (`content: attr(...)`), so the page's find and selection APIs do not see
-  them either. Bidi and other invisible control characters are stripped and
-  labels are capped at 64 characters.
+  prototypes do not affect it. The styles are a constructable stylesheet, which
+  a page's Content Security Policy does not govern; when Firefox does not apply
+  it, `autofill.js` falls back to a `<style>` element. Names are drawn as CSS
+  generated content (`content: attr(...)`), so the page's find and selection
+  APIs do not see them either. Bidi and other invisible control characters are
+  stripped and labels are capped at 64 characters.
 - Only trusted events open the list or choose a row. Events a page script
   dispatches are untrusted, and they cannot reach nodes inside the closed
-  root anyway. Programmatic `focus()` does not open the list.
+  root anyway. A script cannot open the list with `focus()`: the focus events it
+  causes are trusted too, so focus is not what opens the list. A trusted key or
+  pointer event aimed at the field is, and a script cannot produce one. The Tab
+  key counts when it comes up in the field, so a script that moves the focus around
+  after one Tab press gets one list at most, not one per `focus()` call.
 - What the page can learn: before the user interacts with a `webauthn` field,
-  nothing (no element is added). After that, the page can see that the
-  element exists and its size, so it learns that hirz has accounts for the
-  site and roughly how many. It never sees ids or names; it learns the chosen
-  credential only from the credential the user approves, as with any `get`.
-  The list is not filtered by what the user types, because the size of a
-  filtered list would reveal names to the page.
+  nothing: no host call is made, nothing is added to the document, and the
+  options object is read the same two times (once by the shim, once by Firefox)
+  whether or not hirz has a passkey, so neither a counting getter nor Firefox's
+  own conditional request behaves differently. After the user touched a field,
+  the page can see that the element exists and its size, so it learns that hirz
+  has accounts for the site and roughly how many (with `allowCredentials` it can ask
+  about specific credential ids, but at most one list per touch of the user, and only
+  for a user who touched the field). It never sees ids or names; it
+  learns the chosen credential only from the credential the user approves, as
+  with any `get`. The list is not filtered by what the user types, because the
+  size of a filtered list would reveal names to the page.
 - The list goes to the top layer (`popover="manual"`), so page `z-index` and
   modal dialogs do not hide it.
 
@@ -270,7 +337,10 @@ Host error codes become exceptions in the page: `NotAllowedError`,
 `InvalidStateError`, `NotSupportedError`, `AbortError`, `SecurityError`,
 `ConstraintError` and `UnknownError` become `DOMException`s with that name,
 `TypeError` becomes a `TypeError`, and anything else becomes
-`NotAllowedError`.
+`NotAllowedError`. The current host sends neither `ConstraintError` nor
+`TypeError`: user verification that cannot be met is `NotAllowedError`, and options
+that fail validation go to Firefox (`NotHandled`), which produces its own
+`TypeError`. The shim still maps both names, for a newer host.
 
 `options.signal` is honoured: on abort the shim rejects with `signal.reason`
 and sends `cancel`; the background forwards `cancel` to the host. Navigating
@@ -292,8 +362,8 @@ JSON strings in `CustomEvent.detail`. Page scripts cannot listen for events
 whose names they do not know, so they cannot read responses or inject fake
 ones. The shim sends `create`, `get`, `conditional`, `capabilities` and
 `cancel`; the relay forwards only `ok`, `credential`, `capabilities` and
-`error` of a reply. `select` and the account list exist only between the
-relay and the background.
+`error` of a reply, and for a conditional request only a credential. `suggest`,
+`select` and the account list exist only between the relay and the background.
 
 This channel is not a security boundary. Mozilla treats the `MAIN` world as
 untrusted, and a script on the page can always call the API itself or replace
@@ -399,14 +469,14 @@ Failure:
 
 | `error` | Meaning | Page sees |
 |---|---|---|
-| `NotHandled` | hirz does not take this request; Firefox should | Firefox's own WebAuthn runs |
-| `NotAllowedError` | User cancelled, timed out, or policy refused | `DOMException` `NotAllowedError` |
+| `NotHandled` | hirz does not take this request; Firefox should: nothing here matches a `get`, or hirz could not show a window (no way to verify the user, the prompt budget used up, zenity missing), which must look the same | Firefox's own WebAuthn runs |
+| `NotAllowedError` | The user cancelled, a window timed out, or policy refused after a window was shown; also an overloaded host (`message` is `host busy`) | `DOMException` `NotAllowedError` |
 | `InvalidStateError` | A credential in `excludeCredentials` exists here | `DOMException` `InvalidStateError` |
 | `NotSupportedError` | No supported algorithm or a required feature is missing | `DOMException` `NotSupportedError` |
-| `SecurityError` | Origin or RP ID validation failed | `DOMException` `SecurityError` |
+| `SecurityError` | RP ID validation failed (not a suffix of the origin's host, or a public suffix) | `DOMException` `SecurityError` |
 | `AbortError` | The request was cancelled | `DOMException` `AbortError` |
-| `ConstraintError` | A required option cannot be met (for example UV) | `DOMException` `ConstraintError` |
-| `UnknownError` | Internal failure, or an envelope that is not valid JSON, has no valid `id` or an unknown `type` (`id` is `null` when it could not be read) | `DOMException` `UnknownError` |
+| `ConstraintError` | Reserved: the current host never sends it | `DOMException` `ConstraintError` |
+| `UnknownError` | Internal failure, or an envelope that is not valid JSON, has no valid `id` or an unknown `type` (`id` is `null` when it could not be read; the background then restarts the host) | `DOMException` `UnknownError` |
 
 `list` (conditional mediation):
 
@@ -417,17 +487,37 @@ Failure:
 ```
 
 The host validates `origin`, `topOrigin`, `crossOrigin` and the RP ID exactly
-as for `get` and fails with the same errors (`SecurityError`, `NotHandled`
-for related origins or cross-origin frames, `NotHandled` for malformed
-options). Other members of `options` are ignored. Without an allow list it
+as for `get` and fails with the same errors (`SecurityError` for an RP ID that is
+not allowed, `NotHandled` for an origin it cannot validate, related origins,
+cross-origin frames and malformed options). Other members of `options` are ignored. Without an allow list it
 returns the RP's discoverable credentials, newest first; with one, the listed
 credentials of the RP in list order. credProtect level 3 credentials are never
 listed, level 2 only when they are in the allow list, since listing does not
 verify the user. `name` and `displayName` are the stored user name and display
 name (empty strings when absent), each at most 1024 characters; at most 64
 accounts. Without a vault the list is empty. `list` never prompts, signs or
-returns key material. It is answered in order with the other requests, from
-the vault as it was last loaded (every `create` and `get` reloads it).
+returns key material. It is answered in order with the other requests, from the
+last look at the vault folder when that is recent (see below). The extension sends it
+only after the user touched a field, for the active tab, and within budgets (see
+"Conditional mediation").
+
+The vault folder is not scanned for every `list`: when the last look at it is less than
+3 seconds old it is used again, and the same holds for `capabilities`. A `get`, `create`
+or any other request that can end in a prompt always looks first. So a credential another
+device just synced can be missing from a `list` for a few seconds, and a device that was
+just removed can still list names for a few seconds, but it cannot sign or register.
+
+Anything that can start `hirz-nmh` as the user can send `list` and `get` for any
+origin it claims, because the host cannot verify the origin (the manifest's
+`allowed_extensions` and the arguments Firefox passes are not authentication). `get`
+still needs the prompt, which shows the claimed origin. `list` needs none and
+returns credential ids and user names of the RP's credentials, except credProtect
+level 3 (and level 2 without an allow list). This stays inside the documented
+limit that programs running as the same user can read the vault anyway. It matters
+for sandboxed applications that can reach the WebExtensions portal or
+`xdg-native-messaging-proxy` without access to the home directory: such an
+application can start the host. Do not grant that access to applications you do
+not trust.
 
 Every failure also carries `message`, a fixed diagnostic text without request
 data. Options that fail validation get `NotHandled`, so Firefox produces the
@@ -445,9 +535,11 @@ creates and signs nothing. When Firefox closes stdin, every pending request is
 treated as cancelled.
 
 Requests are answered in order, one at a time: a request that arrives while a
-prompt is open waits for it (including `hello`, `capabilities` and `list`).
-The background gives `list` 10 s; after that the page falls back to Firefox's
-conditional request.
+prompt is open waits for it (including `hello`, `capabilities` and `list`), for at
+most 64 queued requests. The reader thread never blocks: it records `cancel` and the
+end of input at once, and refuses a request that finds the queue full with
+`NotAllowedError` (`message` `host busy`) without queueing it. The background
+gives `list` 10 s; after that the list stays empty.
 
 `capabilities` reports `userVerifyingPlatformAuthenticator` and
 `passkeyPlatformAuthenticator` as `true` only when a vault exists and a
@@ -459,7 +551,11 @@ The vault is found like the CLI finds it: `HIRZ_VAULT`, else the folder
 recorded in `$XDG_STATE_HOME/hirz/vault-path`, else
 `$XDG_DATA_HOME/hirz/vault`; state in `HIRZ_STATE`, else
 `$XDG_STATE_HOME/hirz`. Without a vault, or when it cannot be opened (logged
-on stderr), `create` and `get` get `NotHandled`.
+on stderr), `create` and `get` get `NotHandled`. While the vault folder reports a fork (see
+`hirz repair`), `get` and `list` keep working, `create` gets `NotHandled` before any prompt, and
+the fork is logged once per change on stderr. A vault that turns out to be forked or removed
+while a request is being served gives `NotAllowedError`. `hirz-nmh` shares this code with
+`hirzd` through the `hirz-session` crate.
 
 ## Native manifest and install locations
 
@@ -475,7 +571,8 @@ to the file name stem and to the name passed to `connectNative`;
 
 Packages should install the system manifest and the binary root-owned. A
 per-user install is for development: anything running as the user can change
-it.
+it. `hirz setup firefox` therefore refuses to write the per-user manifest while a system
+manifest exists, unless `--force` is given.
 
 Development install:
 
@@ -621,14 +718,21 @@ above).
    authentication without a username being typed.
 4. Repeat, cancel the hirz prompt: the page shows nothing new; click the field
    again, the list is back.
-5. Programmatic focus does not open it: in the console run
+5. Programmatic focus alone does not open it: in the console run
    `document.querySelector("input[autocomplete*=webauthn]").focus()` after
-   clicking elsewhere; no list appears.
+   clicking elsewhere, and again right after pressing Tab to another element
+   (the key must come up in the field); no list appears. Pressing Tab until the
+   focus reaches the field does open it.
 6. Start the modal "Authenticate" button flow while the list is open (the page
    aborts its conditional request first): the list disappears and the modal
    flow shows the hirz prompt.
 7. Move the vault away (or use a profile without one) and reload: clicking
-   the field shows no hirz list; Firefox's own behaviour applies.
+   the field shows no hirz list; Firefox's own behaviour applies. The page
+   cannot tell this case from step 2: in a page that counts reads of its
+   options (a getter on `challenge`), both give two reads right after the
+   `get()` call, and nothing in the document changes before the first click.
+   With the page in a background tab, clicking is impossible and the
+   background console logs no `list` message.
 8. Frames: serve a test folder with `python3 -m http.server 8000` containing
    `top.html` with `<iframe src="/inner.html">` and
    `<iframe src="http://localhost:8001/inner.html">` (a second server on port
@@ -640,20 +744,20 @@ above).
    `navigator.credentials.get.toString()` shows `[native code]` and the call
    goes to Firefox's own dialog.
 
-The extension side of the checklist was also run automatically in a
-throwaway headless Firefox profile through geckodriver: a temporary copy of
-the extension whose `runtime.connectNative` is replaced by a stub host in
-JavaScript, and local pages served by `python3 -m http.server`. It checked
-that the list appears only after a trusted click, Tab or arrow key, that
-synthetic events and programmatic focus do nothing, that the page sees no
-shadow root and no text, that keyboard and pointer selection resolve the
-pending promise with the allow list narrowed to the chosen id and without
-`mediation`, that a refused prompt keeps the request pending, that abort
-removes the list, that no accounts falls back to Firefox's conditional
-request, that a same-origin iframe is handled with `topOrigin` equal to its
-origin, that a cross-origin iframe keeps the native API, and that a request
-forged by a page in a same-origin frame below a cross-origin frame gets
-`NotHandled` from the background.
+The extension side is covered without a browser by `scripts/extension-test.mjs`
+(`node --test scripts/extension-test.mjs`, part of `scripts/check.sh extension`
+when `node` is installed). It runs `background.js` in a vm context against a stub
+`browser` with a scripted native host, and the shim, autofill and relay against a small
+DOM stub with that background on the other end of the port. It checks, among others,
+that a conditional `get` starts Firefox's request at once and that nothing at all
+differs for the page between a host with accounts and one without, that the list appears
+only after a trusted touch and only for the active tab, the request budgets, that a cancel
+before the host call stops the request, that a lost port only costs the list, that
+Firefox's result and the page's abort settle both sides, that the stylesheet falls back to
+an element, and that options the host's JSON reader would reject never leave the
+background. It cannot show how Firefox itself behaves (content script worlds, the native
+conditional UI, whether a page's Content Security Policy blocks a `<style>` element), so
+the manual checklist above stays the check for those.
 
 The automated equivalent of steps 1 to 4 of the first checklist, without
 prompts, is the test module

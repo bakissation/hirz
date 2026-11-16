@@ -54,16 +54,6 @@ version = "1.11.2"
 criteria = "safe-to-deploy"
 notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
 
-[[exemptions.cfg-if]]
-version = "1.0.5"
-criteria = "safe-to-deploy"
-notes = "Trivial macro crate pulled in by getrandom. Imported sets audited 1.0.4, not this version. No cargo-vet audit recorded here."
-
-[[exemptions.cmake]]
-version = "0.1.58"
-criteria = "safe-to-deploy"
-notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
-
 [[exemptions.cmov]]
 version = "0.5.4"
 criteria = "safe-to-deploy"
@@ -84,11 +74,6 @@ version = "0.11.3"
 criteria = "safe-to-deploy"
 notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
 
-[[exemptions.find-msvc-tools]]
-version = "0.1.15"
-criteria = "safe-to-deploy"
-notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
-
 [[exemptions.fs_extra]]
 version = "1.3.0"
 criteria = "safe-to-deploy"
@@ -104,20 +89,10 @@ version = "0.4.15"
 criteria = "safe-to-deploy"
 notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
 
-[[exemptions.jobserver]]
-version = "0.1.35"
-criteria = "safe-to-deploy"
-notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
-
 [[exemptions.libc]]
 version = "0.2.191"
 criteria = "safe-to-deploy"
 notes = "Used by hirz-sys for the few system calls hirz makes, and by getrandom. Too large to audit here; imported sets audited older versions only."
-
-[[exemptions.memchr]]
-version = "2.8.3"
-criteria = "safe-to-deploy"
-notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
 
 [[exemptions.password-hash]]
 version = "0.6.1"

@@ -1,5 +1,7 @@
 {
-  "categories": ["privacy-security"],
+  "categories": {
+    "firefox": ["privacy-security"]
+  },
   "summary": {
     "en-US": "Passkeys on Linux: hands WebAuthn requests to the local hirz authenticator."
   },

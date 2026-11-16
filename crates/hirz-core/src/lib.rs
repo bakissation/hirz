@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod engine;
+pub mod machine_login;
 pub mod types;
 
 pub use engine::Engine;

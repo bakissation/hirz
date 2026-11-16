@@ -8,6 +8,15 @@
 #[path = "../../crates/hirz-cli/src/foreign/mod.rs"]
 pub mod foreign;
 
+/// The CXF reader, the passphrase envelope and the display helpers they use, from the same
+/// source files as the `hirz` command.
+#[path = "../../crates/hirz-cli/src/cxf.rs"]
+pub mod cxf;
+#[path = "../../crates/hirz-cli/src/envelope.rs"]
+pub mod envelope;
+#[path = "../../crates/hirz-cli/src/ui.rs"]
+pub mod ui;
+
 use hirz_core::{
     AAGUID, AssertionResponse, COSE_ALG_EDDSA, CoreError, GetAssertionRequest, HmacSecretWrap,
     MakeCredentialRequest, MakeCredentialResponse, UserEntity,

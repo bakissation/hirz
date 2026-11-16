@@ -4,6 +4,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
+use std::time::{Duration, Instant};
 
 use hirz_sys::poll_readable;
 use hirz_sys::uhid::{self, ReportType, UhidEvent};
@@ -18,6 +19,8 @@ const EINVAL: i32 = 22;
 pub enum RelayEnd {
     ClientClosed,
     DeviceClosed,
+    /// `still_allowed` said no: the user's session ended or the host policy changed.
+    Revoked,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -27,12 +30,15 @@ pub struct Stats {
     pub dropped: u64,
 }
 
-/// `uhid` is `/dev/uhid` in production and a socket in tests.
+/// `uhid` is `/dev/uhid` in production and a socket in tests. `still_allowed` runs every
+/// `recheck` while the device exists; once it returns false the device is destroyed.
 pub fn run_device<U, C>(
     uhid: &mut U,
     client: &mut C,
     phys: &str,
     stats: &mut Stats,
+    recheck: Duration,
+    still_allowed: &mut dyn FnMut() -> bool,
 ) -> io::Result<RelayEnd>
 where
     U: Read + Write + AsFd,
@@ -41,7 +47,7 @@ where
     let create = uhid::encode_create2(&create_params(phys))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     uhid.write_all(&create)?;
-    let result = relay(uhid, client, stats);
+    let result = relay(uhid, client, stats, recheck, still_allowed);
     // Closing the descriptor destroys the device too; the explicit event makes the order
     // deterministic.
     let destroyed = uhid.write_all(&uhid::encode_destroy());
@@ -52,7 +58,13 @@ where
     Ok(end)
 }
 
-fn relay<U, C>(uhid: &mut U, client: &mut C, stats: &mut Stats) -> io::Result<RelayEnd>
+fn relay<U, C>(
+    uhid: &mut U,
+    client: &mut C,
+    stats: &mut Stats,
+    recheck: Duration,
+    still_allowed: &mut dyn FnMut() -> bool,
+) -> io::Result<RelayEnd>
 where
     U: Read + Write + AsFd,
     C: Read + Write + AsFd,
@@ -60,11 +72,19 @@ where
     let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
     let mut pending = [0u8; REPORT_SIZE];
     let mut filled = 0usize;
+    let mut last_check = Instant::now();
     loop {
-        let status = poll_readable(&[uhid.as_fd(), client.as_fd()], None)?;
+        let wait = recheck.saturating_sub(last_check.elapsed());
+        let status = poll_readable(&[uhid.as_fd(), client.as_fd()], Some(wait))?;
         let (Some(dev), Some(cli)) = (status.first(), status.get(1)) else {
             return Err(io::Error::other("poll returned too few entries"));
         };
+        if last_check.elapsed() >= recheck {
+            last_check = Instant::now();
+            if !still_allowed() {
+                return Ok(RelayEnd::Revoked);
+            }
+        }
 
         if dev.readable {
             // /dev/uhid returns exactly one struct uhid_event per read.
@@ -209,7 +229,14 @@ mod tests {
 
         let relay = std::thread::spawn(move || {
             let mut stats = Stats::default();
-            let end = run_device(&mut uhid_end, &mut client_end, "1000", &mut stats);
+            let end = run_device(
+                &mut uhid_end,
+                &mut client_end,
+                "1000",
+                &mut stats,
+                Duration::from_millis(20),
+                &mut || true,
+            );
             (end.unwrap(), stats)
         });
 
@@ -283,10 +310,57 @@ mod tests {
         let (mut client_end, _daemon) = UnixStream::pair().unwrap();
         let relay = std::thread::spawn(move || {
             let mut stats = Stats::default();
-            run_device(&mut uhid_end, &mut client_end, "1000", &mut stats)
+            run_device(
+                &mut uhid_end,
+                &mut client_end,
+                "1000",
+                &mut stats,
+                Duration::from_millis(20),
+                &mut || true,
+            )
         });
         let _ = read_event(&mut kernel);
         drop(kernel);
         assert_eq!(relay.join().unwrap().unwrap(), RelayEnd::DeviceClosed);
+    }
+
+    #[test]
+    fn device_is_destroyed_when_the_policy_stops_allowing_it() {
+        let (mut uhid_end, mut kernel) = UnixStream::pair().unwrap();
+        let (mut client_end, mut daemon) = UnixStream::pair().unwrap();
+        kernel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let relay = std::thread::spawn(move || {
+            let mut stats = Stats::default();
+            let mut checks = 0u32;
+            let mut allowed = || {
+                checks += 1;
+                checks < 3
+            };
+            let end = run_device(
+                &mut uhid_end,
+                &mut client_end,
+                "1000",
+                &mut stats,
+                Duration::from_millis(20),
+                &mut allowed,
+            );
+            (end, checks)
+        });
+        let create = read_event(&mut kernel);
+        assert_eq!(ne32(&create, 0), event_type::CREATE2);
+        // The client stays connected and silent; only the recheck ends the device.
+        let destroy = read_event(&mut kernel);
+        assert_eq!(ne32(&destroy, 0), event_type::DESTROY);
+        let (end, checks) = relay.join().unwrap();
+        assert_eq!(end.unwrap(), RelayEnd::Revoked);
+        assert_eq!(checks, 3);
+        // The client side was closed with the relay.
+        daemon
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 1];
+        assert_eq!(daemon.read(&mut buf).unwrap(), 0);
     }
 }

@@ -55,7 +55,8 @@ override_dh_auto_install:
 	sed -E 's#^ExecStart=[^ ]*/hirzd( |$$)#ExecStart=/usr/bin/hirzd\1#' \
 	  packaging/systemd/hirzd.service > $(DEST)/usr/lib/systemd/user/hirzd.service
 	grep -Eq '^ExecStart=/usr/bin/hirzd( |$$)' $(DEST)/usr/lib/systemd/user/hirzd.service
-	install -Dm0644 -t $(DEST)/usr/lib/udev/rules.d packaging/udev/70-hirz.rules packaging/udev/72-hirz.rules
+	install -Dm0644 -t $(DEST)/usr/lib/udev/rules.d packaging/udev/70-hirz.rules packaging/udev/72-hirz.rules \
+	  packaging/udev/99-zzz-hirz.rules
 	install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
 	  $(DEST)/usr/share/polkit-1/actions/dev.hirz.authenticate.policy
 	install -Dm0644 assets/brand/hirz-app-icon.svg $(DEST)/usr/share/icons/hicolor/scalable/apps/hirz.svg

@@ -1,9 +1,10 @@
-# hirz virtual security key, part 1 of 2 (part 2 is 72-hirz.rules); rationale: docs/uhid.md,
-# "hidraw access". ID_SECURITY_TOKEN stays set because snapd reads it, but 70-uaccess.rules would
-# turn it into a seat ACL for the wrong user; 72-hirz.rules removes that tag. The broker writes the
-# creating uid into HID_PHYS, and the node becomes owned by that uid with mode 0600; ":=" keeps
-# later rules from changing it. The file name must sort after 60-fido-id.rules and before
-# 70-snap.*.rules.
+# hirz virtual security key, part 1 of 3 (parts 2 and 3 are 72-hirz.rules and 99-zzz-hirz.rules);
+# rationale: docs/uhid.md, "hidraw access". ID_SECURITY_TOKEN stays set because snapd reads it, but
+# 70-uaccess.rules would turn it into a seat ACL for the wrong user; the other two files remove that
+# tag. The broker writes the creating uid into HID_PHYS, and the node becomes owned by that uid with
+# mode 0600; ":=" keeps later rules from changing it. The ids 1209:0007 are not a secret: this
+# binding trusts HID_PHYS of every uhid device with them, so it assumes /dev/uhid is root only. The
+# file name must sort after 60-fido-id.rules and before 70-snap.*.rules.
 
 ACTION=="remove", GOTO="hirz_end"
 SUBSYSTEM!="hidraw", GOTO="hirz_end"
@@ -11,7 +12,9 @@ SUBSYSTEM!="hidraw", GOTO="hirz_end"
 DEVPATH!="/devices/virtual/misc/uhid/0003:1209:0007.*", GOTO="hirz_end"
 ENV{ID_SECURITY_TOKEN}!="1", GOTO="hirz_end"
 IMPORT{parent}="HID_PHYS"
-ENV{HID_PHYS}!="[1-9]*", GOTO="hirz_end"
+# A decimal uid of one to ten digits without a leading zero (so never 0 and never a user name);
+# udev patterns have no repetition, hence the list. Anything else leaves the node root:root 0600.
+ENV{HID_PHYS}!="[1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]|[1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]", GOTO="hirz_end"
 
 OWNER:="$env{HID_PHYS}", GROUP:="root", MODE:="0600"
 

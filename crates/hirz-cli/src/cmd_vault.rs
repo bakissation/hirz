@@ -15,8 +15,12 @@ const QUIZ_WORDS: usize = 3;
 const QUIZ_ROUNDS: usize = 3;
 const PHRASE_ATTEMPTS: usize = 3;
 const MAX_NAME_CHARS: usize = 64;
-/// Clears the screen and the scrollback, so the recovery phrase does not stay on screen.
-const CLEAR_SCREEN: &str = "\x1b[2J\x1b[3J\x1b[H";
+/// The recovery phrase is shown on the terminal's alternate screen, which terminals and
+/// multiplexers keep out of their scrollback and history, and wiped before the screen is left.
+const ENTER_PHRASE_SCREEN: &str = "\x1b[?1049h\x1b[2J\x1b[H";
+const LEAVE_PHRASE_SCREEN: &str = "\x1b[2J\x1b[3J\x1b[H\x1b[?1049l";
+const PHRASE_TO_FILE: &str = "hirz: the recovery phrase is written to standard output, which is not a \
+terminal.\nAnything that stores that output (a file, a log, a pipe) keeps the phrase.\n";
 
 fn device_name(ctx: &Ctx<'_>, given: Option<String>) -> CliResult<String> {
     let name = match given {
@@ -145,11 +149,24 @@ fn quiz(ctx: &mut Ctx<'_>, words: &[&str]) -> CliResult<bool> {
     Ok(false)
 }
 
+/// Runs `f` on the alternate screen when `alternate`, and leaves it, wiped, on every way out.
+fn on_phrase_screen<T>(
+    ctx: &mut Ctx<'_>,
+    alternate: bool,
+    f: impl FnOnce(&mut Ctx<'_>) -> CliResult<T>,
+) -> CliResult<T> {
+    if alternate {
+        ctx.write_raw(ENTER_PHRASE_SCREEN)?;
+    }
+    let result = f(ctx);
+    if alternate {
+        let _ = ctx.write_raw(LEAVE_PHRASE_SCREEN);
+    }
+    result
+}
+
 pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<Exit> {
-    let dir = match ctx.vault_flag.clone() {
-        Some(p) => ctx.env.absolute(&p)?,
-        None => ctx.env.default_vault(),
-    };
+    let dir = ctx.env.new_vault_dir(ctx.vault_flag.as_deref())?;
     if ctx.env.device_state_exists() {
         return Err(already_set_up(ctx));
     }
@@ -177,7 +194,6 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
         Err(VaultError::AlreadyExists) => return Err(already_set_up(ctx)),
         Err(e) => return Err(e.into()),
     };
-    ctx.env.record_vault_dir(&dir)?;
     drop(vault);
 
     let phrase_text = phrase.to_words();
@@ -185,36 +201,69 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
     if words.len() != PHRASE_WORDS {
         return Err(CliError::failed("Internal error: recovery phrase length."));
     }
-    ctx.say(&format!(
-        "Your new vault is ready in {}.\nThis computer is called \"{name}\".",
-        dir.display()
-    ))?;
-    ctx.say("")?;
-    ctx.say("YOUR RECOVERY PHRASE (shown only this once):")?;
-    show_phrase(ctx, &words)?;
-    ctx.say(
-        "Write these 24 words on paper, in this order, and keep the paper somewhere safe.\n\
-         - If you lose every device that uses this vault, this phrase and a copy of the vault\n  \
-           folder are the only way to get your passkeys back.\n\
-         - You also need it to add another computer.\n\
-         - Anyone with the phrase and a copy of the folder can use your passkeys. Do not keep\n  \
-           it in a photo, an email or a chat.\n\
-         - hirz does not keep a copy and cannot show it again.",
-    )?;
-    ctx.say("")?;
-    if saved {
-        ctx.say("(--yes-i-saved-it was given, so hirz does not check the phrase.)")?;
-    } else if !quiz(ctx, &words)? {
-        return Err(CliError::cancelled(format!(
-            "The recovery phrase was not confirmed. The vault was still created and works.\n\
-             If you did not save the phrase and have no passkeys in it yet, start over: delete\n\
-             the folder {} and the files in {}, then run `hirz init` again.",
-            dir.display(),
-            ctx.env.state_dir().display()
+    if !ctx.out_is_terminal {
+        ctx.prompt.notice(PHRASE_TO_FILE);
+    }
+    let screen = ctx.out_is_terminal && !saved;
+    let mut recorded = Ok(());
+    let shown = on_phrase_screen(ctx, screen, |ctx| {
+        ctx.say(&format!(
+            "Your new vault is ready in {}.\nThis computer is called \"{name}\".",
+            dir.display()
+        ))?;
+        ctx.say("")?;
+        ctx.say("YOUR RECOVERY PHRASE (shown only this once):")?;
+        show_phrase(ctx, &words)?;
+        ctx.say(
+            "Write these 24 words on paper, in this order, and keep the paper somewhere safe.\n\
+             - If you lose every device that uses this vault, this phrase and a copy of the vault\n  \
+               folder are the only way to get your passkeys back.\n\
+             - You also need it to add another computer.\n\
+             - Anyone with the phrase and a copy of the folder can use your passkeys. Do not keep\n  \
+               it in a photo, an email or a chat.\n\
+             - hirz does not keep a copy and cannot show it again.",
+        )?;
+        ctx.say("")?;
+        recorded = ctx.env.record_vault_dir(&dir);
+        if saved {
+            ctx.say("(--yes-i-saved-it was given, so hirz does not check the phrase.)")?;
+            return Ok(true);
+        }
+        quiz(ctx, &words)
+    });
+    let confirmed = shown.map_err(|e| {
+        CliError::new(
+            e.exit,
+            format!(
+                "{}\nThe vault was created in {} and the recovery phrase may not have been shown. \
+                 Start over: delete that folder and the files in {}, then run `hirz init` again.",
+                e.message,
+                dir.display(),
+                ctx.env.state_dir().display()
+            ),
+        )
+    })?;
+    if let Err(e) = recorded {
+        return Err(CliError::failed(format!(
+            "{}\nThe vault exists in {d} and the recovery phrase shown is valid. Fix the problem, \
+             then run `{p} forget-local` and `{p} join --vault {d}` with the phrase, or give \
+             --vault {d} to every command.",
+            e.message,
+            d = dir.display(),
+            p = ctx.program
         )));
-    } else {
-        if ctx.out_is_terminal {
-            ctx.write_raw(CLEAR_SCREEN)?;
+    }
+    if !saved {
+        if !confirmed {
+            return Err(CliError::cancelled(format!(
+                "The recovery phrase was not confirmed. The vault was still created and works.\n\
+                 If you did not save the phrase and have no passkeys in it yet, start over: delete\n\
+                 the folder {} and the files in {}, then run `hirz init` again.",
+                dir.display(),
+                ctx.env.state_dir().display()
+            )));
+        }
+        if screen {
             ctx.say(&format!("Your vault is in {}.", dir.display()))?;
         }
         ctx.say("Correct. Keep the paper safe.")?;
@@ -305,6 +354,15 @@ pub fn join(ctx: &mut Ctx<'_>, name: Option<String>, request: bool) -> CliResult
         dir.display(),
         count(n, "passkey")
     ))?;
+    if vault.report().rotation_conflict {
+        ctx.say(&format!(
+            "The vault folder reports a conflict: two devices removed each other, and nothing\n\
+             new is saved until it is settled. Stop sharing the folder with the device you do\n\
+             not trust, then run `{p} remove-device` for it here (`{p} devices` lists them,\n\
+             `{p} repair` shows the conflict).",
+            p = ctx.program
+        ))?;
+    }
     say_sync_hint(ctx)?;
     Ok(Exit::Ok)
 }
@@ -344,7 +402,12 @@ fn algorithm_name(alg: i64) -> &'static str {
     }
 }
 
-fn passkey_table(records: &[&CredentialRecord]) -> String {
+pub(crate) fn passkey_table(records: &[&CredentialRecord]) -> String {
+    passkey_table_with(records, ui::SHORT_ID_DIGITS)
+}
+
+/// The ids are `digits` hex digits long, so a list of matches shows what to type.
+fn passkey_table_with(records: &[&CredentialRecord], digits: usize) -> String {
     let rows: Vec<Vec<String>> = records
         .iter()
         .map(|r| {
@@ -352,7 +415,7 @@ fn passkey_table(records: &[&CredentialRecord]) -> String {
                 ui::site(&r.rp_id, 40),
                 account_of(r).map_or_else(|| "(no name)".to_string(), |a| clean(a, 40)),
                 ui::date(r.created_at),
-                short_id(&r.credential_id),
+                ui::id_prefix(&r.credential_id, digits),
             ]
         })
         .collect();
@@ -445,7 +508,8 @@ pub fn delete(ctx: &mut Ctx<'_>, target: DeleteTarget, yes: bool) -> CliResult<E
         }
         [one] => (*one).clone(),
         several => {
-            ctx.write_raw(&passkey_table(several))?;
+            let ids: Vec<&[u8]> = several.iter().map(|r| r.credential_id.as_slice()).collect();
+            ctx.write_raw(&passkey_table_with(several, ui::distinct_digits(&ids)))?;
             return Err(CliError::usage(format!(
                 "{} match. Give a longer id prefix from the list above.",
                 count(several.len(), "passkey")
@@ -472,14 +536,47 @@ pub fn delete(ctx: &mut Ctx<'_>, target: DeleteTarget, yes: bool) -> CliResult<E
     Ok(Exit::Ok)
 }
 
-fn device_table(devs: &[DeviceInfo]) -> String {
+/// Who approved a device: the name of that device, or "recovery phrase" for a device added with
+/// the phrase (the first device included). `all` is every device, so the name can be looked up.
+fn added_by(d: &DeviceInfo, all: &[DeviceInfo]) -> String {
+    match d.added_by {
+        None => "recovery phrase".to_string(),
+        Some(by) => match all.iter().find(|o| o.id == by) {
+            Some(o) => clean(&o.name, MAX_NAME_CHARS),
+            None => format!("unknown ({})", short_id(&by)),
+        },
+    }
+}
+
+/// Marks the name of a device in use when another device in use has the same name.
+const SAME_NAME_MARK: &str = " (*)";
+const SAME_NAME_NOTE: &str = "(*) Another device in use has the same name. A device that someone else \
+approved can be named like one of yours: tell them apart by ID, ADDED and ADDED BY.";
+
+/// Whether another device in use has the same name as `d` (compared as shown).
+fn shares_name(d: &DeviceInfo, all: &[DeviceInfo]) -> bool {
+    let shown = clean(&d.name, MAX_NAME_CHARS);
+    !d.removed
+        && all
+            .iter()
+            .any(|o| o.id != d.id && !o.removed && clean(&o.name, MAX_NAME_CHARS) == shown)
+}
+
+fn device_table(devs: &[DeviceInfo], all: &[DeviceInfo]) -> String {
+    let ids: Vec<&[u8]> = devs.iter().map(|d| d.id.as_slice()).collect();
+    let digits = ui::distinct_digits(&ids);
     let rows: Vec<Vec<String>> = devs
         .iter()
         .map(|d| {
+            let mut name = clean(&d.name, MAX_NAME_CHARS);
+            if shares_name(d, all) {
+                name.push_str(SAME_NAME_MARK);
+            }
             vec![
-                clean(&d.name, MAX_NAME_CHARS),
-                short_id(&d.id),
+                name,
+                ui::id_prefix(&d.id, digits),
                 ui::date(d.added_at),
+                added_by(d, all),
                 if d.removed {
                     "removed".to_string()
                 } else if d.this_device {
@@ -490,7 +587,7 @@ fn device_table(devs: &[DeviceInfo]) -> String {
             ]
         })
         .collect();
-    ui::table(&["NAME", "ID", "ADDED", "STATUS"], &rows)
+    ui::table(&["NAME", "ID", "ADDED", "ADDED BY", "STATUS"], &rows)
 }
 
 fn sorted_devices(vault: &Vault) -> Vec<DeviceInfo> {
@@ -512,13 +609,18 @@ pub fn devices(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
                     "added_at": d.added_at,
                     "removed": d.removed,
                     "this_device": d.this_device,
+                    "added_by": d.added_by.map(|by| hex(&by)),
+                    "same_name_as_another": shares_name(d, &devs),
                 })
             })
             .collect();
         ctx.say_json(&Value::Array(items))?;
         return Ok(Exit::Ok);
     }
-    ctx.write_raw(&device_table(&devs))?;
+    ctx.write_raw(&device_table(&devs, &devs))?;
+    if devs.iter().any(|d| shares_name(d, &devs)) {
+        ctx.say(SAME_NAME_NOTE)?;
+    }
     let active = devs.iter().filter(|d| !d.removed).count();
     ctx.say(&format!("{} in use.", count(active, "device")))?;
     let waiting = vault.pairing_requests().map(|r| r.len()).unwrap_or(0);
@@ -528,6 +630,7 @@ pub fn devices(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
             count(waiting, "device"),
             ctx.program
         ))?;
+        crate::cmd_pair::say_hidden_requests(ctx, vault.hidden_pairing_requests())?;
     } else if active == 1 {
         ctx.say(&format!(
             "Add another computer: run `hirz join --vault DIR --request` there, then\n\
@@ -554,9 +657,11 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
             "Give at least 4 characters of the device id shown by `hirz devices`.",
         ));
     };
-    let candidates: Vec<DeviceInfo> = sorted_devices(&vault)
-        .into_iter()
+    let all = sorted_devices(&vault);
+    let candidates: Vec<DeviceInfo> = all
+        .iter()
         .filter(|d| !d.removed && hex(&d.id).starts_with(&prefix))
+        .cloned()
         .collect();
     let device = match candidates.as_slice() {
         [] => {
@@ -566,7 +671,7 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
         }
         [one] => one.clone(),
         several => {
-            ctx.write_raw(&device_table(several))?;
+            ctx.write_raw(&device_table(several, &all))?;
             return Err(CliError::usage(
                 "Several devices match. Give a longer id prefix.",
             ));
@@ -586,6 +691,7 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
     };
     ensure_uv_possible(ctx, &change)?;
     let exposed = sites(&vault.list_all());
+    let resting = vault.devices_resting_on(&device.id);
     ctx.say(&format!(
         "Removing \"{name}\" (id {}):\n\
          - It will no longer be able to read passkeys that are added or changed from now on:\n  \
@@ -611,6 +717,26 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
             ))?;
         }
     }
+    if !resting.is_empty() {
+        let n = resting.len();
+        let (they, are) = if n == 1 {
+            ("1 device in use was".to_string(), "It is")
+        } else {
+            (format!("{n} devices in use were"), "They are")
+        };
+        ctx.say(&format!(
+            "\nWARNING: {they} added through \"{name}\" (it approved them, or approved the\n\
+             device that did). {are} not removed with it: each keeps its access and can read\n\
+             passkeys added from now on. Whoever holds \"{name}\" may have approved devices of\n\
+             its own, with names like yours:"
+        ))?;
+        ctx.write_raw(&device_table(&resting, &all))?;
+        ctx.say(&format!(
+            "Remove each one you did not approve yourself, after this, with\n  \
+             {} remove-device ID",
+            ctx.program
+        ))?;
+    }
     if !yes && !confirm(ctx.prompt, &format!("Remove \"{name}\" now?"))? {
         return Err(CliError::cancelled("Nothing was changed."));
     }
@@ -629,6 +755,15 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
     ctx.say(&format!(
         "Removed \"{name}\". The vault key has been changed."
     ))?;
+    if !resting.is_empty() {
+        let ids: Vec<String> = resting.iter().map(|d| short_id(&d.id)).collect();
+        ctx.say(&format!(
+            "Still in use, added through \"{name}\": {}. Remove the ones you do not know with\n  \
+             {} remove-device ID",
+            ids.join(", "),
+            ctx.program
+        ))?;
+    }
     if !exposed.is_empty() {
         ctx.say(
             "To be safe, replace the passkeys listed above: at each site, sign in, create a new\n\

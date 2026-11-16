@@ -2,16 +2,20 @@
 //! script the answers.
 
 use crate::error::{CliError, CliResult};
-use hirz_crypto::Zeroizing;
-use std::io::{self, BufRead, IsTerminal, Read, Write};
-use std::process::{Command, Stdio};
+use hirz_crypto::{Zeroize, Zeroizing};
+use std::io::{self, IsTerminal, Write};
+use std::os::fd::AsFd;
 
-const MAX_LINE: u64 = 4096;
+const MAX_LINE: usize = 4096;
 
 pub trait Prompter {
     /// Shows `prompt` and reads one line without the line break. `None` at end of input.
     fn line(&mut self, prompt: &str) -> io::Result<Option<String>>;
     fn secret(&mut self, prompt: &str) -> io::Result<Option<Zeroizing<String>>>;
+    /// A warning for the person at the terminal; standard error, so standard output stays clean.
+    fn notice(&mut self, text: &str) {
+        show(text);
+    }
 }
 
 /// Asks a yes/no question. Only "y" or "yes" count as yes; end of input is no.
@@ -61,24 +65,58 @@ impl TerminalPrompter {
     }
 
     fn read_raw(&mut self) -> io::Result<Option<Zeroizing<String>>> {
-        let mut buf = Zeroizing::new(Vec::new());
-        let stdin = io::stdin();
-        let mut lock = stdin.lock().take(MAX_LINE.saturating_add(1));
-        let n = lock.read_until(b'\n', &mut buf)?;
-        if n == 0 {
-            return Ok(None);
+        read_line_from(&mut hirz_sys::read_stdin)
+    }
+}
+
+/// One line, read a byte at a time from `read` into a buffer that never grows, so no copy of a
+/// typed secret is left behind in memory that is freed without being wiped, and nothing after the
+/// line is consumed. Standard input is not read through the standard library, whose buffer would
+/// keep everything typed. `None` at end of input before any byte.
+fn read_line_from(
+    read: &mut dyn FnMut(&mut [u8]) -> io::Result<usize>,
+) -> io::Result<Option<Zeroizing<String>>> {
+    let mut buf = Zeroizing::new(Vec::with_capacity(MAX_LINE.saturating_add(1)));
+    let mut byte = Zeroizing::new([0u8; 1]);
+    let mut ended = false;
+    loop {
+        if read(&mut *byte)? == 0 {
+            ended = true;
+            break;
         }
-        if buf.last() == Some(&b'\n') {
-            buf.pop();
-            if buf.last() == Some(&b'\r') {
-                buf.pop();
+        let [b] = *byte;
+        match b {
+            b'\n' => break,
+            b => {
+                if buf.len() >= MAX_LINE {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+                }
+                buf.push(b);
             }
-        } else if u64::try_from(buf.len()).unwrap_or(u64::MAX) > MAX_LINE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
         }
-        let text = String::from_utf8(core::mem::take(&mut *buf))
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "input is not UTF-8"))?;
-        Ok(Some(Zeroizing::new(text)))
+    }
+    if ended && buf.is_empty() {
+        return Ok(None);
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    if core::str::from_utf8(&buf).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input is not UTF-8",
+        ));
+    }
+    match String::from_utf8(core::mem::take(&mut *buf)) {
+        Ok(text) => Ok(Some(Zeroizing::new(text))),
+        Err(e) => {
+            let mut bytes = e.into_bytes();
+            bytes.zeroize();
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "input is not UTF-8",
+            ))
+        }
     }
 }
 
@@ -88,54 +126,10 @@ fn show(prompt: &str) {
     let _ = e.flush();
 }
 
-/// Terminal echo control through `stty` from a root-owned system directory. The standard
-/// library has no termios API and `unsafe` is not allowed outside hirz-sys.
-struct EchoOff {
-    stty: std::path::PathBuf,
-    saved: String,
-}
-
-fn stty(path: &std::path::Path, arg: &str) -> Command {
-    let mut cmd = Command::new(path);
-    cmd.arg(arg).stdin(Stdio::inherit()).stderr(Stdio::null());
-    cmd
-}
-
-fn succeeds(mut cmd: Command) -> bool {
-    cmd.status().is_ok_and(|s| s.success())
-}
-
-impl EchoOff {
-    fn start() -> Option<EchoOff> {
-        if !io::stdin().is_terminal() {
-            return None;
-        }
-        let path = hirz_uv::runner::resolve_tool("stty")?;
-        let out = stty(&path, "-g").output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let saved = String::from_utf8(out.stdout).ok()?.trim().to_string();
-        if saved.is_empty()
-            || saved.len() > 1024
-            || !saved
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b':')
-        {
-            return None;
-        }
-        succeeds(stty(&path, "-echo")).then_some(EchoOff { stty: path, saved })
-    }
-}
-
-impl Drop for EchoOff {
-    fn drop(&mut self) {
-        let restored = succeeds(stty(&self.stty, &self.saved));
-        show("\n");
-        if !restored {
-            show("hirz: could not turn typing display back on. Type `reset` and press Enter.\n");
-        }
-    }
+/// Echo off on standard input while a secret is typed; it comes back on when this is dropped and
+/// when Ctrl-C or another signal ends the process (hirz-sys, `EchoOff`).
+fn hide_typing() -> Option<hirz_sys::EchoOff> {
+    hirz_sys::EchoOff::start(io::stdin().as_fd()).ok()
 }
 
 pub const NOTE_TERMINAL: &str =
@@ -154,11 +148,11 @@ pub fn visibility_note(echo_off: bool, stdin_is_terminal: bool) -> Option<&'stat
 impl Prompter for TerminalPrompter {
     fn line(&mut self, prompt: &str) -> io::Result<Option<String>> {
         show(prompt);
-        Ok(self.read_raw()?.map(|s| s.to_string()))
+        Ok(self.read_raw()?.map(|mut text| core::mem::take(&mut *text)))
     }
 
     fn secret(&mut self, prompt: &str) -> io::Result<Option<Zeroizing<String>>> {
-        let echo = EchoOff::start();
+        let echo = hide_typing();
         if !self.warned_visible
             && let Some(note) = visibility_note(echo.is_some(), io::stdin().is_terminal())
         {
@@ -168,7 +162,104 @@ impl Prompter for TerminalPrompter {
         }
         show(prompt);
         let r = self.read_raw();
+        let hid = echo.as_ref().is_some_and(hirz_sys::EchoOff::turned_off);
         drop(echo);
+        if hid {
+            show("\n");
+        }
         r
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+
+    /// A reader that hands out one byte per call and counts what it gave.
+    struct Source<'a> {
+        data: &'a [u8],
+        taken: usize,
+        calls: usize,
+        sizes: Vec<usize>,
+    }
+
+    impl<'a> Source<'a> {
+        fn new(data: &'a [u8]) -> Self {
+            Source {
+                data,
+                taken: 0,
+                calls: 0,
+                sizes: Vec::new(),
+            }
+        }
+
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            self.sizes.push(buf.len());
+            match self.data.get(self.taken) {
+                Some(b) => {
+                    buf[0] = *b;
+                    self.taken += 1;
+                    Ok(1)
+                }
+                None => Ok(0),
+            }
+        }
+    }
+
+    fn line(data: &[u8]) -> (io::Result<Option<Zeroizing<String>>>, usize) {
+        let mut source = Source::new(data);
+        let r = read_line_from(&mut |buf| source.read(buf));
+        (r, source.taken)
+    }
+
+    #[test]
+    fn a_line_is_read_a_byte_at_a_time_and_nothing_after_it_is_taken() {
+        let (r, taken) = line(b"first\nsecond\n");
+        assert_eq!(r.unwrap().unwrap().as_str(), "first");
+        assert_eq!(taken, 6, "the second line is still on standard input");
+        let (r, _) = line(b"with crlf\r\nnext");
+        assert_eq!(r.unwrap().unwrap().as_str(), "with crlf");
+        let (r, taken) = line(b"no newline");
+        assert_eq!(r.unwrap().unwrap().as_str(), "no newline");
+        assert_eq!(taken, 10);
+        assert!(line(b"").0.unwrap().is_none());
+        assert_eq!(line(b"\n").0.unwrap().unwrap().as_str(), "");
+
+        let mut source = Source::new(b"pin\n");
+        let _ = read_line_from(&mut |buf| source.read(buf));
+        assert!(source.sizes.iter().all(|n| *n == 1), "{:?}", source.sizes);
+    }
+
+    #[test]
+    fn long_and_malformed_lines_are_refused() {
+        let mut long = vec![b'a'; MAX_LINE];
+        long.push(b'\n');
+        assert_eq!(line(&long).0.unwrap().unwrap().len(), MAX_LINE);
+        let mut too_long = vec![b'a'; MAX_LINE + 1];
+        too_long.push(b'\n');
+        assert_eq!(
+            line(&too_long).0.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            line(b"caf\xe9\n").0.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            line("caf\u{e9}\n".as_bytes()).0.unwrap().unwrap().as_str(),
+            "caf\u{e9}"
+        );
+    }
+
+    #[test]
+    fn a_read_error_is_passed_on() {
+        let r = read_line_from(&mut |_| Err(io::Error::other("boom")));
+        assert_eq!(r.unwrap_err().to_string(), "boom");
     }
 }

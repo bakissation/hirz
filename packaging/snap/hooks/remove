@@ -1,4 +1,4 @@
 #!/bin/sh
 # DRAFT: deletes the host files that "hirz.setup-system install" wrote, if any.
 set -eu
-"$SNAP/bin/setup-system" remove || true
+"$SNAP/bin/setup-system" remove --no-service || true

@@ -13,9 +13,9 @@ packages; see "Snap and Flatpak" in [docs/uhid.md](../../docs/uhid.md).
 | Piece | Packages install it as | Why it matters |
 |---|---|---|
 | Root broker with `/dev/uhid` | system service, socket-activated, sandboxed by systemd directives | creates the virtual security key |
-| udev rules `70-hirz.rules`, `72-hirz.rules` | `/usr/lib/udev/rules.d` | the hidraw node belongs to the user who created it, no seat ACL |
+| udev rules `70-hirz.rules`, `72-hirz.rules`, `99-zzz-hirz.rules` | `/usr/lib/udev/rules.d` | the hidraw node belongs to the user who created it, no seat ACL |
 | polkit action `dev.hirz.authenticate` | `/usr/share/polkit-1/actions` | password approval |
-| `zenity`, `pkcheck`, `fprintd-verify` | distribution packages | hirz runs them only from root-owned system directories (`/usr/bin` and similar), never from `PATH` |
+| `zenity` (4 or newer), `pkcheck`, `fprintd-verify` | distribution packages | hirz runs them only from root-owned system directories (`/usr/bin` and similar), never from `PATH` |
 | systemd user unit `hirzd.service` | `/usr/lib/systemd/user` | starts the user daemon with the desktop session |
 | Firefox native messaging manifest | `/usr/lib/mozilla/native-messaging-hosts`, root-owned | the extension path; a per-user manifest is deliberately not used |
 
@@ -67,6 +67,13 @@ hirz init
 systemctl --user enable --now hirzd
 ```
 
+The broker's service is installed disabled (`install-mode: disable`), so its world-writable
+socket does not exist until `setup-system install` has written the udev rules that bind each
+device node to its creator and has started it (`snap start --enable hirz.uhid-broker`);
+`setup-system remove` stops and disables it before it deletes the rules. The broker itself
+also refuses every client while one of the three hirz rule files is missing or masked, and serves only users with an
+active session on a seat (`docs/uhid.md`, "Socket permissions").
+
 `setup-system install` writes the same files the packages install, under `/etc` where the
 host reads them there (`/etc/udev/rules.d`, `/etc/systemd/user`, `/etc/modules-load.d`, and
 `/etc/polkit-1/actions` with polkit 126 or newer), and the polkit action under
@@ -91,7 +98,13 @@ Trade-offs of the classic draft:
   automatically; it is kept manual because a hook that writes host configuration outside
   the snap's own directories is the kind of change store reviewers are expected to question.
 - Refreshes are automatic. The manifest points to `/snap/hirz/current/bin/hirz-nmh` and the
-  user unit to `/snap/bin/hirz.hirzd`, so they follow refreshes without rerunning setup.
+  user unit starts `/snap/hirz/current/bin/hirzd` directly (with `HIRZ_BROKER_SOCKET` set in
+  the unit), so they follow refreshes without rerunning setup. The unit does not go through
+  `/snap/bin/hirz.hirzd`: `snap run` executes the setuid-root `snap-confine`, which the
+  unit's `NoNewPrivileges=yes` would stop from gaining privileges. Whether `snap-confine`
+  runs at all for a classic snap was not tested; starting the patched binary directly avoids
+  the question, and hirzd sets `NO_NEW_PRIVS` itself after it starts. This draft has not been
+  installed on a machine, so check it first when a snap is built for the first time.
 - Do not install the snap and a distribution package of hirz at the same time.
 
 ## What the store review needs

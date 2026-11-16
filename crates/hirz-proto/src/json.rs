@@ -2,6 +2,7 @@
 //! mark, duplicate object keys, lone surrogate escapes, raw control characters, non-finite
 //! numbers and anything after the top-level value except whitespace.
 
+use crate::wipe::{self, Text};
 use crate::{Error, Result};
 use core::fmt;
 
@@ -77,6 +78,8 @@ impl From<i64> for Number {
     }
 }
 
+/// A parsed value wipes the text it holds (strings and object keys) when it is dropped: what a
+/// file or a message carries can be a secret.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
     Null,
@@ -86,6 +89,21 @@ pub enum Json {
     Array(Vec<Json>),
     /// An object with members in document order and unique keys.
     Object(Vec<(String, Json)>),
+}
+
+impl Drop for Json {
+    fn drop(&mut self) {
+        match self {
+            Json::String(s) => wipe::string(s),
+            Json::Object(members) => {
+                for (key, _) in members.iter_mut() {
+                    wipe::string(key);
+                }
+            }
+            // Values inside an array or object are dropped, and so wiped, one by one.
+            Json::Null | Json::Bool(_) | Json::Number(_) | Json::Array(_) => {}
+        }
+    }
 }
 
 impl Json {
@@ -194,6 +212,25 @@ pub fn parse(input: &[u8], limits: &Limits) -> Result<Json> {
     Ok(value)
 }
 
+/// Object members being collected. The values wipe themselves; the keys are wiped here when the
+/// object is not finished (a syntax error, a duplicate key, a limit).
+#[derive(Default)]
+struct Members(Vec<(String, Json)>);
+
+impl Members {
+    fn finish(mut self) -> Vec<(String, Json)> {
+        core::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for Members {
+    fn drop(&mut self) {
+        for (key, _) in self.0.iter_mut() {
+            wipe::string(key);
+        }
+    }
+}
+
 struct Parser<'a> {
     s: &'a [u8],
     pos: usize,
@@ -252,7 +289,7 @@ impl<'a> Parser<'a> {
         match self.peek().ok_or(Error::Truncated)? {
             b'{' => self.object(depth),
             b'[' => self.array(depth),
-            b'"' => Ok(Json::String(self.string()?)),
+            b'"' => Ok(Json::String(self.string()?.into_string())),
             b't' => self.literal(b"true", Json::Bool(true)),
             b'f' => self.literal(b"false", Json::Bool(false)),
             b'n' => self.literal(b"null", Json::Null),
@@ -293,11 +330,11 @@ impl<'a> Parser<'a> {
     fn object(&mut self, depth: usize) -> Result<Json> {
         let depth = self.enter(depth)?;
         self.expect(b'{')?;
-        let mut members = Vec::new();
+        let mut members = Members::default();
         self.skip_ws();
         if self.peek() == Some(b'}') {
             self.bump();
-            return Ok(Json::Object(members));
+            return Ok(Json::Object(members.finish()));
         }
         loop {
             self.skip_ws();
@@ -313,7 +350,7 @@ impl<'a> Parser<'a> {
             self.expect(b':')?;
             self.skip_ws();
             let value = self.value(depth)?;
-            members.push((key, value));
+            members.0.push((key.into_string(), value));
             self.skip_ws();
             match self.next()? {
                 b',' => {}
@@ -321,12 +358,12 @@ impl<'a> Parser<'a> {
                 _ => return Err(Error::Malformed),
             }
         }
-        let mut keys: Vec<&str> = members.iter().map(|(k, _)| k.as_str()).collect();
+        let mut keys: Vec<&str> = members.0.iter().map(|(k, _)| k.as_str()).collect();
         keys.sort_unstable();
         if keys.windows(2).any(|w| matches!(w, [a, b] if a == b)) {
             return Err(Error::DuplicateKey);
         }
-        Ok(Json::Object(members))
+        Ok(Json::Object(members.finish()))
     }
 
     fn hex4(&mut self) -> Result<u16> {
@@ -341,7 +378,7 @@ impl<'a> Parser<'a> {
         Ok(unit)
     }
 
-    fn escape(&mut self, out: &mut String) -> Result<()> {
+    fn escape(&mut self, out: &mut Text) -> Result<()> {
         let c = match self.next()? {
             b'"' => '"',
             b'\\' => '\\',
@@ -376,9 +413,25 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn string(&mut self) -> Result<String> {
+    /// Bytes from here to the closing quote. A decoded string is never longer than its source (an
+    /// escape is at least two bytes and stands for at most four), so a buffer of this size never
+    /// grows: growth would leave copies of a secret behind in freed memory.
+    fn string_bound(&self) -> usize {
+        let rest = self.s.get(self.pos..).unwrap_or_default();
+        let mut escaped = false;
+        for (i, b) in rest.iter().enumerate() {
+            match *b {
+                b'"' if !escaped => return i,
+                b'\\' => escaped = !escaped,
+                _ => escaped = false,
+            }
+        }
+        rest.len()
+    }
+
+    fn string(&mut self) -> Result<Text> {
         self.expect(b'"')?;
-        let mut out = String::new();
+        let mut out = Text::with_capacity(self.string_bound());
         loop {
             let start = self.pos;
             while matches!(self.peek(), Some(b) if b != b'"' && b != b'\\' && b >= 0x20) {
@@ -516,6 +569,74 @@ mod tests {
     }
 
     #[test]
+    fn a_parsed_value_wipes_the_text_it_holds_when_it_is_dropped() {
+        let doc = p(r#"{"key":"secret","list":["abc","de"],"n":1,"ok":true}"#).unwrap();
+        assert_eq!(
+            wipe::take_wiped(),
+            0,
+            "nothing is wiped while the value is in use"
+        );
+        drop(doc);
+        // key, secret, list, abc, de, n, ok
+        assert_eq!(wipe::take_wiped(), 3 + 6 + 4 + 3 + 2 + 1 + 2);
+
+        let copy = p(r#"["abcd"]"#).unwrap().clone();
+        let _ = wipe::take_wiped();
+        drop(copy);
+        assert_eq!(wipe::take_wiped(), 4, "a clone wipes its own copy");
+    }
+
+    #[test]
+    fn a_parse_that_fails_wipes_what_it_had_built() {
+        let limits = Limits::default();
+        let failing = |text: &str, expected: Error| {
+            let _ = wipe::take_wiped();
+            assert_eq!(
+                parse(text.as_bytes(), &limits).unwrap_err(),
+                expected,
+                "{text}"
+            );
+            wipe::take_wiped()
+        };
+        // An earlier item and the string that was being read.
+        assert_eq!(
+            failing(r#"["hunter2", "unterminated"#, Error::Truncated),
+            7 + 12
+        );
+        // The text read before a bad escape.
+        assert_eq!(failing(r#""abc\x""#, Error::Malformed), 3);
+        assert_eq!(failing(r#"["abc", "de\ud800"]"#, Error::Malformed), 3 + 2);
+        // A key whose value never comes.
+        assert_eq!(failing(r#"{"secretkey": }"#, Error::Malformed), 9);
+        // Members collected before a duplicate key, keys and values.
+        assert_eq!(
+            failing(r#"{"a":"s1","a":"s2"}"#, Error::DuplicateKey),
+            1 + 2 + 1 + 2
+        );
+        // A complete value followed by trailing bytes.
+        assert_eq!(failing(r#""secret" x"#, Error::TrailingBytes), 6);
+        // Nested values dropped by a depth limit.
+        let shallow = Limits {
+            max_depth: 2,
+            ..Limits::default()
+        };
+        let _ = wipe::take_wiped();
+        assert_eq!(
+            parse(br#"[["abc"],[[1]]]"#, &shallow).unwrap_err(),
+            Error::LimitExceeded
+        );
+        assert_eq!(wipe::take_wiped(), 3);
+    }
+
+    #[test]
+    fn a_finished_string_is_handed_over_without_a_wipe() {
+        let _ = wipe::take_wiped();
+        let value = p(r#""kept""#).unwrap();
+        assert_eq!(value.as_str(), Some("kept"));
+        assert_eq!(wipe::take_wiped(), 0);
+    }
+
+    #[test]
     fn basic_values() {
         assert_eq!(p("null").unwrap(), Json::Null);
         assert_eq!(p(" true ").unwrap(), Json::Bool(true));
@@ -603,6 +724,37 @@ mod tests {
         assert!(parse(b"\"\xff\"", &Limits::default()).is_err());
         assert!(parse(b"\"\xed\xa0\x80\"", &Limits::default()).is_err());
         assert!(parse(b"\xef\xbb\xbfnull", &Limits::default()).is_err());
+    }
+
+    #[test]
+    fn a_string_is_built_in_a_buffer_that_never_grows() {
+        let plain = "k".repeat(10_000);
+        let doc = format!("[\"{plain}\", \"x\"]");
+        let parsed = p(&doc).unwrap();
+        let items = parsed.as_array().unwrap();
+        assert!(matches!(items.first(), Some(Json::String(_))));
+        if let Some(Json::String(s)) = items.first() {
+            assert_eq!(s.len(), 10_000);
+            assert_eq!(
+                s.capacity(),
+                s.len(),
+                "a growing buffer leaves copies of the text behind"
+            );
+        }
+
+        let escaped = format!("\"{}\\n\\u00e9\\ud83d\\ude00\"", "a".repeat(3000));
+        let parsed = p(&escaped).unwrap();
+        assert!(matches!(parsed, Json::String(_)));
+        if let Json::String(s) = &parsed {
+            assert!(s.ends_with("\n\u{e9}\u{1f600}"));
+            assert!(s.capacity() <= escaped.len());
+            assert!(s.capacity() >= s.len());
+        }
+
+        for tricky in [r#""a\\""#, r#""\\\"b""#, r#""\\\\\\""#] {
+            assert!(p(tricky).is_ok(), "{tricky}");
+        }
+        assert_eq!(p(r#""a\\""#).unwrap(), Json::from("a\\"));
     }
 
     #[test]

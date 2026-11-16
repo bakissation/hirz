@@ -1,5 +1,6 @@
 //! base64url without padding (RFC 4648 section 5), with a strict decoder.
 
+use crate::wipe::Buffer;
 use crate::{Error, Result};
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -44,7 +45,7 @@ pub fn encode(input: &[u8]) -> String {
 
 /// Decodes unpadded base64url; rejects padding, whitespace and non-zero trailing bits.
 pub fn decode(input: &str) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(input.len());
+    let mut out = Buffer::with_capacity(input.len());
     for chunk in input.as_bytes().chunks(4) {
         match *chunk {
             [a, b] => {
@@ -71,13 +72,31 @@ pub fn decode(input: &str) -> Result<Vec<u8>> {
             _ => return Err(Error::Malformed),
         }
     }
-    Ok(out)
+    Ok(out.into_vec())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::wipe;
+
+    #[test]
+    fn a_decode_that_fails_wipes_the_bytes_it_had_made() {
+        let _ = wipe::take_wiped();
+        assert!(decode("QUJDRA!!").is_err());
+        assert_eq!(
+            wipe::take_wiped(),
+            3,
+            "ABC was decoded before the bad symbol"
+        );
+        assert_eq!(decode("QUJD").unwrap(), b"ABC");
+        assert_eq!(
+            wipe::take_wiped(),
+            0,
+            "a result that is returned is not wiped"
+        );
+    }
 
     #[test]
     fn rfc4648_vectors() {

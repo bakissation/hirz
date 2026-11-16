@@ -9,12 +9,14 @@
 # Output: dist/hirz-VERSION-ARCH-linux/ (binaries and licenses), a .tar.gz of that folder and
 # a .sha256 file next to it. --auditable embeds the dependency list (crate names, versions,
 # sources) in a .dep-v0 section of each binary; read it with cargo audit bin or rust-audit-info.
+# HIRZ_REQUIRE_CLEAN_PATHS=1 (set by CI) turns a local path found in a binary into an error.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
+umask 022
 
 usage() {
-  sed -n '2,11s/^# \{0,1\}//p' "$0"
+  sed -n '2,12s/^# \{0,1\}//p' "$0"
 }
 
 verify=0
@@ -76,10 +78,13 @@ unset RUSTFLAGS
 sep=$'\x1f'
 CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$ROOT=/build/hirz$sep--remap-path-prefix=$cargo_home=/cargo"
 export CARGO_ENCODED_RUSTFLAGS
-# AWS-LC is C code compiled by aws-lc-sys; keep its __FILE__ strings free of local paths too.
+# AWS-LC is C code compiled by aws-lc-sys; keep its __FILE__ strings free of local paths too, and
+# turn on the hardening that Debian's compiler does not enable by default: stack protectors and
+# fortified libc calls (the release is built in a Debian container).
 prefix_map="-ffile-prefix-map=$ROOT=/build/hirz -ffile-prefix-map=$cargo_home=/cargo"
-export CFLAGS="${CFLAGS:+$CFLAGS }$prefix_map"
-export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$prefix_map"
+hardening="-fstack-protector-strong -D_FORTIFY_SOURCE=2"
+export CFLAGS="${CFLAGS:+$CFLAGS }$prefix_map $hardening"
+export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$prefix_map $hardening"
 
 build() {
   "${CARGO_BUILD[@]}" --release --locked "${PKGS[@]}" --target-dir "$1"
@@ -142,7 +147,10 @@ for b in "${BINS[@]}"; do
     fi
   done
 done
-[ "$leaks" = 0 ] || echo "build-release: local paths in binaries make the build machine-dependent" >&2
+if [ "$leaks" != 0 ]; then
+  echo "build-release: local paths in binaries make the build machine-dependent" >&2
+  [ "${HIRZ_REQUIRE_CLEAN_PATHS:-0}" != 1 ] || exit 1
+fi
 
 find "$out" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \

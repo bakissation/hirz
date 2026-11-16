@@ -42,7 +42,7 @@ pub fn wipe(v: &mut Json) {
 }
 
 /// Parses JSON, then runs `f` on the tree and wipes it whatever the outcome.
-fn with_json<T>(
+pub fn with_json<T>(
     data: &[u8],
     limits: &Limits,
     not_json: &str,
@@ -76,16 +76,20 @@ pub fn lenient_base64(s: &str) -> Option<Zeroizing<Vec<u8>>> {
     hirz_proto::base64url::decode(&url).ok().map(Zeroizing::new)
 }
 
-fn opt_text<'a>(o: &'a Json, key: &str) -> Result<Option<&'a str>, String> {
+pub fn opt_text<'a>(o: &'a Json, key: &str) -> Result<Option<&'a str>, String> {
+    opt_text_up_to(o, key, MAX_STRING_LEN)
+}
+
+pub fn opt_text_up_to<'a>(o: &'a Json, key: &str, max: usize) -> Result<Option<&'a str>, String> {
     match o.get(key) {
         None | Some(Json::Null) => Ok(None),
-        Some(Json::String(s)) if s.len() <= MAX_STRING_LEN => Ok(Some(s)),
+        Some(Json::String(s)) if s.len() <= max => Ok(Some(s)),
         Some(Json::String(_)) => Err(format!("the field {key} is too long")),
         Some(_) => Err(format!("the field {key} is not text")),
     }
 }
 
-fn non_empty(s: Option<&str>) -> Option<String> {
+pub fn non_empty(s: Option<&str>) -> Option<String> {
     s.filter(|v| !v.is_empty()).map(str::to_string)
 }
 
@@ -105,12 +109,46 @@ fn base64_field(o: &Json, key: &str, max: usize) -> Result<Zeroizing<Vec<u8>>, S
     Ok(b)
 }
 
-fn site_id(raw: &str) -> Result<String, String> {
+const SSH_PREFIX: &str = "ssh:";
+const MACHINE_LOGIN: &str =
+    "its site id logs in to a computer or unlocks a disk, which hirz refuses to serve";
+
+fn printable_ascii(s: &str) -> bool {
+    s.bytes().all(|b| (0x20..=0x7e).contains(&b))
+}
+
+/// A site id from another program's file: a host name (lowercased), or an OpenSSH security key id
+/// (`ssh:` or `ssh:NAME`, case kept because the name is chosen by the user and compared as is).
+pub fn site_id(raw: &str) -> Result<String, String> {
+    if machine_login_id(raw) {
+        return Err(MACHINE_LOGIN.into());
+    }
+    if raw.starts_with(SSH_PREFIX) && raw.len() <= MAX_STRING_LEN && printable_ascii(raw) {
+        return Ok(raw.to_string());
+    }
     let rp_id = raw.to_ascii_lowercase();
     if !hirz_uv::config::valid_rp_id(&rp_id) {
         return Err("its site id is not a valid domain name".into());
     }
     Ok(rp_id)
+}
+
+/// A site id from a hirz export, kept exactly: hirz stores whatever a security key client sent,
+/// except machine login ids, which it refuses to serve. Printable ASCII only.
+pub fn exact_site_id(raw: &str) -> Result<String, String> {
+    if machine_login_id(raw) {
+        return Err(MACHINE_LOGIN.into());
+    }
+    if raw.is_empty() || raw.len() > MAX_STRING_LEN || !printable_ascii(raw) {
+        return Err("its site id is not text hirz can keep as it is".into());
+    }
+    Ok(raw.to_string())
+}
+
+/// The engine refuses these ids (`pam://HOST`, `io.systemd.home`, `io.systemd.cryptsetup`), so a
+/// passkey for one could be stored but never used; the list is the engine's own.
+fn machine_login_id(raw: &str) -> bool {
+    hirz_core::machine_login::is_machine_login_rp_id(raw)
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -234,9 +272,8 @@ pub fn parse_utc(s: &str) -> Option<u64> {
 }
 
 /// A creation time from the file, or `now` when it is missing or in the future.
-fn creation_time(at: Option<u64>, now: u64) -> u64 {
-    at.filter(|t| *t > 0 && *t <= now.saturating_add(86_400))
-        .unwrap_or(now)
+pub fn creation_time(at: Option<u64>, now: u64) -> u64 {
+    at.filter(|t| *t > 0).map_or(now, |t| t.min(now))
 }
 
 /// Printable form of a short value from the file, for messages.
@@ -279,6 +316,71 @@ mod tests {
         ] {
             assert_eq!(parse_utc(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn site_ids() {
+        assert_eq!(site_id("Example.COM").unwrap(), "example.com");
+        assert_eq!(site_id("ssh:").unwrap(), "ssh:");
+        assert_eq!(site_id("ssh:Work Key").unwrap(), "ssh:Work Key");
+        for bad in [
+            "",
+            "ssh:\u{1b}[2J",
+            "ssh:caf\u{e9}",
+            "a_b.com",
+            "pam://host",
+            "x:y",
+        ] {
+            assert!(site_id(bad).is_err(), "{bad:?}");
+        }
+        for machine in [
+            "pam://host",
+            "PAM://host",
+            "io.systemd.home",
+            "IO.Systemd.Cryptsetup",
+            "io.systemd.cryptsetup",
+        ] {
+            assert_eq!(site_id(machine).unwrap_err(), MACHINE_LOGIN, "{machine}");
+        }
+        assert!(site_id("io.systemd.home.example.com").is_ok());
+        assert!(site_id(&format!("ssh:{}", "a".repeat(MAX_STRING_LEN))).is_err());
+    }
+
+    #[test]
+    fn exact_site_ids_keep_what_hirz_stores() {
+        for ok in [
+            "Example.COM",
+            "ssh:",
+            "ssh:Work Key",
+            "io.example.app",
+            "a:b",
+        ] {
+            assert_eq!(exact_site_id(ok).unwrap(), ok);
+        }
+        for bad in [
+            "",
+            "pam://host",
+            "PAM://host",
+            "io.systemd.home",
+            "io.systemd.cryptsetup",
+            "tab\t",
+            "caf\u{e9}",
+            "\u{1b}",
+        ] {
+            assert!(exact_site_id(bad).is_err(), "{bad:?}");
+        }
+        assert!(exact_site_id(&"a".repeat(MAX_STRING_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn creation_times_never_lie_about_the_future() {
+        assert_eq!(creation_time(Some(100), 500), 100);
+        assert_eq!(creation_time(Some(500), 500), 500);
+        assert_eq!(creation_time(Some(501), 500), 500);
+        assert_eq!(creation_time(Some(500 + 86_400), 500), 500);
+        assert_eq!(creation_time(Some(u64::MAX), 500), 500);
+        assert_eq!(creation_time(Some(0), 500), 500);
+        assert_eq!(creation_time(None, 500), 500);
     }
 
     #[test]

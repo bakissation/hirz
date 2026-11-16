@@ -1,21 +1,26 @@
 # Fuzzing
 
-Every parser that reads untrusted bytes is a pure function over `&[u8]` (or `&str`) with
-explicit size limits, so each one is a libFuzzer target as is. The targets live in `fuzz/`,
-a separate cargo workspace (package `hirz-fuzz`) that is never built by the main workspace
-and never shipped. It is the only place where `libfuzzer-sys` is a dependency.
+The parsers of untrusted bytes are pure functions over `&[u8]` (or `&str`) with explicit size
+limits, so they are libFuzzer targets as they are, and the tables below list every target with
+its entry point. The targets live in `fuzz/`, a separate cargo workspace (package
+`hirz-fuzz`) that is never built by the main workspace and never shipped. It is the only place
+where `libfuzzer-sys` is a dependency. Because it is a separate workspace, `cargo deny` and
+`cargo vet` do not cover it; that is acceptable because it holds no secret, nothing from it
+is shipped, and CI runs it with a read-only token. Its lock file is `fuzz/Cargo.lock`.
 
 ## Setup
 
 cargo-fuzz needs a nightly toolchain (for `-Zsanitizer=address` and SanitizerCoverage):
 
 ```sh
-rustup toolchain install nightly --profile minimal
+rustup toolchain install nightly-2026-11-12 --profile minimal
 cargo install cargo-fuzz --locked
 ```
 
 The repository pins a stable toolchain in `rust-toolchain.toml`, so the script always calls
-`cargo +nightly`. Set `FUZZ_TOOLCHAIN` to use another nightly.
+`cargo +TOOLCHAIN`, where the toolchain is a nightly pinned by date in `scripts/fuzz.sh` and
+in `.github/workflows/ci.yml` (`scripts/check.sh toolchain` fails when the two differ). Move the
+pin forward in a reviewed change; set `FUZZ_TOOLCHAIN` to try another nightly locally.
 
 ## Running
 
@@ -35,20 +40,31 @@ default 2), `FUZZ_RSS_MB` (default 1024), `CARGO_BUILD_JOBS` (default 3).
 
 Every run uses `-rss_limit_mb=1024`, a 10 second per-input timeout and a per-target
 `-max_len`: 7609 bytes for CTAP2 inputs (the largest CTAPHID message, 57 + 128 x 59),
-262144 for JSON and Bitwarden exports, 65536 for CBOR, authenticatorData and KeePassXC
+262144 for JSON, Bitwarden and CXF exports, 65536 for CBOR, authenticatorData and KeePassXC
 files, 16640 for the CTAPHID transport script (256 reports), 8192 otherwise.
 
-Inputs are read from `fuzz/seeds/<target>` (checked in) and `fuzz/corpus/<target>`
-(generated, ignored by git). Crashing inputs land in `fuzz/artifacts/<target>/` (ignored
+Inputs are read from `fuzz/seeds/<target>` (checked in; every target has seeds) and
+`fuzz/corpus/<target>` (generated, ignored by git). Crashing inputs land in `fuzz/artifacts/<target>/` (ignored
 by git). The build enables debug assertions and overflow checks.
+
+The nightly CI job writes the logs to files, not to the public job log. A crashing input is a
+ready denial of service for a public repository, so the job uploads `fuzz/artifacts/` only
+encrypted to the OpenPGP key in the repository variable `FUZZ_CRASH_GPG_PUBLIC_KEY`
+(`gpg --decrypt fuzz-artifacts.tar.gpg | tar -x`); without the variable nothing is uploaded and
+the job log says so.
 
 ## Seeds
 
 `fuzz/examples/gen_seeds.rs` builds small valid inputs with the crates' own encoders
 (CTAP2 requests, CTAPHID message scripts, COSE keys, authenticatorData, WebAuthn options and
-envelopes) and takes the W3C WebAuthn Level 3 test vectors from
-`crates/hirz-proto/tests/common/vectors.rs`. The output is checked in under `fuzz/seeds/`
-and stays far below 200 KB. Rerun `scripts/fuzz.sh seeds` after a format change.
+envelopes, a CXF export written by hirz's own exporter, a passphrase envelope, hex strings),
+takes the W3C WebAuthn Level 3 test vectors from `crates/hirz-proto/tests/common/vectors.rs`
+and a provider's CXF export from `crates/hirz-cli/tests/fixtures/provider-export.json`. The
+output is checked in under `fuzz/seeds/` and stays far below 200 KB. Rerun
+`scripts/fuzz.sh seeds` after a format change: it deletes `fuzz/seeds/` and writes it again,
+so a seed that is not in `gen_seeds.rs` is lost. The envelope seeds are sealed with a random
+nonce, so each run writes different bytes for them. A target without a directory under
+`fuzz/seeds/` still runs: `scripts/fuzz.sh` creates the empty folders it needs.
 
 ## Targets
 
@@ -65,6 +81,7 @@ Properties are checked with `assert!`, so a violated property is reported like a
 | `attestation` | `attestation::parse_webauthn`, `parse_ctap` | `attStmt` is a map; a `none` statement re-encoded in both forms parses back equal |
 | `json` | `json::parse` | `parse(v.to_string()) == v` and the writer is idempotent |
 | `base64url` | `base64url::decode`, `encode` | only canonical text decodes (`encode(decode(s)) == s`); `decode(encode(b)) == b` |
+| `hex` | `hex::decode`, `decode_array`, `encode` | only lowercase, even-length text decodes (`encode(decode(s)) == s`); `decode(encode(b)) == b` |
 | `client_data` | `client_data::serialize` with arbitrary origin, top origin and challenge | output is valid JSON with exactly the given members |
 
 ### hirz-ctap
@@ -86,11 +103,10 @@ Properties are checked with `assert!`, so a violated property is reported like a
 | `webauthn_prepare` | `prepare_create`, `prepare_get` on any JSON (first byte picks ceremony and origin), then `registration_response` / `authentication_response` | clientDataJSON parses and its SHA-256 is the request hash; the RP ID validates for the origin; a fake engine's answer to an accepted plan is always accepted by the response builder |
 | `webauthn_handle` | `handle` on any JSON envelope with a fake engine | every reply is a valid envelope (`v`, `id` null or a safe integer, `ok`, and `error`/`message` on failure) that the strict JSON reader accepts |
 
-### hirz-vault and hirz-uv
+### hirz-uv
 
 | Target | Entry point | Checks |
 |---|---|---|
-| `vault_backup` | `import_backup` with a fixed recovery phrase and no passphrase | no panic in the header reader and AEAD rejection path (no Argon2 runs) |
 | `uv_config` | `config::parse_config` | methods non-empty and unique, RP ids valid and lowercase, timeout and rate within bounds |
 | `uv_pin_verifier` | `pin::parse_verifier` | the PIN verifier file has one spelling: `serialize(parse(x)) == x` |
 | `uv_tool_output` | `fprint::classify_verify`, `fprint::has_enrolled_fingers`, `polkit::parse_stat_start_time`, `polkit::parse_status_uid`, `runner::passwd_name_for_uid` | a fingerprint match needs exit status 0 and a `verify-match (done)` line; listed fingers need exit status 0; a passwd name is always a valid user name |
@@ -115,15 +131,18 @@ what they decoded.
 | `vault_record` | `CredentialRecord::decode` (version 1 and 2 bodies) | a decoded record always encodes, and the encoding is a fixed point of decode then encode |
 | `vault_event` | `Event::decode` (body and author tag, all five event kinds) | same as `vault_record`, for events with their author tag |
 
-### hirz-cli import parsers
+### hirz-cli file readers
 
-`hirz` has no library target; `fuzz/src/lib.rs` includes `crates/hirz-cli/src/foreign/` as a
-module. Those parsers use only hirz library crates and the strict JSON reader of hirz-proto.
+`hirz` has no library target; `fuzz/src/lib.rs` includes `crates/hirz-cli/src/foreign/`,
+`cxf.rs`, `envelope.rs` and `ui.rs` as modules, from the same source files. The import
+parsers use only hirz library crates and the strict JSON reader of hirz-proto.
 
 | Target | Entry point | Checks |
 |---|---|---|
-| `import_bitwarden` | `bitwarden::read`, `Protected::decrypt_with` with a fixed key (no KDF runs), `bitwarden::read_decrypted`, `bitwarden::credential_id` | every imported record validates, is ES256 with a key that parses, a valid RP id and a creation time not in the future; credential ids are 1 to 1023 bytes |
-| `import_keepassxc` | `keepassxc::read` | every imported record validates, is ES256 or EdDSA, discoverable and backup eligible, with a valid RP id |
+| `import_bitwarden` | `bitwarden::read`, `Protected::decrypt_with` with a fixed key (no KDF runs), `bitwarden::read_decrypted`, `bitwarden::credential_id` | every imported record validates, is ES256 with a key that parses, a valid RP id (or an OpenSSH key id) and a creation time not in the future; credential ids are 1 to 1023 bytes |
+| `import_keepassxc` | `keepassxc::read` | every imported record validates, is ES256 or EdDSA, discoverable and backup eligible, with a valid RP id (or an OpenSSH key id) |
+| `cxf_parse` | `cxf::parse` | at most `MAX_PASSKEYS` passkeys; every ready record validates and has a site id that is plain printable text |
+| `envelope_open` | `envelope::params`, `open`, `seal` | `is_envelope` is the magic prefix; accepted parameters stay within the import limit; inputs that ask for little Argon2 work are opened without a panic; a sealed input opens with its passphrase and not with another |
 
 ## Triage
 

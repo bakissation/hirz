@@ -1,8 +1,10 @@
 //! Socket queries: SO_PEERCRED and the type of an inherited socket.
 
+use std::cell::Cell;
 use std::io;
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::sync::{Mutex, MutexGuard};
 
 /// Recorded by the kernel at `connect` time; the peer cannot forge them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +47,54 @@ pub fn peer_credentials<S: AsFd>(socket: &S) -> io::Result<PeerCredentials> {
         uid: cred.uid,
         gid: cred.gid,
     })
+}
+
+/// The effective uid of this process.
+pub fn effective_uid() -> u32 {
+    // SAFETY: geteuid cannot fail and takes no arguments.
+    unsafe { libc::geteuid() }
+}
+
+/// Sets the umask of the whole process and returns the previous one.
+pub fn set_umask(mask: u32) -> u32 {
+    // SAFETY: umask cannot fail; it takes and returns a plain integer.
+    unsafe { libc::umask(mask & 0o777) }
+}
+
+/// Runs `f` with the umask set to `mask` and restores the old one afterwards, so a caller can
+/// create a file or directory with exactly the mode it asks for, without a `chmod` by path that
+/// would follow a symbolic link swapped in meanwhile. The umask belongs to the whole process:
+/// other threads that create files meanwhile see it too. Calls from different threads wait for
+/// each other; a call made inside `f` is fine.
+pub fn with_umask<T>(mask: u32, f: impl FnOnce() -> T) -> T {
+    thread_local! {
+        static INSIDE: Cell<bool> = const { Cell::new(false) };
+    }
+    struct Section {
+        previous: u32,
+        outermost: Option<MutexGuard<'static, ()>>,
+    }
+    impl Drop for Section {
+        fn drop(&mut self) {
+            set_umask(self.previous);
+            if self.outermost.is_some() {
+                INSIDE.set(false);
+            }
+        }
+    }
+    static SECTION: Mutex<()> = Mutex::new(());
+    let outermost = if INSIDE.get() {
+        None
+    } else {
+        let guard = SECTION.lock().unwrap_or_else(|e| e.into_inner());
+        INSIDE.set(true);
+        Some(guard)
+    };
+    let _section = Section {
+        previous: set_umask(mask),
+        outermost,
+    };
+    f()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +162,27 @@ mod tests {
         // SAFETY: getuid/getgid/getpid cannot fail and take no arguments.
         let (uid, gid, pid) = unsafe { (libc::getuid(), libc::getgid(), libc::getpid()) };
         assert_eq!(cred, PeerCredentials { pid, uid, gid });
+    }
+
+    #[test]
+    fn effective_uid_matches_libc() {
+        // SAFETY: geteuid cannot fail and takes no arguments.
+        assert_eq!(effective_uid(), unsafe { libc::geteuid() });
+    }
+
+    #[test]
+    fn with_umask_applies_the_mask_and_restores_the_old_one() {
+        let inside = with_umask(0o111, || set_umask(0o111));
+        assert_eq!(inside, 0o111);
+        let nested = with_umask(0o077, || with_umask(0o022, || set_umask(0o022)));
+        assert_eq!(nested, 0o022);
+        let outer_kept = with_umask(0o077, || {
+            with_umask(0o022, || ());
+            set_umask(0o077)
+        });
+        assert_eq!(outer_kept, 0o077, "the inner call restored the outer mask");
+        let current = set_umask(0o022);
+        assert_eq!(set_umask(current), 0o022);
     }
 
     #[test]

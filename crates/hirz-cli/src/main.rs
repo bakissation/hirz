@@ -6,6 +6,7 @@ mod args;
 mod cmd_cxf;
 mod cmd_pair;
 mod cmd_pin;
+mod cmd_repair;
 mod cmd_setup;
 mod cmd_status;
 mod cmd_vault;
@@ -24,6 +25,13 @@ use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    if let Err(e) = hirz_sys::harden_process(false) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "hirz: cannot protect this process from memory dumps: {e}"
+        );
+        return ExitCode::FAILURE;
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let code = run_process(&args);
     ExitCode::from(code)

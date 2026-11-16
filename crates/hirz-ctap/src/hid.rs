@@ -6,7 +6,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,10 @@ pub const MAX_SEQ: u8 = 0x7f;
 /// Largest message: one initialization packet plus 128 continuation packets (7609 bytes).
 pub const MAX_MESSAGE_SIZE: usize = INIT_DATA_SIZE + (MAX_SEQ as usize + 1) * CONT_DATA_SIZE;
 pub const PROTOCOL_VERSION: u8 = 2;
+/// Channels remembered at once; allocating more forgets the oldest one that is not in use.
+pub const MAX_CHANNELS: usize = 64;
+/// Request threads alive at once, finished-but-cancelled ones included.
+pub const MAX_WORKERS: usize = 4;
 
 const TYPE_INIT: u8 = 0x80;
 
@@ -188,7 +192,8 @@ pub struct Config {
     pub msg_timeout: Duration,
     pub keepalive_interval: Duration,
     /// Upper bound for one CBOR request, after which it is cancelled and answered with
-    /// CTAP2_ERR_USER_ACTION_TIMEOUT.
+    /// CTAP2_ERR_USER_ACTION_TIMEOUT. A prompt that should end before the browser gives up needs
+    /// a shorter timeout of its own (hirzd caps the approval timeout below this).
     pub processing_timeout: Duration,
     pub device_version: (u8, u8, u8),
 }
@@ -239,12 +244,23 @@ enum State {
     Processing(Processing),
 }
 
+/// Where new channel identifiers come from.
+#[derive(Debug, Clone, Copy)]
+enum ChannelIds {
+    Random,
+    /// 1, 2, 3, ... for tests that need to know the identifier in advance.
+    Sequential(u32),
+}
+
 /// The CTAPHID state machine. One transaction runs at a time, as on hardware tokens;
-/// requests on other channels meanwhile get CTAPHID_ERR_CHANNEL_BUSY.
+/// requests on other channels meanwhile get CTAPHID_ERR_CHANNEL_BUSY. Channel identifiers are
+/// random, so a client that did not take part in the INIT exchange has to guess one.
 #[derive(Debug)]
 pub struct Transport {
     config: Config,
-    next_cid: u32,
+    ids: ChannelIds,
+    /// Allocated channels, oldest first, at most [`MAX_CHANNELS`].
+    channels: Vec<u32>,
     next_job: JobId,
     state: State,
 }
@@ -255,9 +271,19 @@ fn later(now: Instant, by: Duration) -> Instant {
 
 impl Transport {
     pub fn new(config: Config) -> Self {
+        Self::with_ids(config, ChannelIds::Random)
+    }
+
+    #[cfg(test)]
+    fn sequential(config: Config) -> Self {
+        Self::with_ids(config, ChannelIds::Sequential(1))
+    }
+
+    fn with_ids(config: Config, ids: ChannelIds) -> Self {
         Self {
             config,
-            next_cid: 1,
+            ids,
+            channels: Vec::new(),
             next_job: 1,
             state: State::Idle,
         }
@@ -279,16 +305,46 @@ impl Transport {
     }
 
     fn is_allocated(&self, cid: u32) -> bool {
-        cid != 0 && cid != BROADCAST_CID && cid < self.next_cid
+        cid != 0 && cid != BROADCAST_CID && self.channels.contains(&cid)
+    }
+
+    fn candidate_cid(&mut self) -> u32 {
+        if let ChannelIds::Random = self.ids {
+            let mut bytes = [0u8; 4];
+            if hirz_crypto::random_fill(&mut bytes).is_ok() {
+                return u32::from_be_bytes(bytes);
+            }
+            // No random numbers: fall back to counting, which still never repeats an identifier in use.
+            self.ids = ChannelIds::Sequential(1);
+        }
+        match &mut self.ids {
+            ChannelIds::Sequential(next) => {
+                let cid = *next;
+                *next = next.wrapping_add(1);
+                cid
+            }
+            ChannelIds::Random => 1,
+        }
     }
 
     fn allocate_cid(&mut self) -> u32 {
-        let cid = self.next_cid;
-        self.next_cid = match self.next_cid.checked_add(1) {
-            Some(n) if n != BROADCAST_CID => n,
-            // After four billion allocations, wrap around and reuse identifiers.
-            _ => 1,
+        let cid = loop {
+            let cid = self.candidate_cid();
+            if cid != 0 && cid != BROADCAST_CID && !self.channels.contains(&cid) {
+                break cid;
+            }
         };
+        if self.channels.len() >= MAX_CHANNELS {
+            let busy = match &self.state {
+                State::Idle => None,
+                State::Receiving(r) => Some(r.cid),
+                State::Processing(p) => Some(p.cid),
+            };
+            if let Some(at) = self.channels.iter().position(|c| Some(*c) != busy) {
+                self.channels.remove(at);
+            }
+        }
+        self.channels.push(cid);
         cid
     }
 
@@ -500,6 +556,19 @@ impl Transport {
         }
     }
 
+    /// The job was not started (too many request threads alive): the transaction ends with
+    /// CTAPHID_ERR_CHANNEL_BUSY and the transport is ready for the next request.
+    pub fn job_refused(&mut self, job: JobId) -> Vec<Output> {
+        match &self.state {
+            State::Processing(p) if p.job == job => {
+                let cid = p.cid;
+                self.state = State::Idle;
+                Self::error(cid, err::CHANNEL_BUSY)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Responses for jobs that were cancelled or timed out are dropped.
     pub fn job_finished(&mut self, job: JobId, response: &[u8]) -> Vec<Output> {
         match &self.state {
@@ -590,6 +659,13 @@ pub trait CborHandler: Send + Sync {
     fn handle(&self, request: &[u8], ctx: &RequestContext) -> Vec<u8>;
 
     fn wink(&self) {}
+
+    /// False for requests that return at once without waiting for the user. While an earlier
+    /// request that was cancelled is still running, [`run`] refuses the ones that may block with
+    /// CTAPHID_ERR_CHANNEL_BUSY instead of queueing another thread behind it.
+    fn may_block(&self, _request: &[u8]) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,9 +735,40 @@ impl ReportIo for StreamReportIo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopEvent {
     ChannelInit,
-    CborRequest { command: u8, len: usize },
-    CborResponse { status: u8, len: usize },
+    CborRequest {
+        command: u8,
+        len: usize,
+    },
+    CborResponse {
+        status: u8,
+        len: usize,
+    },
     Cancelled,
+    /// A request was refused because an earlier, cancelled one still holds its thread.
+    Busy,
+}
+
+/// Counts request threads, a cancelled request's included, until the thread ends.
+#[derive(Debug, Clone, Default)]
+struct Workers(Arc<AtomicUsize>);
+
+struct WorkerGuard(Arc<AtomicUsize>);
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Workers {
+    fn alive(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn enter(&self) -> WorkerGuard {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        WorkerGuard(Arc::clone(&self.0))
+    }
 }
 
 const BUSY_POLL: Duration = Duration::from_millis(10);
@@ -675,7 +782,7 @@ pub fn run<I: ReportIo>(
 ) -> io::Result<()> {
     let mut transport = Transport::new(config);
     let (tx, rx) = mpsc::channel::<(JobId, Vec<u8>)>();
-    let mut running: Option<(JobId, RequestContext)> = None;
+    let mut running = Running::default();
 
     loop {
         while let Ok((job, response)) = rx.try_recv() {
@@ -686,18 +793,26 @@ pub fn run<I: ReportIo>(
                     len: response.len(),
                 });
             }
-            execute(io, &handler, &tx, &mut running, out, &mut observe)?;
+            execute(
+                io,
+                &handler,
+                &tx,
+                &mut transport,
+                &mut running,
+                out,
+                &mut observe,
+            )?;
         }
 
         let now = Instant::now();
         let timeout = match transport.next_deadline() {
             Some(deadline) => deadline.saturating_duration_since(now).min(BUSY_POLL),
-            None if running.is_some() => BUSY_POLL,
+            None if running.current.is_some() => BUSY_POLL,
             None => IDLE_POLL,
         };
         match io.recv(timeout)? {
             Recv::Closed => {
-                if let Some((_, ctx)) = running.take() {
+                if let Some((_, ctx)) = running.current.take() {
                     ctx.cancel();
                 }
                 return Ok(());
@@ -711,26 +826,51 @@ pub fn run<I: ReportIo>(
                     observe(LoopEvent::ChannelInit);
                 }
                 let out = transport.handle_report(&report, Instant::now());
-                execute(io, &handler, &tx, &mut running, out, &mut observe)?;
+                execute(
+                    io,
+                    &handler,
+                    &tx,
+                    &mut transport,
+                    &mut running,
+                    out,
+                    &mut observe,
+                )?;
             }
         }
 
         let status = running
+            .current
             .as_ref()
             .map_or(KeepaliveStatus::Processing, |(_, ctx)| ctx.status());
         let out = transport.tick(Instant::now(), status);
-        execute(io, &handler, &tx, &mut running, out, &mut observe)?;
+        execute(
+            io,
+            &handler,
+            &tx,
+            &mut transport,
+            &mut running,
+            out,
+            &mut observe,
+        )?;
         if transport.current_job().is_none() {
-            running = None;
+            running.current = None;
         }
     }
+}
+
+/// The job the transport is waiting for, and the count of request threads.
+#[derive(Debug, Default)]
+struct Running {
+    current: Option<(JobId, RequestContext)>,
+    workers: Workers,
 }
 
 fn execute<I: ReportIo>(
     io: &mut I,
     handler: &Arc<dyn CborHandler>,
     tx: &mpsc::Sender<(JobId, Vec<u8>)>,
-    running: &mut Option<(JobId, RequestContext)>,
+    transport: &mut Transport,
+    running: &mut Running,
     outputs: Vec<Output>,
     observe: &mut impl FnMut(LoopEvent),
 ) -> io::Result<()> {
@@ -739,7 +879,7 @@ fn execute<I: ReportIo>(
             Output::Send(report) => io.send(&report)?,
             Output::Wink => handler.wink(),
             Output::CancelJob(job) => {
-                if let Some((id, ctx)) = running.as_ref()
+                if let Some((id, ctx)) = running.current.as_ref()
                     && *id == job
                 {
                     ctx.cancel();
@@ -747,6 +887,13 @@ fn execute<I: ReportIo>(
                 }
             }
             Output::StartCbor { job, request } => {
+                let alive = running.workers.alive();
+                if alive >= MAX_WORKERS || (alive > 0 && handler.may_block(&request)) {
+                    observe(LoopEvent::Busy);
+                    let refusal = transport.job_refused(job);
+                    execute(io, handler, tx, transport, running, refusal, observe)?;
+                    continue;
+                }
                 observe(LoopEvent::CborRequest {
                     command: request.first().copied().unwrap_or(0),
                     len: request.len(),
@@ -755,16 +902,18 @@ fn execute<I: ReportIo>(
                 let worker_ctx = ctx.clone();
                 let worker_handler = Arc::clone(handler);
                 let worker_tx = tx.clone();
+                let guard = running.workers.enter();
                 let spawned = std::thread::Builder::new()
                     .name("ctap-request".into())
                     .spawn(move || {
                         let response = worker_handler.handle(&request, &worker_ctx);
+                        drop(guard);
                         let _ = worker_tx.send((job, response));
                     });
                 if spawned.is_err() {
                     let _ = tx.send((job, vec![ctap2_status::ERR_OTHER]));
                 }
-                *running = Some((job, ctx));
+                running.current = Some((job, ctx));
             }
         }
     }
@@ -811,7 +960,7 @@ mod tests {
 
     fn ready() -> (Transport, Instant) {
         let now = Instant::now();
-        let mut t = Transport::new(Config::default());
+        let mut t = Transport::sequential(Config::default());
         let out = t.handle_report(&init_request(BROADCAST_CID, [1; 8]), now);
         assert_eq!(sent(&out).len(), 1);
         (t, now)
@@ -900,7 +1049,7 @@ mod tests {
 
     #[test]
     fn init_on_broadcast_allocates_channel() {
-        let mut t = Transport::new(Config::default());
+        let mut t = Transport::sequential(Config::default());
         let nonce = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let out = t.handle_report(&init_request(BROADCAST_CID, nonce), Instant::now());
         let expected = report(&[
@@ -917,7 +1066,7 @@ mod tests {
 
     #[test]
     fn init_errors() {
-        let mut t = Transport::new(Config::default());
+        let mut t = Transport::sequential(Config::default());
         let mut bad = init_request(BROADCAST_CID, [0; 8]);
         bad[6] = 9;
         let out = t.handle_report(&bad, Instant::now());
@@ -1128,7 +1277,7 @@ mod tests {
             processing_timeout: Duration::from_millis(250),
             ..Config::default()
         };
-        let mut t = Transport::new(config);
+        let mut t = Transport::sequential(config);
         let now = Instant::now();
         t.handle_report(&init_request(BROADCAST_CID, [1; 8]), now);
         let job = start_cbor(&mut t, now);
@@ -1196,14 +1345,16 @@ mod tests {
 
         host.write_all(&single(cid, cmd::CBOR, &[0x04])).unwrap();
         let resp = read_report(&mut host);
-        assert_eq!(&resp[..9], &[0, 0, 0, 1, 0x90, 0, 2, 0x00, 0xa0]);
+        assert_eq!(resp[..4], cid.to_be_bytes());
+        assert_eq!(&resp[4..9], &[0x90, 0, 2, 0x00, 0xa0]);
 
         host.write_all(&single(cid, cmd::CBOR, &[0x01, 0xa0]))
             .unwrap();
         let mut keepalives = 0;
         while keepalives < 2 {
             let r = read_report(&mut host);
-            assert_eq!(&r[..7], &[0, 0, 0, 1, 0xbb, 0, 1]);
+            assert_eq!(r[..4], cid.to_be_bytes());
+            assert_eq!(&r[4..7], &[0xbb, 0, 1]);
             if r[7] == KeepaliveStatus::UpNeeded as u8 {
                 keepalives += 1;
             }
@@ -1214,7 +1365,8 @@ mod tests {
             if r[4] == 0xbb {
                 continue;
             }
-            assert_eq!(&r[..8], &[0, 0, 0, 1, 0x90, 0, 1, 0x2d]);
+            assert_eq!(r[..4], cid.to_be_bytes());
+            assert_eq!(&r[4..8], &[0x90, 0, 1, 0x2d]);
             break;
         }
 
@@ -1227,5 +1379,151 @@ mod tests {
         }));
         assert!(events.contains(&LoopEvent::CborResponse { status: 0, len: 2 }));
         assert!(events.contains(&LoopEvent::Cancelled));
+    }
+
+    #[test]
+    fn channel_ids_are_random_and_unguessable() {
+        let now = Instant::now();
+        let mut t = Transport::new(Config::default());
+        let mut seen = Vec::new();
+        for n in 0..20u8 {
+            let out = t.handle_report(&init_request(BROADCAST_CID, [n; 8]), now);
+            let r = sent(&out)[0];
+            let cid = u32::from_be_bytes(r[15..19].try_into().unwrap());
+            assert!(cid != 0 && cid != BROADCAST_CID, "{cid:#x}");
+            assert!(!seen.contains(&cid));
+            seen.push(cid);
+        }
+        assert!(
+            seen.iter().any(|c| *c > 64),
+            "twenty counting identifiers would all be small: {seen:?}"
+        );
+        for guess in [1u32, 2, 3] {
+            if !seen.contains(&guess) {
+                let out = t.handle_report(&single(guess, cmd::PING, b"x"), now);
+                assert_eq!(sent(&out), vec![error_report(guess, err::INVALID_CHANNEL)]);
+            }
+        }
+        let out = t.handle_report(&single(seen[3], cmd::PING, b"x"), now);
+        assert_eq!(sent(&out), vec![single(seen[3], cmd::PING, b"x")]);
+    }
+
+    #[test]
+    fn a_flood_of_channels_never_drops_the_one_in_use() {
+        let now = Instant::now();
+        let mut t = Transport::new(Config::default());
+        let out = t.handle_report(&init_request(BROADCAST_CID, [0; 8]), now);
+        let mine = u32::from_be_bytes(sent(&out)[0][15..19].try_into().unwrap());
+        let job = match t
+            .handle_report(&single(mine, cmd::CBOR, &[0x04]), now)
+            .as_slice()
+        {
+            [Output::StartCbor { job, .. }] => *job,
+            other => panic!("{other:?}"),
+        };
+        for n in 0..(MAX_CHANNELS * 3) {
+            t.handle_report(&init_request(BROADCAST_CID, [(n % 250) as u8; 8]), now);
+        }
+        assert!(t.channels.len() <= MAX_CHANNELS);
+        assert!(t.is_allocated(mine));
+        assert_eq!(t.current_job(), Some(job));
+    }
+
+    #[test]
+    fn a_refused_job_ends_the_transaction_with_busy() {
+        let (mut t, now) = ready();
+        let job = start_cbor(&mut t, now);
+        assert!(t.job_refused(job + 1).is_empty());
+        assert_eq!(t.current_job(), Some(job));
+        let out = t.job_refused(job);
+        assert_eq!(sent(&out), vec![error_report(CID, err::CHANNEL_BUSY)]);
+        assert_eq!(t.current_job(), None);
+        assert!(t.job_refused(job).is_empty());
+        let _ = start_cbor(&mut t, now);
+    }
+
+    struct Stuck {
+        release: Arc<AtomicBool>,
+    }
+
+    impl CborHandler for Stuck {
+        fn handle(&self, request: &[u8], _ctx: &RequestContext) -> Vec<u8> {
+            if request.first() == Some(&0x04) {
+                return vec![0x00, 0xa0];
+            }
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            vec![0x00]
+        }
+
+        fn may_block(&self, request: &[u8]) -> bool {
+            request.first() != Some(&0x04)
+        }
+    }
+
+    fn next_non_keepalive(host: &mut UnixStream) -> Report {
+        loop {
+            let r = read_report(host);
+            if r[4] != 0xbb {
+                return r;
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_request_that_is_still_running_blocks_new_ones_without_another_thread() {
+        let release = Arc::new(AtomicBool::new(false));
+        let (a, mut host) = UnixStream::pair().unwrap();
+        let handler = Arc::new(Stuck {
+            release: Arc::clone(&release),
+        });
+        let worker = std::thread::spawn(move || {
+            let mut io = StreamReportIo::new(a);
+            let mut events = Vec::new();
+            run(&mut io, handler, Config::default(), |e| events.push(e)).map(|()| events)
+        });
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+        host.write_all(&init_request(BROADCAST_CID, [9; 8]))
+            .unwrap();
+        let resp = read_report(&mut host);
+        let cid = u32::from_be_bytes(resp[15..19].try_into().unwrap());
+
+        host.write_all(&single(cid, cmd::CBOR, &[0x01, 0xa0]))
+            .unwrap();
+        assert_eq!(read_report(&mut host)[4], 0xbb);
+        host.write_all(&single(cid, cmd::CANCEL, &[])).unwrap();
+        let r = next_non_keepalive(&mut host);
+        assert_eq!(&r[4..8], &[0x90, 0, 1, 0x2d]);
+
+        host.write_all(&single(cid, cmd::CBOR, &[0x01, 0xa0]))
+            .unwrap();
+        let r = next_non_keepalive(&mut host);
+        assert_eq!(r, error_report(cid, err::CHANNEL_BUSY));
+
+        host.write_all(&single(cid, cmd::CBOR, &[0x04])).unwrap();
+        let r = next_non_keepalive(&mut host);
+        assert_eq!(&r[4..9], &[0x90, 0, 2, 0x00, 0xa0]);
+
+        release.store(true, Ordering::SeqCst);
+        let mut answered = false;
+        for _ in 0..100 {
+            host.write_all(&single(cid, cmd::CBOR, &[0x01, 0xa0]))
+                .unwrap();
+            let r = next_non_keepalive(&mut host);
+            if r[4] == 0x90 {
+                assert_eq!(&r[5..8], &[0, 1, 0x00]);
+                answered = true;
+                break;
+            }
+            assert_eq!(r, error_report(cid, err::CHANNEL_BUSY));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(answered, "the stuck request never released its thread");
+
+        drop(host);
+        let events = worker.join().unwrap().unwrap();
+        assert!(events.contains(&LoopEvent::Busy));
     }
 }

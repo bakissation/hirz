@@ -4,8 +4,8 @@
 # messaging manifest, the systemd user unit for hirzd and the uhid module list. Each file is
 # the same one the .deb, .rpm and AUR packages install (packaging/README.md).
 #
-#   sudo snap run hirz.setup-system install
-#   sudo snap run hirz.setup-system remove      (the snap's remove hook also runs this)
+#   sudo snap run hirz.setup-system install     (also starts the broker, which is disabled until then)
+#   sudo snap run hirz.setup-system remove      (stops the broker; the remove hook runs it with --no-service)
 #   snap run hirz.setup-system status
 set -eu
 
@@ -14,6 +14,7 @@ share="$SNAP/share/hirz"
 # Every host file this script writes is listed here, so "remove" deletes exactly those.
 LIST="${SNAP_COMMON:?}/host-files"
 NMH="/snap/hirz/current/bin/hirz-nmh"
+HIRZD="/snap/hirz/current/bin/hirzd"
 
 UDEV_DIR=/etc/udev/rules.d
 UNIT=/etc/systemd/user/hirzd.service
@@ -46,12 +47,22 @@ do_install() {
   [ "$(id -u)" = 0 ] || die "run as root: sudo snap run hirz.setup-system install"
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
+  zenity_major=$(zenity --version 2>/dev/null | sed -n 's/^\([0-9][0-9]*\)\..*/\1/p')
+  if [ -z "$zenity_major" ] || [ "$zenity_major" -lt 4 ]; then
+    echo "hirz.setup-system: warning: hirz needs zenity 4 or newer (found: ${zenity_major:-none})" >&2
+  fi
   put 0644 "$share/udev/70-hirz.rules" "$UDEV_DIR/70-hirz.rules"
   put 0644 "$share/udev/72-hirz.rules" "$UDEV_DIR/72-hirz.rules"
+  put 0644 "$share/udev/99-zzz-hirz.rules" "$UDEV_DIR/99-zzz-hirz.rules"
   put 0644 "$share/polkit/$POLICY_NAME" "$(policy_dir)/$POLICY_NAME"
-  sed -E 's#^ExecStart=[^ ]*/hirzd( |$)#ExecStart=/snap/bin/hirz.hirzd\1#' \
+  # The binary is started directly, not through "snap run": that goes through the setuid-root
+  # snap-confine, which NoNewPrivileges=yes in the unit would block. hirzd needs only the socket
+  # path from the snap's environment.
+  sed -E "s#^ExecStart=[^ ]*/hirzd( |\$)#ExecStart=$HIRZD\1#" \
     "$share/systemd/hirzd.service.in" >"$tmp/hirzd.service"
-  grep -q '^ExecStart=/snap/bin/hirz.hirzd' "$tmp/hirzd.service" || die "could not set ExecStart"
+  grep -qxF "ExecStart=$HIRZD" "$tmp/hirzd.service" || die "could not set ExecStart"
+  sed -i "/^ExecStart=/a Environment=HIRZ_BROKER_SOCKET=$SNAP_COMMON/uhid.sock" "$tmp/hirzd.service"
+  grep -q '^Environment=HIRZ_BROKER_SOCKET=' "$tmp/hirzd.service" || die "could not set the socket"
   put 0644 "$tmp/hirzd.service" "$UNIT"
   echo uhid >"$tmp/hirz.conf"
   put 0644 "$tmp/hirz.conf" "$MODULES"
@@ -62,13 +73,19 @@ do_install() {
   udevadm control --reload 2>/dev/null || true
   modprobe uhid 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
-  echo "hirz host files installed. Each user now runs:"
+  # Only now, with the rules in place, may the broker's socket accept clients.
+  snap start --enable hirz.uhid-broker || die "could not start the broker: snap start --enable hirz.uhid-broker"
+  echo "hirz host files installed and the broker started. Each user now runs:"
   echo "    hirz init"
   echo "    systemctl --user enable --now hirzd"
 }
 
 do_remove() {
   [ "$(id -u)" = 0 ] || die "run as root: sudo snap run hirz.setup-system remove"
+  # Stop the broker before its udev rules go; the remove hook skips this, snapd stops it itself.
+  if [ "${1:-}" != --no-service ]; then
+    snap stop --disable hirz.uhid-broker 2>/dev/null || true
+  fi
   if [ -f "$LIST" ]; then
     while IFS= read -r f; do
       rm -f "$f"
@@ -80,7 +97,7 @@ do_remove() {
 }
 
 do_status() {
-  for f in "$UDEV_DIR/70-hirz.rules" "$UDEV_DIR/72-hirz.rules" "$UNIT" "$MODULES" "$MANIFEST" \
+  for f in "$UDEV_DIR/70-hirz.rules" "$UDEV_DIR/72-hirz.rules" "$UDEV_DIR/99-zzz-hirz.rules" "$UNIT" "$MODULES" "$MANIFEST" \
     "/etc/polkit-1/actions/$POLICY_NAME" "/usr/share/polkit-1/actions/$POLICY_NAME"; do
     if [ -e "$f" ]; then echo "present  $f"; else echo "missing  $f"; fi
   done
@@ -88,7 +105,7 @@ do_status() {
 
 case "${1:-}" in
   install) do_install ;;
-  remove) do_remove ;;
+  remove) do_remove "${2:-}" ;;
   status) do_status ;;
   *)
     sed -n '2,9s/^# \{0,1\}//p' "$0"

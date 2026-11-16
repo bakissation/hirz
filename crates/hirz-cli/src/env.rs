@@ -10,6 +10,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_BROKER_SOCKET: &str = "/run/hirz/uhid.sock";
+pub const VAULT_ENV: &str = "HIRZ_VAULT";
+pub const STATE_ENV: &str = "HIRZ_STATE";
 
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -17,6 +19,8 @@ pub struct Env {
     pub data_home: PathBuf,
     pub config_home: PathBuf,
     pub uv: Paths,
+    /// `HIRZ_VAULT`: the vault folder the daemons use when it is set.
+    pub vault_override: Option<PathBuf>,
     /// Prefix for system paths that are probed (`/` outside tests).
     pub root: PathBuf,
     pub broker_socket: PathBuf,
@@ -36,9 +40,12 @@ impl Env {
 
     pub fn from_vars(get: impl Fn(&str) -> Option<OsString>) -> CliResult<Env> {
         let abs = |k: &str| get(k).map(PathBuf::from).filter(|p| p.is_absolute());
-        let uv = Paths::from_vars(&get).map_err(|_| {
+        let mut uv = Paths::from_vars(&get).map_err(|_| {
             CliError::failed("HOME is not set, so hirz cannot tell where to keep its files.")
         })?;
+        if let Some(state) = abs(STATE_ENV) {
+            uv.state_dir = state;
+        }
         let home = abs("HOME");
         let data_home = abs("XDG_DATA_HOME")
             .or_else(|| home.as_ref().map(|h| h.join(".local").join("share")))
@@ -53,6 +60,7 @@ impl Env {
             data_home,
             config_home,
             uv,
+            vault_override: abs(VAULT_ENV),
             root: PathBuf::from("/"),
             broker_socket,
             exe_dir: None,
@@ -66,6 +74,15 @@ impl Env {
 
     pub fn default_vault(&self) -> PathBuf {
         self.data_home.join("hirz").join("vault")
+    }
+
+    /// Where `init` creates the vault: `--vault DIR`, else `HIRZ_VAULT`, else the default.
+    pub fn new_vault_dir(&self, flag: Option<&Path>) -> CliResult<PathBuf> {
+        match (flag, &self.vault_override) {
+            (Some(p), _) => self.absolute(p),
+            (None, Some(p)) => Ok(p.clone()),
+            (None, None) => Ok(self.default_vault()),
+        }
     }
 
     pub fn sys_path(&self, abs: &str) -> PathBuf {
@@ -82,9 +99,13 @@ impl Env {
             .ok_or_else(|| CliError::failed("Could not find the current folder; give a full path."))
     }
 
+    /// `--vault DIR`, else `HIRZ_VAULT`, else the folder recorded by `init` and `join`, else the default.
     pub fn vault_dir(&self, flag: Option<&Path>) -> CliResult<PathBuf> {
         if let Some(p) = flag {
             return self.absolute(p);
+        }
+        if let Some(p) = &self.vault_override {
+            return Ok(p.clone());
         }
         if let Some(p) = read_pointer(&self.state_dir().join(hirz_vault::VAULT_POINTER_FILE))? {
             return Ok(p);

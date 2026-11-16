@@ -26,6 +26,18 @@ WebAuthn client data itself and asks for the same approval window as
 showing the requesting origin too.
 Without a vault on the device, ceremonies are answered as not handled and Firefox runs them
 itself.
+While the vault folder reports a fork, signing in still works, registrations are answered as
+not handled, and the fork is logged once on standard error.
+A request that ends before any window was shown (no way to verify the user, the prompt
+budget used up, zenity missing) is answered as not handled too, so a page cannot tell it from
+a site hirz has no passkey for.
+Requests are answered one at a time; up to 64 wait behind an open prompt, and more are
+refused as busy.
+.B list
+and
+.B capabilities
+reuse the last look at the vault folder when it is less than 3 seconds old; a request that
+can end in a prompt always looks first.
 .PP
 Messages are exchanged on standard input and output: a 32\-bit length in native byte order
 followed by that many bytes of UTF\-8 JSON.

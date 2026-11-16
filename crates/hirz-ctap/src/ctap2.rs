@@ -2,7 +2,8 @@
 //! verification and no clientPin. Parsers are pure functions over `&[u8]` so they can be fuzzed.
 //! Policy notes: docs/uhid.md, "CTAP2 command policy".
 
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use hirz_core::{
     AAGUID, AssertionResponse, COSE_ALG_EDDSA, COSE_ALG_ES256, CoreError, CredProtect,
@@ -86,7 +87,17 @@ pub trait Authenticator: Send {
 
     /// Waits for a user gesture without any ceremony (authenticatorSelection, zero-length pinUvAuthParam probe).
     fn select(&mut self, ctx: &RequestContext) -> Result<(), CoreError>;
+
+    /// Whether some built-in user verification works right now. getInfo says so in the `uv`
+    /// option: a platform that reads `false` does not ask for verification, so click-to-allow sites
+    /// still work and sites that need verification fail with a clear error instead of every request.
+    fn user_verification_available(&mut self) -> bool {
+        true
+    }
 }
+
+/// How long a getInfo answer about user verification is reused: the check may start helper programs.
+const UV_CACHE: Duration = Duration::from_secs(10);
 
 type Res<T> = Result<T, Status>;
 
@@ -469,6 +480,11 @@ fn algorithm(alg: i64) -> Value {
 }
 
 pub fn get_info_value() -> Value {
+    get_info_value_with(true)
+}
+
+/// `uv` is the `uv` option: built-in user verification is configured.
+pub fn get_info_value_with(uv: bool) -> Value {
     MapBuilder::new()
         .int(0x01, text_array(&["FIDO_2_0", "FIDO_2_1"]))
         .int(0x02, text_array(&["credProtect", "hmac-secret"]))
@@ -478,7 +494,7 @@ pub fn get_info_value() -> Value {
             MapBuilder::new()
                 .text("rk", true)
                 .text("up", true)
-                .text("uv", true)
+                .text("uv", uv)
                 .text("plat", false)
                 .build(),
         )
@@ -504,7 +520,11 @@ fn ok_with(value: &Value) -> Res<Vec<u8>> {
 }
 
 pub fn get_info_response() -> Vec<u8> {
-    ok_with(&get_info_value()).unwrap_or_else(|s| s.response())
+    get_info_response_with(true)
+}
+
+pub fn get_info_response_with(uv: bool) -> Vec<u8> {
+    ok_with(&get_info_value_with(uv)).unwrap_or_else(|s| s.response())
 }
 
 pub fn encode_make_credential(resp: &MakeCredentialResponse) -> Res<Vec<u8>> {
@@ -546,6 +566,7 @@ pub fn encode_get_assertion(resp: &AssertionResponse, user_selected: bool) -> Re
 pub struct Ctap2Handler<A> {
     engine: Mutex<A>,
     keys: Mutex<KeyAgreementKeys>,
+    uv_seen: Mutex<Option<(Instant, bool)>>,
 }
 
 impl<A: Authenticator> Ctap2Handler<A> {
@@ -553,6 +574,26 @@ impl<A: Authenticator> Ctap2Handler<A> {
         Self {
             engine: Mutex::new(engine),
             keys: Mutex::new(KeyAgreementKeys::new()),
+            uv_seen: Mutex::new(None),
+        }
+    }
+
+    /// The `uv` option of getInfo. Never waits for a request that holds the authenticator: it then
+    /// repeats the last answer (true before there was one).
+    fn user_verification_configured(&self) -> bool {
+        let mut seen = self.uv_seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, uv)) = *seen
+            && at.elapsed() < UV_CACHE
+        {
+            return uv;
+        }
+        match self.engine.try_lock() {
+            Ok(mut engine) => {
+                let uv = engine.user_verification_available();
+                *seen = Some((Instant::now(), uv));
+                uv
+            }
+            Err(_) => seen.is_none_or(|(_, uv)| uv),
         }
     }
 
@@ -579,7 +620,7 @@ impl<A: Authenticator> Ctap2Handler<A> {
         match cmd {
             command::MAKE_CREDENTIAL => self.make_credential(params, ctx),
             command::GET_ASSERTION => self.get_assertion(params, ctx),
-            command::GET_INFO => Ok(get_info_response()),
+            command::GET_INFO => Ok(get_info_response_with(self.user_verification_configured())),
             command::CLIENT_PIN => self.client_pin(params),
             command::RESET => Err(Status::OperationDenied),
             command::GET_NEXT_ASSERTION => Err(Status::NotAllowed),
@@ -681,6 +722,13 @@ impl<A: Authenticator> Ctap2Handler<A> {
 impl<A: Authenticator> CborHandler for Ctap2Handler<A> {
     fn handle(&self, request: &[u8], ctx: &RequestContext) -> Vec<u8> {
         self.process(request, ctx)
+    }
+
+    fn may_block(&self, request: &[u8]) -> bool {
+        matches!(
+            request.first(),
+            Some(&(command::MAKE_CREDENTIAL | command::GET_ASSERTION | command::SELECTION))
+        )
     }
 }
 

@@ -38,6 +38,9 @@ pub enum Error {
     /// the request so the page sees the browser's own TypeError or SyntaxError.
     InvalidOptions(&'static str),
     NotSupported(&'static str),
+    /// The host cannot take the request now (its queue is full). The page sees a refusal.
+    Busy(&'static str),
+    /// An origin hirz cannot validate. Firefox applies the real rules, so it gets the request.
     Origin(OriginError),
     RpId(RpIdError),
     Core(CoreError),
@@ -50,8 +53,8 @@ impl Error {
             Error::BadEnvelope(_) | Error::EngineOutput(_) => ErrorName::UnknownError,
             Error::NotHandled(_) | Error::InvalidOptions(_) => ErrorName::NotHandled,
             Error::NotSupported(_) => ErrorName::NotSupportedError,
-            Error::Origin(OriginError::Opaque) => ErrorName::NotAllowedError,
-            Error::Origin(_) => ErrorName::SecurityError,
+            Error::Busy(_) => ErrorName::NotAllowedError,
+            Error::Origin(_) => ErrorName::NotHandled,
             Error::RpId(RpIdError::RelatedOriginRequired | RpIdError::NonCanonical) => {
                 ErrorName::NotHandled
             }
@@ -67,21 +70,32 @@ impl Error {
             | Error::NotHandled(m)
             | Error::InvalidOptions(m)
             | Error::NotSupported(m)
+            | Error::Busy(m)
             | Error::EngineOutput(m) => m,
-            Error::Origin(_) => "origin rejected",
+            Error::Origin(_) => "origin not accepted",
             Error::RpId(RpIdError::RelatedOriginRequired) => "related origins not supported",
             Error::RpId(RpIdError::NonCanonical) => "rp id not in canonical form",
             Error::RpId(_) => "rp id rejected",
+            Error::Core(
+                CoreError::NoCredentials | CoreError::Approval(ApprovalError::NothingShown),
+            ) => "no credential here",
             Error::Core(_) => "authenticator error",
         }
     }
 }
 
+/// `NoCredentials` is only reported when nothing matched and the user saw nothing, so Firefox
+/// runs its own ceremony and the page learns nothing about the vault (WebAuthn privacy
+/// considerations for authentication ceremonies). A refusal that came before any window
+/// (`NothingShown`: prompt budget used up, no verification method, zenity missing) looks the same:
+/// when hirz has a credential but cannot ask, the page must not tell it from "no credential".
 pub fn core_error_name(e: &CoreError) -> ErrorName {
     match e {
         CoreError::CredentialExcluded => ErrorName::InvalidStateError,
-        CoreError::NoCredentials
-        | CoreError::UvRequiredUnavailable
+        CoreError::NoCredentials | CoreError::Approval(ApprovalError::NothingShown) => {
+            ErrorName::NotHandled
+        }
+        CoreError::UvRequiredUnavailable
         | CoreError::Approval(
             ApprovalError::Denied
             | ApprovalError::Timeout

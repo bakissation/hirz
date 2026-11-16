@@ -73,7 +73,7 @@ impl From<&ApprovalError> for Status {
             // No clientPin: PIN_BLOCKED would point the platform at a PIN it cannot see.
             ApprovalError::Locked => Status::UvBlocked,
             // UV_INVALID and OPERATION_DENIED make platforms retry built-in UV in a loop.
-            ApprovalError::Unavailable => Status::NotAllowed,
+            ApprovalError::Unavailable | ApprovalError::NothingShown => Status::NotAllowed,
             ApprovalError::Internal(_) => Status::Other,
         }
     }
@@ -157,6 +157,10 @@ mod tests {
             ),
             (
                 CoreError::Approval(ApprovalError::Unavailable),
+                Status::NotAllowed,
+            ),
+            (
+                CoreError::Approval(ApprovalError::NothingShown),
                 Status::NotAllowed,
             ),
             (

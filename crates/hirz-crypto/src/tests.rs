@@ -251,6 +251,11 @@ fn ed25519_rfc8032() {
         assert_eq!(pk.to_vec(), h(public));
         let s = ed25519::sign(&pkcs8, &h(msg)).unwrap();
         assert_eq!(s.to_vec(), h(sig));
+        assert_eq!(
+            ed25519::public_from_seed(&h32(seed)).unwrap().to_vec(),
+            h(public)
+        );
+        assert_eq!(ed25519::sign_with_seed(&h32(seed), &h(msg)).unwrap(), s);
         ed25519::verify(&pk, &h(msg), &s).unwrap();
         let mut bad = s;
         bad[0] ^= 0x80;

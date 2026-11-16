@@ -17,15 +17,20 @@ pub struct ProcessIdentity {
 }
 
 /// Arguments for `pkcheck`. `--details` is not passed: polkit does not show untrusted
-/// details to the user, and the site is already shown in hirz's own dialog.
-pub fn pkcheck_args(id: &ProcessIdentity) -> Vec<String> {
-    vec![
+/// details to the user, and the site is already shown in hirz's own dialog. Without
+/// `interactive` pkcheck never asks anyone, so it shows whether polkit would grant or refuse the
+/// action on its own (exit 0 or 1) or needs a password (exit 2).
+pub fn pkcheck_args(id: &ProcessIdentity, interactive: bool) -> Vec<String> {
+    let mut args = vec![
         "--action-id".into(),
         ACTION_ID.into(),
         "--process".into(),
         format!("{},{},{}", id.pid, id.start_time, id.uid),
-        "--allow-user-interaction".into(),
-    ]
+    ];
+    if interactive {
+        args.push("--allow-user-interaction".into());
+    }
+    args
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,19 +91,28 @@ mod tests {
 
     #[test]
     fn args() {
-        let a = pkcheck_args(&ProcessIdentity {
+        let id = ProcessIdentity {
             pid: 4242,
             start_time: 987654,
             uid: 1000,
-        });
+        };
         assert_eq!(
-            a,
+            pkcheck_args(&id, true),
             [
                 "--action-id",
                 "dev.hirz.authenticate",
                 "--process",
                 "4242,987654,1000",
                 "--allow-user-interaction"
+            ]
+        );
+        assert_eq!(
+            pkcheck_args(&id, false),
+            [
+                "--action-id",
+                "dev.hirz.authenticate",
+                "--process",
+                "4242,987654,1000"
             ]
         );
     }

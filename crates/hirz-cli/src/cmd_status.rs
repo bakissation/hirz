@@ -2,10 +2,10 @@
 
 use crate::app::Ctx;
 use crate::cmd_setup::{
-    ManifestState, flatpak_firefox, manifest_locations, manifest_state, snap_firefox,
+    ManifestState, SYSTEM_SCOPE, flatpak_firefox, manifest_locations, manifest_state, snap_firefox,
 };
 use crate::error::{CliResult, Exit};
-use crate::ui::{clean, count, hex};
+use crate::ui::{clean, count, hex, path_text};
 use hirz_uv::PinStore;
 use hirz_vault::Vault;
 use serde_json::{Value, json};
@@ -13,7 +13,6 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 
 const MAX_LISTED_SKIPPED: usize = 10;
-const SYSTEM_SCOPE: &str = "system";
 
 #[derive(Debug, Default)]
 struct VaultInfo {
@@ -29,6 +28,7 @@ struct VaultInfo {
     locked_out: bool,
     removed: bool,
     rotation_conflict: bool,
+    fork_detected: bool,
     rollback_suspected: bool,
     maintenance_error: Option<String>,
 }
@@ -90,6 +90,7 @@ fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
                     locked_out: r.locked_out,
                     removed: r.this_device_removed,
                     rotation_conflict: r.rotation_conflict,
+                    fork_detected: r.fork_detected,
                     rollback_suspected: r.rollback_suspected,
                     maintenance_error: r.maintenance_error.as_ref().map(|e| e.to_string()),
                 });
@@ -172,6 +173,7 @@ fn to_json(r: &Report) -> Value {
                 "ignored_files": v.ignored_files,
                 "locked_out": v.locked_out,
                 "rotation_conflict": v.rotation_conflict,
+                "fork_detected": v.fork_detected,
                 "rollback_suspected": v.rollback_suspected,
                 "maintenance_error": v.maintenance_error,
             }
@@ -260,7 +262,15 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
             )?;
         }
         let mut sync_ok = true;
-        if v.removed {
+        let disputed = v.fork_detected || v.rotation_conflict;
+        if v.removed && disputed {
+            sync_ok = false;
+            ctx.say(
+                "Sync:           the vault folder says this computer was removed, but it also holds\n                \
+                 conflicting key changes. Do not run `hirz forget-local` yet: check the vault\n                \
+                 on a device you trust first.",
+            )?;
+        } else if v.removed {
             sync_ok = false;
             ctx.say(&format!(
                 "Sync:           {}\n                \
@@ -275,11 +285,22 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
                  and cannot write. Join again with the recovery phrase if that is a mistake.",
             )?;
         }
+        if v.fork_detected {
+            sync_ok = false;
+            ctx.say(
+                "Sync:           the vault folder no longer holds the key changes this computer\n                \
+                 followed. Someone with access to the folder may have changed it. Passkeys still\n                \
+                 work, but nothing new is saved. Restore the folder from your sync tool's\n                \
+                 history, or run `hirz repair` to see what to do (it can also delete a key\n                \
+                 change you do not trust, or follow the folder as it is).",
+            )?;
+        }
         if v.rotation_conflict {
             sync_ok = false;
             ctx.say(
                 "Sync:           two devices removed each other. Stop sharing the folder with the\n                \
-                 one you do not trust, then run `hirz remove-device` for it again.",
+                 one you do not trust, then run `hirz remove-device` for it again, or run\n                \
+                 `hirz repair` to delete a key change it made.",
             )?;
         }
         if v.rollback_suspected {
@@ -359,7 +380,7 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
     }
     for m in installed {
         let state = match &m.state {
-            ManifestState::Ok(p) => format!("ok, starts {}", p.display()),
+            ManifestState::Ok(p) => format!("ok, starts {}", path_text(p)),
             ManifestState::BrokenTarget(p) => {
                 format!("points to {}, which is missing", clean(p, 200))
             }
@@ -374,7 +395,7 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
     }
     for m in overriding_user_manifests(&r.manifests) {
         let program = match &m.state {
-            ManifestState::Ok(p) => p.display().to_string(),
+            ManifestState::Ok(p) => path_text(p),
             ManifestState::BrokenTarget(p) => clean(p, 200),
             ManifestState::Invalid | ManifestState::Missing => "no valid program".into(),
         };
@@ -421,7 +442,9 @@ pub fn status(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
     }
     match &report.vault {
         None => return Ok(Exit::Failed),
-        Some(v) if v.removed || v.locked_out || v.rotation_conflict => return Ok(Exit::Failed),
+        Some(v) if v.removed || v.locked_out || v.rotation_conflict || v.fork_detected => {
+            return Ok(Exit::Failed);
+        }
         Some(_) => {}
     }
     Ok(Exit::Ok)

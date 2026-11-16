@@ -9,8 +9,14 @@ hirz\-uhid\-broker \- root helper that creates the hirz virtual security key dev
 .IR PATH ]
 .RB [ \-\-min\-uid
 .IR N ]
+.RB [ \-\-max\-uid
+.IR N ]
 .RB [ \-\-max\-connections
 .IR N ]
+.RB [ \-\-sessions\-dir
+.IR DIR ]
+.RB [ \-\-udev\-rules\-dir
+.IR DIR ]
 .SH DESCRIPTION
 .B hirz\-uhid\-broker
 owns
@@ -20,15 +26,25 @@ The client is
 .BR hirzd (1),
 running as the user.
 .PP
-For each connection the broker reads the peer credentials (SO_PEERCRED), refuses uids below
-.BR \-\-min\-uid ,
-a uid that already has a device, and connections beyond
+For each connection the broker reads the peer credentials (SO_PEERCRED) and refuses uids
+outside
+.BR \-\-min\-uid " to " \-\-max\-uid ,
+uids without an active login session on a seat (from the logind state file
+.IR /run/systemd/users/UID ,
+which needs STATE=active and a non\-empty ACTIVE_SEATS), all connections while one of the udev rule files
+.IR 70\-hirz.rules ,
+.I 72\-hirz.rules
+and
+.I 99\-zzz\-hirz.rules
+is missing or masked (a link to /dev/null or an empty file in an earlier udev rules directory hides the packaged file), a uid that already has a device, a uid that created
+devices too fast (6 in a burst, one more every 10 seconds), and connections beyond
 .BR \-\-max\-connections .
 It then creates the device with fixed values (name "hirz virtual authenticator", bus USB,
 the client's uid in the phys field and the FIDO report descriptor) and relays 64\-byte
 reports in both directions.
 Nothing in the device description comes from the client.
-When the client disconnects, the device is destroyed.
+When the client disconnects, or the uid no longer has an active session on a seat (checked
+every 5 seconds), the device is destroyed.
 The uhid descriptor never leaves the broker, and descriptors sent by clients are never
 accepted.
 The broker logs uids, pids and report counts, never report contents.
@@ -37,7 +53,7 @@ Normally the broker is started by systemd socket activation through
 .B hirz\-uhid\-broker.socket
 (socket
 .IR /run/hirz/uhid.sock ,
-mode 0666; any local user may connect and the broker enforces the uid policy).
+mode 0666; any local user may connect and the broker enforces the admission policy).
 After setting up the socket it drops every capability and sets PR_SET_NO_NEW_PRIVS,
 PR_SET_DUMPABLE 0 and RLIMIT_CORE 0.
 As uid 0 it opens the root\-owned
@@ -48,9 +64,18 @@ through the owner permission bits, so it needs no capability.
 .BI \-\-listen " PATH"
 Bind
 .I PATH
-itself (mode 0666, parent folder created with mode 0755) instead of using a socket passed
-by systemd.
+itself (mode 0666) instead of using a socket passed by systemd.
 For manual runs.
+The path must be absolute and must not contain a symbolic link,
+.I \&.
+or
+.IR \&.. .
+Every directory on it must be owned by root (or the user running the broker) and not
+writable by group or others, except a sticky directory such as
+.IR /tmp ;
+the directory that holds the socket may not be open to others at all.
+That directory is created with mode 0755 when missing (with mkdir under a zero umask, so no
+mode is changed by path afterwards) and the mode of an existing one is never changed.
 .TP
 .BI \-\-uhid " PATH"
 The uhid device (default
@@ -61,6 +86,19 @@ Refuse peers with a uid below
 .I N
 (default 1000).
 0 is rejected.
+.TP
+.BI \-\-max\-uid " N"
+Refuse peers with a uid above
+.I N
+(default 60513: regular users up to 60000 and systemd\-homed users 60001 to 60513; container\-mapped host users, systemd dynamic users and nobody stay out).
+.TP
+.BI \-\-sessions\-dir " DIR"
+Where the logind user state files are (default
+.IR /run/systemd/users ).
+.TP
+.BI \-\-udev\-rules\-dir " DIR"
+The only folder searched for the three hirz rule files instead of the system udev rules
+folders (searched in udev's order: /etc, /run, /usr/local/lib, /usr/lib, /lib).
 .TP
 .BI \-\-max\-connections " N"
 Devices at the same time, one per uid (default 8, at least 1).
@@ -84,7 +122,7 @@ The socket.
 .I /usr/lib/systemd/system/hirz\-uhid\-broker.{socket,service}
 The systemd units.
 .TP
-.I /usr/lib/udev/rules.d/{70,72}\-hirz.rules
+.I /usr/lib/udev/rules.d/{70\-hirz,72\-hirz,99\-zzz\-hirz}.rules
 udev rules: each hidraw node of a hirz device is owned by the uid that created it (mode
 0600) and gets no seat ACL.
 .TP

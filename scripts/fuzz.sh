@@ -8,13 +8,14 @@
 #   scripts/fuzz.sh seeds                  regenerate fuzz/seeds
 #   scripts/fuzz.sh build | list
 #
-# Needs a nightly toolchain and cargo-fuzz:
-#   rustup toolchain install nightly --profile minimal
+# Needs the pinned nightly toolchain and cargo-fuzz:
+#   rustup toolchain install nightly-2026-11-12 --profile minimal
 #   cargo install cargo-fuzz --locked
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TOOLCHAIN="${FUZZ_TOOLCHAIN:-nightly}"
+# Pinned by date; the same value as FUZZ_TOOLCHAIN in .github/workflows/ci.yml (scripts/check.sh toolchain).
+TOOLCHAIN="${FUZZ_TOOLCHAIN:-nightly-2026-11-12}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
 JOBS="${FUZZ_JOBS:-2}"
 SMOKE_SECONDS="${FUZZ_SMOKE_SECONDS:-60}"
@@ -32,7 +33,7 @@ max_len() {
     ctap2_*) echo 7609 ;;
     ctaphid_packet) echo 7700 ;;
     ctaphid_transport) echo 16640 ;;
-    json | webauthn_prepare | webauthn_handle | import_bitwarden) echo 262144 ;;
+    json | webauthn_prepare | webauthn_handle | import_bitwarden | cxf_parse) echo 262144 ;;
     import_keepassxc) echo 65536 ;;
     cbor_* | cose_key | auth_data | attestation | uv_config) echo 65536 ;;
     *) echo 8192 ;;

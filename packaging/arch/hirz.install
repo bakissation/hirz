@@ -13,7 +13,16 @@ MSG
 }
 
 post_upgrade() {
-  echo '==> hirz: restart the broker to run the new version: systemctl restart hirz-uhid-broker.service'
+  # A running broker or daemon keeps the old binary until it restarts.
+  systemctl try-restart hirz-uhid-broker.service 2>/dev/null || true
+  local dir user
+  for dir in /run/user/*; do
+    [ -d "$dir" ] || continue
+    user=$(getent passwd "${dir##*/}" | cut -d: -f1)
+    [ -n "$user" ] || continue
+    systemctl --user --machine="$user@.host" try-restart hirzd.service >/dev/null 2>&1 || true
+  done
+  echo '==> hirz: running programs were restarted; if hirzd still runs the old version: systemctl --user restart hirzd'
 }
 
 pre_remove() {

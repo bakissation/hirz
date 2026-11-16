@@ -21,6 +21,11 @@ pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `origin_for_display` is the validated origin, for the approval prompt only.
+///
+/// `get_assertion` returns `CoreError::NoCredentials` only when nothing matched and the user was
+/// shown nothing; the client role then hands the request to Firefox, and does the same for
+/// `ApprovalError::NothingShown`, a refusal before any window. An implementation maps a "no
+/// credential" outcome that follows a prompt to a refusal instead.
 pub trait Engine {
     fn make_credential(
         &mut self,

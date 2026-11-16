@@ -18,7 +18,7 @@ use hirz_proto::cbor::{self, Limits, MapBuilder, Value};
 use hirz_proto::{attestation, cose};
 use hirz_vault::Vault;
 
-use crate::authenticator::{Notice, VaultAuthenticator};
+use crate::authenticator::{Notice, UvProbe, VaultAuthenticator};
 use crate::log_event;
 use crate::session::{STATE_ENV, Session, Settings, VAULT_ENV};
 
@@ -29,6 +29,12 @@ const STATUS_NOT_ALLOWED: u8 = 0x30;
 
 #[derive(Debug)]
 struct ApproveAll;
+
+impl UvProbe for ApproveAll {
+    fn uv_available(&self) -> bool {
+        true
+    }
+}
 
 impl Approver for ApproveAll {
     fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
@@ -296,7 +302,7 @@ fn expect(cond: bool, what: &str) -> io::Result<()> {
     if cond { Ok(()) } else { Err(fail(what)) }
 }
 
-fn with_daemon<A: Approver + Send + 'static>(
+fn with_daemon<A: Approver + UvProbe + Send + 'static>(
     authenticator: VaultAuthenticator<A>,
     script: impl FnOnce(&mut Host) -> io::Result<()>,
 ) -> io::Result<()> {
@@ -414,6 +420,12 @@ mod tests {
 
     struct Counting(Arc<std::sync::atomic::AtomicUsize>);
 
+    impl UvProbe for Counting {
+        fn uv_available(&self) -> bool {
+            true
+        }
+    }
+
     impl Approver for Counting {
         fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -436,26 +448,27 @@ mod tests {
             Counting(Arc::clone(&calls)),
         );
         let handler = Ctap2Handler::new(VaultAuthenticator::new(session, Notice::new(false)));
-        let rp = "pam://laptop";
-        let params = MapBuilder::new()
-            .int(0x01, CLIENT_DATA_HASH.as_slice())
-            .int(0x02, MapBuilder::new().text("id", rp).build())
-            .int(0x03, MapBuilder::new().text("id", [1u8].as_slice()).build())
-            .int(0x04, Value::Array(vec![public_key_entry()]))
-            .build();
-        let mut request = vec![0x01];
-        request.extend(cbor::encode(&params).unwrap());
         let ctx = hid::RequestContext::new();
-        assert_eq!(handler.process(&request, &ctx), vec![STATUS_NOT_ALLOWED]);
-        for up in [true, false] {
-            let p = MapBuilder::new()
-                .int(0x01, rp)
-                .int(0x02, CLIENT_DATA_HASH.as_slice())
-                .int(0x05, MapBuilder::new().text("up", up).build())
+        for rp in ["pam://laptop", "io.systemd.home", "io.systemd.cryptsetup"] {
+            let params = MapBuilder::new()
+                .int(0x01, CLIENT_DATA_HASH.as_slice())
+                .int(0x02, MapBuilder::new().text("id", rp).build())
+                .int(0x03, MapBuilder::new().text("id", [1u8].as_slice()).build())
+                .int(0x04, Value::Array(vec![public_key_entry()]))
                 .build();
-            let mut request = vec![0x02];
-            request.extend(cbor::encode(&p).unwrap());
+            let mut request = vec![0x01];
+            request.extend(cbor::encode(&params).unwrap());
             assert_eq!(handler.process(&request, &ctx), vec![STATUS_NOT_ALLOWED]);
+            for up in [true, false] {
+                let p = MapBuilder::new()
+                    .int(0x01, rp)
+                    .int(0x02, CLIENT_DATA_HASH.as_slice())
+                    .int(0x05, MapBuilder::new().text("up", up).build())
+                    .build();
+                let mut request = vec![0x02];
+                request.extend(cbor::encode(&p).unwrap());
+                assert_eq!(handler.process(&request, &ctx), vec![STATUS_NOT_ALLOWED]);
+            }
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(
@@ -489,7 +502,10 @@ mod tests {
         cose::PublicKey::Es256 { x, y }
     }
 
-    fn get_assertion(handler: &Ctap2Handler<VaultAuthenticator<ApproveAll>>, p: &Value) -> Vec<u8> {
+    fn get_assertion<A: Approver + UvProbe + Send>(
+        handler: &Ctap2Handler<VaultAuthenticator<A>>,
+        p: &Value,
+    ) -> Vec<u8> {
         let mut request = vec![0x02];
         request.extend(cbor::encode(p).unwrap());
         handler.process(&request, &hid::RequestContext::new())
@@ -522,6 +538,39 @@ mod tests {
         longer.extend_from_slice(&[0; 16]);
         let reply = get_assertion(&handler, &get_assertion_params(Some(&longer), true));
         assert_eq!(reply, vec![0x2e]);
+    }
+
+    #[test]
+    fn silent_probes_do_not_scan_the_vault_folder_every_time() {
+        let dir = ScratchDir::new("hirzd-test").unwrap();
+        let (vault_dir, state_dir) = (dir.path().join("vault"), dir.path().join("state"));
+        Vault::create(&vault_dir, &state_dir, "test").unwrap();
+        let session = Session::new(settings_for(&vault_dir, &state_dir), ApproveAll);
+        let handler = Ctap2Handler::new(VaultAuthenticator::new(session, Notice::new(false)));
+
+        let id: Vec<u8> = (0x40..0x50).collect();
+        let reply = get_assertion(&handler, &get_assertion_params(Some(&id), false));
+        assert_eq!(reply, vec![0x2e], "nothing there yet");
+        let key = import_es256(&vault_dir, &state_dir, &id);
+
+        for _ in 0..20 {
+            let reply = get_assertion(&handler, &get_assertion_params(Some(&id), false));
+            assert_eq!(
+                reply,
+                vec![0x2e],
+                "a probe in the window answers from the last look, without a scan"
+            );
+        }
+
+        let reply = get_assertion(&handler, &get_assertion_params(Some(&id), true));
+        let (status, body) = reply.split_first().unwrap();
+        assert_eq!(
+            *status, STATUS_OK,
+            "a request that asks the user always looks"
+        );
+        check_assertion(body, &id, &key).unwrap();
+        let reply = get_assertion(&handler, &get_assertion_params(Some(&id), false));
+        assert_eq!(reply.first(), Some(&STATUS_OK));
     }
 
     #[test]
@@ -577,5 +626,50 @@ mod tests {
             Vault::open(&vault_dir, &a_state).unwrap().list_all().len(),
             1
         );
+    }
+
+    #[test]
+    fn a_fork_refuses_new_passkeys_without_a_prompt_and_keeps_signing_in() {
+        let dir = ScratchDir::new("hirzd-test").unwrap();
+        let vault_dir = dir.path().join("vault");
+        let (a_state, b_state) = (dir.path().join("a"), dir.path().join("b"));
+        let (mut a, phrase) = Vault::create(&vault_dir, &a_state, "a").unwrap();
+        let b = Vault::join_with_recovery(&vault_dir, &b_state, &phrase, "b").unwrap();
+        let id: Vec<u8> = (0x40..0x50).collect();
+        let key = import_es256(&vault_dir, &a_state, &id);
+        a.reload().unwrap();
+        a.remove_device(&b.device_id()).unwrap();
+        let name = std::fs::read_dir(vault_dir.join("keys"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .find(|n| n.starts_with("0000000002-"))
+            .unwrap();
+        let from = vault_dir.join("keys").join(&name);
+        let to = vault_dir.join(format!(".hidden-{name}"));
+        std::fs::rename(&from, &to).unwrap();
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = Session::new(
+            settings_for(&vault_dir, &a_state),
+            Counting(Arc::clone(&calls)),
+        );
+        let handler = Ctap2Handler::new(VaultAuthenticator::new(session, Notice::new(false)));
+        let ctx = hid::RequestContext::new();
+        let mut request = vec![0x01];
+        request.extend(cbor::encode(&make_credential_params()).unwrap());
+        for _ in 0..2 {
+            assert_eq!(handler.process(&request, &ctx), vec![STATUS_NOT_ALLOWED]);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let reply = get_assertion(&handler, &get_assertion_params(Some(&id), true));
+        let (status, body) = reply.split_first().unwrap();
+        assert_eq!(*status, STATUS_OK);
+        check_assertion(body, &id, &key).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        std::fs::rename(&to, &from).unwrap();
+        let reply = handler.process(&request, &ctx);
+        assert_eq!(reply.first(), Some(&STATUS_OK));
     }
 }

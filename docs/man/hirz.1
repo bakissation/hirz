@@ -49,17 +49,27 @@ shows the help of one command.
 Questions are written to standard error, so standard output stays clean when it is
 redirected.
 Recovery phrases, PINs and passphrases are read without echo when standard input is a
-terminal.
+terminal; echo is switched back on when the question ends and when Ctrl\-C or another signal
+ends the process during it.
 .PP
 Sites are shown by their relying party id.
 Keys that OpenSSH created on hirz (relying party id \fBssh:\fR or \fBssh:\fINAME\fR)
-are shown as "SSH key" or "SSH key (NAME)"; JSON output keeps the raw id.
+are shown as "SSH key" or "SSH key (NAME)"; JSON output keeps the raw id, with DEL, C1
+control, invisible and direction\-changing characters written as \fB\\u\fIXXXX\fR escapes
+(a character beyond the Basic Multilingual Plane as the UTF\-16 pair JSON asks for, for example
+\fB\\udb40\\udc67\fR), so the JSON means the same.
+.PP
+At start hirz sets RLIMIT_CORE to 0, PR_SET_DUMPABLE to 0 and PR_SET_NO_NEW_PRIVS, like
+.BR hirzd (1),
+so a crash does not leave a core file with the recovery phrase or the keys it handled.
 .SH OPTIONS
 .TP
 .BI \-\-vault " DIR"
 Use the vault folder
 .IR DIR .
-Without it, hirz uses the folder recorded by
+Without it, hirz uses
+.BR HIRZ_VAULT ,
+else the folder recorded by
 .B init
 or
 .B join
@@ -83,9 +93,10 @@ the folder must be empty or not exist yet.
 .B \-\-name
 sets this computer's name as other devices see it (1 to 64 characters, default the host
 name).
-The 24\-word recovery phrase is shown once and three of its words must be typed back;
+The 24\-word recovery phrase is shown once, on the terminal's alternate screen so that it
+does not stay in scrollback, and three of its words must be typed back;
 .B \-\-yes\-i\-saved\-it
-skips that check.
+skips that check and prints the phrase on standard output as it is (for scripts).
 Refuses when this computer is already set up or the folder already holds a vault.
 .TP
 .B join \-\-vault \fIDIR\fB \-\-request \fR[\fB\-\-name \fINAME\fR]
@@ -96,6 +107,15 @@ hirz writes a request into the vault folder, shows four verification words and w
 On the other device run
 .B hirz devices approve
 and compare the words.
+The name in the request is
+.B \-\-name
+or the host name, reduced to 1 to 32 characters of ASCII letters, digits, spaces and
+.BR "\- _ ." :
+other characters become
+.BR \- ,
+words in capitals are lowercased, and a name that cannot be repaired becomes
+.BR new\-device .
+That is the name this computer joins under.
 The request expires after 15 minutes.
 .TP
 .B join \-\-vault \fIDIR\fR [\fB\-\-name \fINAME\fR]
@@ -119,18 +139,28 @@ Delete one passkey on all devices after showing it and asking.
 is at least four hex digits of the credential id;
 .I ACCOUNT
 matches the user name or display name exactly.
-When several passkeys match, nothing is deleted.
+When several passkeys match, nothing is deleted and the list shows enough of each id to
+tell them apart.
 .TP
 .B devices \fR[\fB\-\-json\fR]
-List the devices of the vault and say when devices are waiting for approval.
+List the devices of the vault, who approved each one (the name of a device, or the recovery
+phrase), and say when devices are waiting for approval.
+When more requests are waiting than are listed, say how many are not.
 .TP
 .B devices approve \fR[\fIREQUEST\fR]
 Approve a device that ran
 .BR "join \-\-request" .
-hirz shows its name, when it asked and the four verification words; type
+hirz shows when it asked and the four verification words, and nothing the new device chose;
+type
 .B yes
 only if the new device shows the same words.
-A hirz window then requires user verification (system password, fingerprint or hirz PIN).
+When several requests wait, the list to choose from shows the words, not the names.
+Only after that
+.B yes
+does hirz show the name the device gave itself, labelled as chosen by it, and ask whether it
+is the device you are setting up.
+A hirz window then shows the words alone, then the name, and requires user verification
+(system password, fingerprint or hirz PIN).
 .I REQUEST
 is at least four hex digits of the request id.
 .TP
@@ -145,6 +175,21 @@ verification in a hirz window.
 skips only the question in the terminal.
 This computer cannot remove itself.
 .TP
+.B repair \fR[\fB\-\-discard \fINAME\fR | \fB\-\-accept\-fork\fR] [\fB\-\-yes\fR]
+Show whether the vault folder reports a fork (the key changes this computer followed are
+missing or were rewritten) or a rotation conflict (two devices removed each other), and list
+the key changes this computer does not follow.
+.B \-\-discard
+deletes the named key change, as listed, and everything built on it.
+.B \-\-accept\-fork
+makes this computer follow the folder as it is now; it is refused unless a fork is reported.
+Both ask a question in the terminal (a typed word for
+.BR \-\-accept\-fork )
+and then require user verification in a hirz window;
+.B \-\-yes
+skips only the question in the terminal.
+Passkeys keep working while a fork or conflict is reported, but nothing new is saved.
+.TP
 .B forget\-local
 Delete this computer's hirz keys from the state directory (device secret, key ring, event
 counter and recorded vault location).
@@ -153,12 +198,20 @@ The vault folder is not touched.
 .B pin set\fR | \fBchange\fR | \fBreset\fR | \fBstatus
 Manage the hirz PIN.
 .B set
-asks for a new PIN twice and fails if one exists;
+asks for a new PIN twice (4 to 63 printable ASCII characters) and fails if one exists;
+a PIN made of other characters, set by an earlier build, cannot match and is replaced with
+.B reset
+and
+.BR set ;
 .B change
 asks for the current PIN first;
 .B reset
 removes the PIN and clears a lock, and on a computer set up with a vault asks for the
-recovery phrase first;
+recovery phrase first (it is refused on a computer that another device removed from the
+vault, as are
+.B export
+and
+.BR import );
 .B status
 shows whether a PIN is set, the wrong tries and whether it is locked.
 .TP
@@ -170,11 +223,19 @@ By default the document is encrypted with a passphrase of at least 12 characters
 .B \-\-plain
 writes the bare JSON document after a warning that must be answered with
 .BR yes .
+Before the file is built, a hirz window requires user verification (system password,
+fingerprint or hirz PIN), as for approving a device.
+Passkeys whose site id
+.B import
+cannot read back are listed before the export.
 .TP
-.B import \-\-cxf \fIFILE
+.B import \-\-cxf \fIFILE\fR [\fB\-\-yes\fR]
 Read an encrypted hirz export or a plain CXF document from another provider and add the
 valid passkeys.
 Existing passkeys are never replaced.
+All three import commands list the sites and accounts they would add and ask first;
+.B \-\-yes
+skips the question, not the list.
 .TP
 .B import \-\-bitwarden \fIFILE
 Read the passkeys of a Bitwarden JSON export, unencrypted or password protected (asks for
@@ -207,7 +268,10 @@ or at
 An existing file that points elsewhere is replaced only after a question, or with
 .BR \-\-force .
 Meant for development builds: distribution packages install a root\-owned system manifest,
-and a per\-user manifest takes precedence over it.
+and a per\-user manifest takes precedence over it. When a system manifest exists the command
+refuses and changes nothing unless
+.B \-\-force
+is given.
 .TP
 .B help \fR[\fICOMMAND\fR]
 Show help.
@@ -244,6 +308,18 @@ Base of the default folders.
 .TP
 .BR XDG_DATA_HOME ", " XDG_STATE_HOME ", " XDG_CONFIG_HOME
 Base folders of the vault, the device state and the approval config.
+Relative values are ignored.
+.TP
+.B HIRZ_VAULT
+Vault folder, as for
+.BR hirzd (1).
+.B \-\-vault
+takes precedence.
+Relative values are ignored.
+.TP
+.B HIRZ_STATE
+Device state folder, as for
+.BR hirzd (1).
 Relative values are ignored.
 .TP
 .B HIRZ_BROKER_SOCKET

@@ -10,24 +10,24 @@
 use crate::codec::hex;
 use crate::format::{self, GenId, KEYS_DIR, RECORDS_DIR};
 use crate::recovery::RecoveryPhrase;
-use crate::{CredentialRecord, HmacSecretPair, PhraseError, Vault, VaultError, import_backup};
+use crate::tests_line::Forger;
+use crate::{CredentialRecord, HmacSecretPair, PhraseError, Vault, VaultError};
 use hirz_crypto::Zeroizing;
-use hirz_crypto::kdf::Argon2Params;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-struct TempDir(PathBuf);
+pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
-    fn new(tag: &str) -> TempDir {
+    pub(crate) fn new(tag: &str) -> TempDir {
         let mut r = [0u8; 8];
         hirz_crypto::random_fill(&mut r).unwrap();
         let p = std::env::temp_dir().join(format!("hirz-vault-test-{tag}-{}", hex(&r)));
         fs::create_dir_all(&p).unwrap();
         TempDir(p)
     }
-    fn path(&self, sub: &str) -> PathBuf {
+    pub(crate) fn path(&self, sub: &str) -> PathBuf {
         self.0.join(sub)
     }
 }
@@ -38,7 +38,7 @@ impl Drop for TempDir {
     }
 }
 
-fn cred(seed: u8, rp: &str) -> CredentialRecord {
+pub(crate) fn cred(seed: u8, rp: &str) -> CredentialRecord {
     let (pkcs8, _, _) = hirz_crypto::es256::generate().unwrap();
     CredentialRecord {
         credential_id: vec![seed; 32],
@@ -60,7 +60,7 @@ fn cred(seed: u8, rp: &str) -> CredentialRecord {
     }
 }
 
-fn record_files(vault: &Path) -> Vec<PathBuf> {
+pub(crate) fn record_files(vault: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let records = vault.join(RECORDS_DIR);
     for d in fs::read_dir(records).unwrap() {
@@ -75,7 +75,7 @@ fn record_files(vault: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn gen_dirs(vault: &Path) -> Vec<String> {
+pub(crate) fn gen_dirs(vault: &Path) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(vault.join(KEYS_DIR))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -261,11 +261,13 @@ fn version_1_records_and_tombstones_still_read() {
     );
 
     let event_with = |payload: &[u8], kind: u8| {
-        let mut w = Writer::new(1);
+        let mut w = Writer::new(2);
         w.u8_field(0x01, kind).unwrap();
         w.field(0x02, &[7; 16]).unwrap();
         w.u64_field(0x03, 9).unwrap();
         w.field(0x04, payload).unwrap();
+        w.field(0x05, &[0; 32]).unwrap();
+        w.field(0x06, &[0; 64]).unwrap();
         let mut body = w.finish();
         crate::record::append_tag(&mut body, &[0; 32]);
         body
@@ -299,11 +301,24 @@ fn version_1_records_and_tombstones_still_read() {
         VaultError::UnsupportedVersion
     );
 
-    let fresh = Event {
-        kind: EventKind::Tombstone(vec![5; 16]),
-        origin_author: [7; 16],
-        origin_lamport: 9,
-    };
+    let signer = hirz_crypto::ed25519::public_from_seed(&[7; 32]).unwrap();
+    let author = crate::record::device_id_for(&signer);
+    let fresh = Event::signed(
+        EventKind::Tombstone(vec![5; 16]),
+        author,
+        9,
+        &[7; 32],
+        &[1; 16],
+    )
+    .unwrap();
+    assert!(fresh.signature_valid(&[1; 16], &fresh.digest().unwrap()));
+    assert!(!fresh.signature_valid(&[2; 16], &fresh.digest().unwrap()));
+    let mut forged = fresh.clone();
+    forged.origin_lamport = 10;
+    assert!(!forged.signature_valid(&[1; 16], &forged.digest().unwrap()));
+    forged.origin_author = [7; 16];
+    forged.origin_lamport = 9;
+    assert!(!forged.signature_valid(&[1; 16], &forged.digest().unwrap()));
     let mut body = fresh.encode_body().unwrap();
     crate::record::append_tag(&mut body, &[0; 32]);
     assert_eq!(Event::decode(&body).unwrap().0, fresh);
@@ -762,7 +777,7 @@ fn garbage_collection_after_rotation() {
     assert_eq!(e.list_all().len(), 1);
 }
 
-fn hide(vault: &Path, number: u32) -> (PathBuf, PathBuf) {
+pub(crate) fn hide(vault: &Path, number: u32) -> (PathBuf, PathBuf) {
     let name = gen_dirs(vault)
         .into_iter()
         .find(|d| d.starts_with(&format!("{number:010}-")))
@@ -857,12 +872,20 @@ fn mutual_removal_race_is_rejected_until_the_user_decides() {
     x.remove_device(&a.device_id()).unwrap();
     fs::rename(&hidden, &back).unwrap();
 
-    for v in [&mut a, &mut x, &mut b] {
+    // Each rotator keeps the line it chose: the other generation rests on a device its own line
+    // removed. A device that followed neither cannot tell who is right.
+    for v in [&mut a, &mut x] {
         let r = v.reload().unwrap().clone();
-        assert_eq!(r.rejected_generations, 2, "{r:?}");
-        assert_eq!(r.generation, 1);
-        assert!(r.rotation_conflict);
+        assert_eq!(r.generation, 2, "{r:?}");
+        assert_eq!(r.rejected_generations, 1);
+        assert!(!r.rotation_conflict && !r.this_device_removed && !r.fork_detected);
     }
+    let r = b.reload().unwrap().clone();
+    assert_eq!(r.rejected_generations, 2, "{r:?}");
+    assert_eq!(r.generation, 1);
+    assert!(r.rotation_conflict);
+    assert!(!r.this_device_removed);
+    assert_eq!(b.list_all().len(), 1, "existing passkeys stay readable");
     assert!(matches!(
         b.put(cred(2, "example.com")),
         Err(VaultError::RotationConflict)
@@ -877,8 +900,15 @@ fn mutual_removal_race_is_rejected_until_the_user_decides() {
     assert_eq!(b.report().generation, 2);
     assert_eq!(b.list_all().len(), 2);
     b.put(cred(3, "example.com")).unwrap();
-    assert!(x.reload().unwrap().locked_out);
+    // X's own removal of A was deleted under it: a fork. A's generation rests on a device X's
+    // line removed, so X cannot tell it from a forgery and never treats it as its removal.
+    let r = x.reload().unwrap().clone();
+    assert!(r.fork_detected && !r.this_device_removed, "{r:?}");
     assert!(x.get(&[2; 32]).is_none());
+    assert!(matches!(
+        x.put(cred(4, "example.com")),
+        Err(VaultError::Fork)
+    ));
 }
 
 #[test]
@@ -890,9 +920,10 @@ fn forged_generation_without_chain_is_ignored() {
     let a_id = a.device_id();
     let vault_id = a.vault_id();
     let pubkey = hirz_crypto::x25519::public_key(&a.device.x25519_private).unwrap();
+    let r = Forger::new(0x99);
     let fake = GenId {
         number: 2,
-        rotator: [0x99; 16],
+        rotator: r.id,
     };
     let fake_key = [0x42u8; 32];
     let dir = vdir.join(KEYS_DIR).join(fake.dir_name());
@@ -910,6 +941,9 @@ fn forged_generation_without_chain_is_ignored() {
         reemit_first: 0,
         reemit_count: 0,
         recovery_tag: None,
+        recovery_signing_pub: [0; 32],
+        members: vec![r.member()],
+        chain: vec![],
     };
     let genesis = GenId {
         number: 1,
@@ -917,7 +951,7 @@ fn forged_generation_without_chain_is_ignored() {
     };
     fs::write(
         dir.join("gen.info"),
-        info.seal(&fake_key, &vault_id, &fake, Some(&genesis))
+        info.seal(&fake_key, &vault_id, &fake, Some(&genesis), &r.seed)
             .unwrap(),
     )
     .unwrap();
@@ -941,60 +975,6 @@ fn forged_generation_without_chain_is_ignored() {
             .number,
         1
     );
-}
-
-#[test]
-fn backup_export_import() {
-    let t = TempDir::new("backup");
-    let (mut a, phrase) = Vault::create(&t.path("v"), &t.path("a"), "a").unwrap();
-    a.put(cred(1, "example.com")).unwrap();
-    a.put(cred(2, "example.org")).unwrap();
-    let fast = Argon2Params {
-        m_cost_kib: 64,
-        t_cost: 1,
-        p_cost: 1,
-    };
-
-    let plain = a.export_backup_with_params(&phrase, None, fast).unwrap();
-    let back = import_backup(&plain, &phrase, None).unwrap();
-    assert_eq!(back.len(), 2);
-    assert!(back.iter().any(|r| *r == *a.get(&[1; 32]).unwrap()));
-
-    let protected = a
-        .export_backup_with_params(&phrase, Some(b"correct horse"), fast)
-        .unwrap();
-    assert_eq!(
-        import_backup(&protected, &phrase, Some(b"correct horse"))
-            .unwrap()
-            .len(),
-        2
-    );
-    assert!(matches!(
-        import_backup(&protected, &phrase, Some(b"wrong")),
-        Err(VaultError::WrongRecoveryKey)
-    ));
-    assert!(matches!(
-        import_backup(&protected, &phrase, None),
-        Err(VaultError::InvalidParameters)
-    ));
-    let other = RecoveryPhrase::from_entropy([3; 32]);
-    assert!(import_backup(&plain, &other, None).is_err());
-    assert!(matches!(
-        a.export_backup_with_params(&other, None, fast),
-        Err(VaultError::WrongRecoveryKey)
-    ));
-    let mut tampered = protected.clone();
-    let n = tampered.len() - 1;
-    tampered[n] ^= 1;
-    assert!(import_backup(&tampered, &phrase, Some(b"correct horse")).is_err());
-
-    let mut hostile = protected.clone();
-    let m_offset = 6 + 16 + 1 + 16;
-    hostile[m_offset..m_offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(matches!(
-        import_backup(&hostile, &phrase, Some(b"correct horse")),
-        Err(VaultError::InvalidParameters)
-    ));
 }
 
 #[test]
@@ -1238,6 +1218,7 @@ fn tampered_pairing_request_changes_the_words() {
 
     let mut takeover = pending.request().clone();
     takeover.device_id = a.device_id();
+    takeover.signing_key = a.device.signing_public().unwrap();
     fs::write(&path, takeover.encode().unwrap()).unwrap();
     assert!(a.pairing_requests().unwrap().is_empty());
     assert!(matches!(
@@ -1319,11 +1300,13 @@ fn forged_or_replayed_approval_is_rejected() {
 
 #[test]
 fn pairing_request_encoding() {
+    let signing_key = hirz_crypto::ed25519::public_from_seed(&[9; 32]).unwrap();
     let req = PairingRequest {
         request_id: [1; 16],
-        device_id: [2; 16],
+        device_id: crate::record::device_id_for(&signing_key),
         name: "desk".into(),
         public_key: [3; 32],
+        signing_key,
         created_at: 1000,
         expires_at: 1000 + PAIRING_LIFETIME_SECS,
     };
@@ -1338,6 +1321,10 @@ fn pairing_request_encoding() {
             expires_at: 999,
             ..req.clone()
         },
+        PairingRequest {
+            device_id: [2; 16],
+            ..req.clone()
+        },
     ] {
         let mut w = crate::codec::Writer::new(1);
         w.field(0x01, &bad.request_id).unwrap();
@@ -1346,6 +1333,7 @@ fn pairing_request_encoding() {
         w.field(0x04, &bad.public_key).unwrap();
         w.u64_field(0x05, bad.created_at).unwrap();
         w.u64_field(0x06, bad.expires_at).unwrap();
+        w.field(0x07, &bad.signing_key).unwrap();
         let mut data = format::prefix(format::FileType::PairingRequest).to_vec();
         data.extend_from_slice(&w.finish());
         assert!(PairingRequest::decode(&data).is_err());
@@ -1354,6 +1342,6 @@ fn pairing_request_encoding() {
         assert!(PairingRequest::decode(&enc[..n]).is_err());
     }
     let mut extra = enc.clone();
-    extra.extend_from_slice(&[0x07, 0, 0]);
+    extra.extend_from_slice(&[0x08, 0, 0]);
     assert!(PairingRequest::decode(&extra).is_err());
 }

@@ -6,7 +6,7 @@
 
 use super::{
     Found, MAX_FILE_LEN, MAX_PASSKEYS, Parsed, base64_field, creation_time, finish, identify_key,
-    lenient_base64, non_empty, opt_text, parse_utc, shown, site_id, with_json,
+    lenient_base64, non_empty, opt_text, opt_text_up_to, parse_utc, shown, site_id, with_json,
 };
 use hirz_core::COSE_ALG_ES256;
 use hirz_crypto::kdf::Argon2Params;
@@ -27,6 +27,9 @@ const PBKDF2_ITERATIONS: core::ops::RangeInclusive<u64> = 5_000..=2_000_000;
 const ARGON2_ITERATIONS: core::ops::RangeInclusive<u64> = 2..=10;
 const ARGON2_MEMORY_MIB: core::ops::RangeInclusive<u64> = 16..=1024;
 const ARGON2_PARALLELISM: core::ops::RangeInclusive<u64> = 1..=16;
+
+/// `b64.` and the base64 text of the longest credential id hirz keeps, with padding.
+const MAX_CREDENTIAL_ID_TEXT: usize = 4 + MAX_CREDENTIAL_ID_LEN.div_ceil(3) * 4;
 
 const NOT_BITWARDEN: &str = "The file is not valid JSON, so it is not a Bitwarden JSON export.";
 
@@ -344,7 +347,7 @@ fn passkey(c: &Json, now: u64) -> Result<CredentialRecord, String> {
             shown(curve)
         ));
     }
-    let credential_id = opt_text(c, "credentialId")?
+    let credential_id = opt_text_up_to(c, "credentialId", MAX_CREDENTIAL_ID_TEXT)?
         .and_then(credential_id)
         .ok_or("its credential id is missing or malformed")?;
     let rp_id = site_id(opt_text(c, "rpId")?.ok_or("the field rpId is missing")?)?;
@@ -546,6 +549,25 @@ mod tests {
     }
 
     #[test]
+    fn long_credential_ids_up_to_the_limit_import() {
+        let k = key();
+        for (len, imported) in [(765usize, true), (1023, true), (1024, false)] {
+            let id = format!(
+                "b64.{}",
+                hirz_proto::base64url::encode(&vec![7u8; len]).replace('-', "+")
+            );
+            let doc = plain_export(&[vec![fido2_entry(&id, "example.com", "a", "P-256", &k)]]);
+            match (&plain(doc.as_bytes()).passkeys[0], imported) {
+                (Found::Ready(r), true) => assert_eq!(r.credential_id, vec![7u8; len]),
+                (Found::Skipped { reason, .. }, false) => {
+                    assert!(reason.contains("credentialId"), "{reason}");
+                }
+                (other, _) => panic!("{len}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn plain_export_keeps_passkeys_only() {
         let (doc, k1, k2) = sample();
         check_sample(&plain(doc.as_bytes()), &k1, &k2);
@@ -675,6 +697,12 @@ mod tests {
         }
         let future = good.replace("2024-02-29", "2999-01-01");
         let p = plain(plain_export(&[vec![future]]).as_bytes());
+        let Found::Ready(r) = &p.passkeys[0] else {
+            panic!("should import")
+        };
+        assert_eq!(r.created_at, NOW);
+        let soon = good.replace("2024-02-29T12:00:00.000Z", "2027-05-01T00:00:00.000Z");
+        let p = plain(plain_export(&[vec![soon]]).as_bytes());
         let Found::Ready(r) = &p.passkeys[0] else {
             panic!("should import")
         };

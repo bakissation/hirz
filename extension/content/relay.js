@@ -1,6 +1,7 @@
 // ISOLATED world, document_start, every frame. A dumb pipe between page/shim.js and the
 // background: it adds no identity, the background reads the origin from the sender Firefox reports.
-// Conditional account lists go to content/autofill.js and never back to the page.
+// Conditional requests live here until the user touches a field (content/autofill.js); the account
+// list goes to the autofill and never back to the page.
 "use strict";
 
 (() => {
@@ -8,11 +9,13 @@
   const BOOT = "hirz-bootstrap";
   const PORT_NAME = "hirz-page";
   const MAX_REQUEST_CHARS = 72 * 1024;
+  const MAX_CONDITIONAL = 16;
   const KINDS = new Set(["create", "get", "conditional", "capabilities", "cancel"]);
 
   let secret = null;
   let port = null;
   const pending = new Map();
+  const conditionalOptions = new Map();
 
   const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
@@ -30,42 +33,64 @@
     emit("hirz-res-" + secret, JSON.stringify(out));
   }
 
-  function select(rid, id) {
-    if (pending.get(rid) !== "conditional" || port === null) return;
+  function forget(rid) {
+    pending.delete(rid);
+    conditionalOptions.delete(rid);
+  }
+
+  function post(message) {
     try {
-      port.postMessage({ v: 1, kind: "select", rid, id });
+      ensurePort().postMessage(message);
     } catch {
       onPortDisconnect();
+    }
+  }
+
+  function suggest(rid) {
+    const options = conditionalOptions.get(rid);
+    if (pending.get(rid) === "conditional" && options !== undefined) {
+      post({ v: 1, kind: "suggest", rid, options });
+    }
+  }
+
+  function select(rid, id) {
+    if (pending.get(rid) === "conditional" && port !== null) {
+      post({ v: 1, kind: "select", rid, id });
     }
   }
 
   function onPortMessage(msg) {
     if (!isObject(msg) || msg.v !== 1 || !pending.has(msg.rid)) return;
     const rid = msg.rid;
-    if (pending.get(rid) === "conditional") {
-      if (msg.phase === "accounts") {
-        if (autofill) autofill.start(rid, msg.accounts, (id) => select(rid, id));
-        else respond({ rid, ok: false, error: "NotHandled" });
-        return;
-      }
-      if (msg.phase === "retry") {
-        if (autofill) autofill.resume(rid);
-        return;
-      }
-      if (autofill) autofill.stop(rid);
+    if (pending.get(rid) !== "conditional") {
+      pending.delete(rid);
+      respond(msg);
+      return;
     }
-    pending.delete(rid);
-    respond(msg);
+    if (!autofill) return;
+    if (msg.phase === "accounts") autofill.provide(rid, msg.accounts);
+    else if (msg.phase === "retry") autofill.resume(rid);
+    else if (msg.phase === "stale") autofill.invalidate(rid);
+    else if (msg.ok === true) {
+      autofill.stop(rid);
+      forget(rid);
+      respond(msg);
+    } else autofill.invalidate(rid);
   }
 
+  // The background keeps no state for a conditional request, so a lost port only costs the list:
+  // the request stays registered here and the next touch asks again over a new port.
   function onPortDisconnect() {
     port = null;
     for (const [rid, kind] of pending) {
-      if (kind === "conditional" && autofill) autofill.stop(rid);
-      const error = kind === "capabilities" || kind === "conditional" ? "NotHandled" : "NotAllowedError";
+      if (kind === "conditional") {
+        if (autofill) autofill.invalidate(rid);
+        continue;
+      }
+      const error = kind === "capabilities" ? "NotHandled" : "NotAllowedError";
       respond({ v: 1, rid, ok: false, error });
+      pending.delete(rid);
     }
-    pending.clear();
   }
 
   function ensurePort() {
@@ -93,15 +118,23 @@
     const out = { v: 1, kind: msg.kind, rid };
     if (msg.kind === "cancel") {
       if (!pending.has(rid)) return;
-      // The shim has already settled a cancelled conditional request.
       if (pending.get(rid) === "conditional") {
         if (autofill) autofill.stop(rid);
-        pending.delete(rid);
+        forget(rid);
       }
       if (port === null) return;
+    } else if (msg.kind === "conditional") {
+      // No answer ever goes back for it unless the user picks a passkey: Firefox's own request,
+      // started by the shim, is what the page sees in every other case.
+      if (pending.has(rid) || !isObject(msg.options) || !autofill) return;
+      if (conditionalOptions.size >= MAX_CONDITIONAL) return;
+      pending.set(rid, "conditional");
+      conditionalOptions.set(rid, msg.options);
+      autofill.start(rid, { request: () => suggest(rid), onSelect: (id) => select(rid, id) });
+      return;
     } else {
       if (pending.has(rid)) return;
-      if (msg.kind === "create" || msg.kind === "get" || msg.kind === "conditional") {
+      if (msg.kind === "create" || msg.kind === "get") {
         if (!isObject(msg.options)) {
           respond({ v: 1, rid, ok: false, error: "NotHandled" });
           return;
@@ -110,11 +143,7 @@
       }
       pending.set(rid, msg.kind);
     }
-    try {
-      ensurePort().postMessage(out);
-    } catch {
-      onPortDisconnect();
-    }
+    post(out);
   }
 
   // Handshake with the shim: whichever script loads second completes it synchronously, and the

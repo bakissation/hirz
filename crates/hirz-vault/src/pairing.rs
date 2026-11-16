@@ -7,10 +7,10 @@ use crate::codec::{self, Fields, Reader, Writer, aad, hex, unhex};
 use crate::error::VaultError;
 use crate::format::{
     self, FORMAT_VERSION, FileType, GEN_INFO_NAME, GenId, GenInfo, Header, KEYS_DIR, Keyring,
-    KeyringEntry, LocalDevice, prefix, strip_prefix,
+    KeyringEntry, LocalDevice, MAX_GENERATIONS, RECOVERY_SLOT_NAME, prefix, strip_prefix,
 };
 use crate::fsutil::{self, MAX_FILE_LEN};
-use crate::record::{MAX_DEVICE_NAME_LEN, expect_end, expect_field};
+use crate::record::{MAX_DEVICE_NAME_LEN, device_id_for, expect_end, expect_field};
 use crate::vault::{self, KeyedJoin, Vault};
 use hirz_crypto::kdf::{self, Argon2Params};
 use hirz_crypto::{Zeroizing, x25519};
@@ -31,7 +31,9 @@ const APPROVAL_KEEP_SECS: u64 = 60 * 60;
 const UNREADABLE_KEEP_SECS: u64 = 20 * 60;
 pub const PAIRING_WORDS: usize = 4;
 const CHAIN_ENTRY_LEN: usize = 52;
-const MAX_CHAIN: usize = 10_000;
+/// Requests a listing returns; the rest are counted, so a folder full of planted requests
+/// cannot flood the approval screen.
+pub const MAX_LISTED_REQUESTS: usize = 16;
 
 /// Memory-hard, so that finding a second request with the same 44-bit words costs about
 /// 2^43 Argon2id evaluations instead of 2^43 hashes.
@@ -45,6 +47,8 @@ pub struct PairingRequest {
     /// Untrusted, chosen by the new device; clean before display.
     pub name: String,
     pub public_key: [u8; 32],
+    /// Ed25519 key the new device will sign key rotations with; `device_id` is derived from it.
+    pub signing_key: [u8; 32],
     /// Unix seconds, by the new device's clock.
     pub created_at: u64,
     pub expires_at: u64,
@@ -52,7 +56,7 @@ pub struct PairingRequest {
 
 impl PairingRequest {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, VaultError> {
-        if self.name.is_empty() || self.name.len() > MAX_DEVICE_NAME_LEN {
+        if device_name_problem(&self.name).is_some() {
             return Err(VaultError::Encode);
         }
         let mut w = Writer::new(REQUEST_VERSION);
@@ -62,6 +66,7 @@ impl PairingRequest {
         w.field(0x04, &self.public_key)?;
         w.u64_field(0x05, self.created_at)?;
         w.u64_field(0x06, self.expires_at)?;
+        w.field(0x07, &self.signing_key)?;
         let body = w.finish();
         let mut out = prefix(FileType::PairingRequest).to_vec();
         out.extend_from_slice(&body);
@@ -79,9 +84,13 @@ impl PairingRequest {
         let public_key = codec::fixed::<32>(expect_field(&mut f, 0x04)?)?;
         let created_at = codec::u64_value(expect_field(&mut f, 0x05)?)?;
         let expires_at = codec::u64_value(expect_field(&mut f, 0x06)?)?;
+        let signing_key = codec::fixed::<32>(expect_field(&mut f, 0x07)?)?;
         expect_end(&mut f)?;
-        if name.is_empty() {
+        if device_name_problem(&name).is_some() {
             return Err(VaultError::Corrupt("pairing request name"));
+        }
+        if device_id_for(&signing_key) != device_id {
+            return Err(VaultError::Corrupt("pairing request device id"));
         }
         let lifetime = expires_at.checked_sub(created_at);
         if lifetime.is_none_or(|l| l == 0 || l > PAIRING_LIFETIME_SECS) {
@@ -92,6 +101,7 @@ impl PairingRequest {
             device_id,
             name,
             public_key,
+            signing_key,
             created_at,
             expires_at,
         })
@@ -99,6 +109,91 @@ impl PairingRequest {
 
     fn usable_at(&self, now: u64) -> bool {
         now <= self.expires_at && self.created_at <= now.saturating_add(MAX_CLOCK_SKEW_SECS)
+    }
+}
+
+/// Longest device name a pairing request carries.
+pub const MAX_REQUEST_NAME_LEN: usize = 32;
+/// A name with more tokens from the recovery word list than this is refused.
+const MAX_WORDLIST_TOKENS: usize = 2;
+const FALLBACK_NAME: &str = "new-device";
+
+fn is_separator(c: char) -> bool {
+    matches!(c, ' ' | '-' | '_' | '.')
+}
+
+fn is_capitals_token(t: &str) -> bool {
+    t.len() >= 3 && t.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+/// Why `name` may not be the name in a pairing request, or `None` when it may. The name is chosen
+/// by the device that asks to join and anyone who can write to the folder can make one up, so it
+/// is limited to a short alphabet and cannot read as the verification words: no token in capitals
+/// (the words are shown in capitals) and at most two tokens from the recovery word list.
+pub fn device_name_problem(name: &str) -> Option<&'static str> {
+    if name.is_empty() || name.len() > MAX_REQUEST_NAME_LEN {
+        return Some("a device name has 1 to 32 characters");
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b' '))
+    {
+        return Some("a device name uses only letters, digits, spaces and - _ .");
+    }
+    if name.starts_with(' ') || name.ends_with(' ') || name.contains("  ") {
+        return Some("a device name has no leading, trailing or repeated spaces");
+    }
+    let mut listed = 0usize;
+    for token in name.split(is_separator).filter(|t| !t.is_empty()) {
+        if is_capitals_token(token) {
+            return Some("a device name has no word in capitals");
+        }
+        if crate::recovery::index_of(&token.to_ascii_lowercase()).is_some() {
+            listed = listed.saturating_add(1);
+        }
+    }
+    (listed > MAX_WORDLIST_TOKENS)
+        .then_some("a device name has too many words of the recovery word list")
+}
+
+/// `name` reduced to one [`device_name_problem`] accepts: other characters become `-`, white
+/// space is collapsed, capitals words are lowercased and the result is cut to
+/// [`MAX_REQUEST_NAME_LEN`]. A name that cannot be repaired becomes `new-device`.
+pub fn request_device_name(name: &str) -> String {
+    let mut mapped = String::new();
+    for c in name.chars() {
+        let c = match c {
+            c if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') => c,
+            c if c.is_whitespace() => ' ',
+            _ => '-',
+        };
+        if c == ' ' && (mapped.is_empty() || mapped.ends_with(' ')) {
+            continue;
+        }
+        mapped.push(c);
+        if mapped.len() >= MAX_REQUEST_NAME_LEN {
+            break;
+        }
+    }
+    let mut out = String::new();
+    let mut token = String::new();
+    for c in mapped.trim_end().chars().chain(Some(' ')) {
+        if is_separator(c) {
+            if is_capitals_token(&token) {
+                token.make_ascii_lowercase();
+            }
+            out.push_str(&token);
+            token.clear();
+            out.push(c);
+        } else {
+            token.push(c);
+        }
+    }
+    out.pop();
+    if out.bytes().any(|b| b.is_ascii_alphanumeric()) && device_name_problem(&out).is_none() {
+        out
+    } else {
+        FALLBACK_NAME.to_owned()
     }
 }
 
@@ -132,6 +227,7 @@ pub(crate) fn word_indices(
             &req.public_key,
             &req.created_at.to_be_bytes(),
             &req.expires_at.to_be_bytes(),
+            &req.signing_key,
         ],
     );
     let out = kdf::argon2id(&input, &req.request_id, WORDS_KDF)?;
@@ -180,16 +276,56 @@ pub(crate) fn genesis_fingerprint(
     Ok(hirz_crypto::sha256(&data))
 }
 
+/// Byte lengths of a genesis `gen.info` and its `recovery.slot`. Both are fixed: a genesis has one
+/// member, a recovery tag, no removals and no endorsement chain.
+fn genesis_file_lens() -> Result<(usize, usize), VaultError> {
+    let zero = [0u8; 32];
+    let id = GenId {
+        number: 1,
+        rotator: [0u8; 16],
+    };
+    let info = GenInfo {
+        commitment: zero,
+        recovery_pub: zero,
+        removed: Vec::new(),
+        created_at: 0,
+        reemit_first: 0,
+        reemit_count: 0,
+        recovery_tag: Some(zero),
+        recovery_signing_pub: zero,
+        members: vec![format::Member {
+            device_id: [0u8; 16],
+            signing_public: zero,
+            x25519_public: zero,
+        }],
+        chain: Vec::new(),
+    };
+    let public = x25519::public_key(&[1u8; 32])?;
+    let info_len = info.seal(&zero, &[0u8; 16], &id, None, &zero)?.len();
+    let slot_len = format::seal_recovery_slot(&[0u8; 16], &id, &public, &zero)?.len();
+    Ok((info_len, slot_len))
+}
+
 /// The single genesis generation. Several mean the folder was tampered with; none means it is
-/// not completely synced yet.
+/// not completely synced yet. Without a key the new device cannot authenticate a candidate, so
+/// it counts only those shaped exactly like a genesis: a `gen.info` of the genesis length with
+/// the genesis prefix and a `recovery.slot` of the slot length. Anything else is junk.
 fn find_genesis(vault_dir: &Path) -> Result<GenId, VaultError> {
     let keys = vault_dir.join(KEYS_DIR);
+    let (info_len, slot_len) = genesis_file_lens()?;
     let mut found = None;
     for name in fsutil::list(&keys)? {
         let Some(id) = GenId::parse_dir(&name) else {
             continue;
         };
-        if id.number != 1 || !gen_info_path(vault_dir, &id).is_file() {
+        if id.number != 1 || !fsutil::is_real_dir(&keys.join(&name)) {
+            continue;
+        }
+        let is_genesis = fsutil::read_capped(&gen_info_path(vault_dir, &id), MAX_FILE_LEN)
+            .is_ok_and(|d| d.len() == info_len && matches!(GenInfo::parent_of(&d), Ok(None)))
+            && fsutil::read_capped(&keys.join(&name).join(RECOVERY_SLOT_NAME), MAX_FILE_LEN)
+                .is_ok_and(|d| d.len() == slot_len);
+        if !is_genesis {
             continue;
         }
         if found.is_some() {
@@ -220,7 +356,7 @@ pub(crate) fn seal_approval(
     req: &PairingRequest,
     chain: &[KeyringEntry],
 ) -> Result<Vec<u8>, VaultError> {
-    if chain.is_empty() || chain.len() > MAX_CHAIN {
+    if chain.is_empty() || chain.len() > MAX_GENERATIONS {
         return Err(VaultError::Encode);
     }
     let mut pt = Zeroizing::new(Vec::with_capacity(
@@ -254,7 +390,10 @@ pub(crate) fn open_approval(
     }
     let pt = x25519::open_from(private, &approval_aad(vault_id, req), r.rest())
         .map_err(|_| VaultError::Corrupt("pairing approval authentication"))?;
-    if pt.is_empty() || pt.len() % CHAIN_ENTRY_LEN != 0 || pt.len() / CHAIN_ENTRY_LEN > MAX_CHAIN {
+    if pt.is_empty()
+        || pt.len() % CHAIN_ENTRY_LEN != 0
+        || pt.len() / CHAIN_ENTRY_LEN > MAX_GENERATIONS
+    {
         return Err(VaultError::Corrupt("pairing approval length"));
     }
     let mut out: Vec<KeyringEntry> = Vec::new();
@@ -278,8 +417,12 @@ pub(crate) fn open_approval(
     Ok(out)
 }
 
-fn remove_if_old(path: &Path, now: u64) {
-    let modified = std::fs::metadata(path)
+fn remove_pairing_file(vault_dir: &Path, name: &str) -> Result<(), VaultError> {
+    fsutil::remove_in(vault_dir, &[PAIRING_DIR], name)
+}
+
+fn remove_if_old(vault_dir: &Path, name: &str, now: u64) {
+    let modified = std::fs::symlink_metadata(vault_dir.join(PAIRING_DIR).join(name))
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -287,17 +430,18 @@ fn remove_if_old(path: &Path, now: u64) {
     if let Some(m) = modified
         && now > m.saturating_add(UNREADABLE_KEEP_SECS)
     {
-        let _ = fsutil::remove_file(path);
+        let _ = remove_pairing_file(vault_dir, name);
     }
 }
 
-/// Valid requests that can still be approved, oldest first. Also deletes expired or known-device
-/// requests, approvals nobody picked up, and files unreadable for longer than a request lives.
+/// Valid requests that can still be approved, oldest first, at most `MAX_LISTED_REQUESTS`, and
+/// how many more there are. Also deletes expired or known-device requests, approvals nobody
+/// picked up, and files unreadable for longer than a request lives.
 pub(crate) fn list_requests(
     vault_dir: &Path,
     now: u64,
     known: &BTreeSet<DeviceId>,
-) -> Result<Vec<PairingRequest>, VaultError> {
+) -> Result<(Vec<PairingRequest>, usize), VaultError> {
     let dir = vault_dir.join(PAIRING_DIR);
     let mut out = Vec::new();
     for name in fsutil::list(&dir)? {
@@ -307,28 +451,30 @@ pub(crate) fn list_requests(
             {
                 Ok(r) if r.request_id == id => {
                     if now > r.expires_at || known.contains(&r.device_id) {
-                        let _ = fsutil::remove_file(&path);
+                        let _ = remove_pairing_file(vault_dir, &name);
                     } else if r.usable_at(now) {
                         out.push(r);
                     }
                 }
                 Err(VaultError::Io(std::io::ErrorKind::NotFound, _)) => {}
-                _ => remove_if_old(&path, now),
+                _ => remove_if_old(vault_dir, &name, now),
             }
         } else if parse_name(&name, APPROVAL_SUFFIX).is_some() {
             match fsutil::read_capped(&path, MAX_FILE_LEN).and_then(|d| approval_expiry(&d)) {
                 Ok(exp) => {
                     if now > exp.saturating_add(APPROVAL_KEEP_SECS) {
-                        let _ = fsutil::remove_file(&path);
+                        let _ = remove_pairing_file(vault_dir, &name);
                     }
                 }
                 Err(VaultError::Io(std::io::ErrorKind::NotFound, _)) => {}
-                Err(_) => remove_if_old(&path, now),
+                Err(_) => remove_if_old(vault_dir, &name, now),
             }
         }
     }
     out.sort_by_key(|r| (r.created_at, r.request_id));
-    Ok(out)
+    let hidden = out.len().saturating_sub(MAX_LISTED_REQUESTS);
+    out.truncate(MAX_LISTED_REQUESTS);
+    Ok((out, hidden))
 }
 
 /// Fails unless the file still holds exactly `req` and it can still be approved, so the key is
@@ -361,7 +507,7 @@ pub(crate) fn write_approval(
     data: &[u8],
 ) -> Result<(), VaultError> {
     fsutil::write_atomic(
-        &vault_dir.join(PAIRING_DIR),
+        &fsutil::vault_subdir(vault_dir, &[PAIRING_DIR])?,
         &approval_name(&req.request_id),
         data,
     )
@@ -369,9 +515,9 @@ pub(crate) fn write_approval(
 
 /// Deletes a request. Returns false when it was already gone.
 pub(crate) fn remove_request(vault_dir: &Path, request_id: &[u8; 16]) -> Result<bool, VaultError> {
-    let path = vault_dir.join(PAIRING_DIR).join(request_name(request_id));
-    let existed = path.exists();
-    fsutil::remove_file(&path)?;
+    let name = request_name(request_id);
+    let existed = fsutil::exists_no_follow(&vault_dir.join(PAIRING_DIR).join(&name));
+    remove_pairing_file(vault_dir, &name)?;
     Ok(existed)
 }
 
@@ -419,6 +565,8 @@ impl PendingJoin {
         if device_name.is_empty() || device_name.len() > MAX_DEVICE_NAME_LEN {
             return Err(VaultError::InvalidParameters);
         }
+        let device_name = request_device_name(device_name);
+        let device_name = device_name.as_str();
         let header = vault::read_header(vault_dir)?;
         if Vault::is_set_up(state_dir) {
             return Err(VaultError::AlreadyExists);
@@ -431,12 +579,13 @@ impl PendingJoin {
             device_id: device.device_id,
             name: device_name.to_string(),
             public_key: x25519::public_key(&device.x25519_private)?,
+            signing_key: device.signing_public()?,
             created_at: now,
             expires_at: now.saturating_add(PAIRING_LIFETIME_SECS),
         };
         let words = words_text(&header.vault_id, &fingerprint, &request)?;
         fsutil::write_atomic(
-            &vault_dir.join(PAIRING_DIR),
+            &fsutil::vault_subdir(vault_dir, &[PAIRING_DIR])?,
             &request_name(&request.request_id),
             &request.encode()?,
         )?;
@@ -512,7 +661,8 @@ impl PendingJoin {
             keyring,
         )? {
             KeyedJoin::Joined(v) => {
-                let _ = fsutil::remove_file(&dir.join(approval_name(&self.request.request_id)));
+                let _ =
+                    remove_pairing_file(&self.vault_dir, &approval_name(&self.request.request_id));
                 let _ = remove_request(&self.vault_dir, &self.request.request_id);
                 Ok(PairingPoll::Joined(v))
             }
@@ -523,5 +673,148 @@ impl PendingJoin {
 
     pub fn cancel(&self) -> Result<(), VaultError> {
         remove_request(&self.vault_dir, &self.request.request_id).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod name_policy_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_names_pass() {
+        for name in [
+            "laptop",
+            "work laptop",
+            "alice-desktop",
+            "thinkpad_x1.2",
+            "Pixel 8",
+            "X1 Carbon",
+            "PC",
+            "a",
+            &"a".repeat(MAX_REQUEST_NAME_LEN),
+        ] {
+            assert_eq!(device_name_problem(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn the_alphabet_is_short() {
+        for name in [
+            "",
+            &"a".repeat(MAX_REQUEST_NAME_LEN + 1),
+            "caf\u{e9}",
+            "desk\n",
+            "a\tb",
+            "my \"laptop\"",
+            "[laptop]",
+            "a<b",
+            "a&b",
+            "a\u{202e}b",
+            "a\u{200b}b",
+            "\u{2800}x",
+            " lead",
+            "trail ",
+            "two  spaces",
+            "a/b",
+            "name: x",
+        ] {
+            assert!(device_name_problem(name).is_some(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_cannot_carry_the_verification_words() {
+        for name in [
+            "laptop MAPLE ORBIT WHEAT OCEAN",
+            "MAPLE ORBIT WHEAT OCEAN",
+            "ORBIT-WHEAT",
+            "x.OCEAN",
+            "ABC",
+            "maple orbit wheat ocean",
+            "Maple Orbit Wheat Ocean",
+            "maple-orbit_wheat.ocean",
+            "maple orbit wheat",
+            "laptop maple orbit wheat",
+        ] {
+            assert!(device_name_problem(name).is_some(), "{name:?}");
+        }
+        assert_eq!(device_name_problem("maple orbit"), None);
+        assert_eq!(device_name_problem("work laptop"), None);
+        assert_eq!(device_name_problem("mapleorbitwheatocean"), None);
+        assert_eq!(device_name_problem("MAPLE1"), None);
+    }
+
+    #[test]
+    fn a_free_form_name_is_reduced_to_the_alphabet() {
+        for (given, want) in [
+            ("laptop", "laptop"),
+            ("  alice's   MacBook Pro  ", "alice-s MacBook Pro"),
+            ("DESKTOP-ABC123", "desktop-ABC123"),
+            ("LAPTOP MAPLE ORBIT WHEAT OCEAN", "new-device"),
+            ("MacBook Air PRO", "MacBook Air pro"),
+            ("caf\u{e9}", "caf-"),
+            ("a\u{202e}b", "a-b"),
+            ("tab\tname", "tab name"),
+            ("\u{2800}\u{200b}", "new-device"),
+            ("---", "new-device"),
+            ("work laptop home", "new-device"),
+        ] {
+            let got = request_device_name(given);
+            assert_eq!(got, want, "{given:?}");
+            assert_eq!(device_name_problem(&got), None, "{given:?}");
+        }
+        let long = request_device_name(&"word ".repeat(40));
+        assert!(long.len() <= MAX_REQUEST_NAME_LEN);
+        assert_eq!(device_name_problem(&long), None);
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let mut r = [0u8; 8];
+        hirz_crypto::random_fill(&mut r).unwrap();
+        let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+        let p = std::env::temp_dir().join(format!("hirz-vault-name-{tag}-{hex}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_planted_request_with_a_forged_name_is_never_listed() {
+        let dir = scratch("planted");
+        let vault_dir = dir.join("vault");
+        let (mut vault, _phrase) = Vault::create(&vault_dir, &dir.join("state"), "first").unwrap();
+        let pending = PendingJoin::start(&vault_dir, &dir.join("state2"), "laptop").unwrap();
+        assert_eq!(pending.request().name, "laptop");
+        assert_eq!(vault.pairing_requests().unwrap().len(), 1);
+
+        let file = vault_dir
+            .join(PAIRING_DIR)
+            .join(request_name(&pending.request().request_id));
+        let mut bytes = std::fs::read(&file).unwrap();
+        let at = bytes.windows(6).position(|w| w == b"laptop").unwrap();
+        bytes[at..at + 6].copy_from_slice(b"LAPTOP");
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(vault.pairing_requests().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_device_asks_under_a_name_the_policy_allows() {
+        let dir = scratch("start");
+        let vault_dir = dir.join("vault");
+        let (_vault, _phrase) = Vault::create(&vault_dir, &dir.join("state"), "first").unwrap();
+        let pending =
+            PendingJoin::start(&vault_dir, &dir.join("state2"), "ALICE'S DESKTOP-PC").unwrap();
+        assert_eq!(pending.request().name, "alice-S desktop-PC");
+        assert_eq!(device_name_problem(&pending.request().name), None);
+        assert_eq!(
+            PendingJoin::start(&vault_dir, &dir.join("state3"), "").err(),
+            Some(VaultError::InvalidParameters)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

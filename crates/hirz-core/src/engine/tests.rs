@@ -1124,3 +1124,412 @@ fn imported_ids_of_other_lengths() {
     let r = Engine::new(&mut vault, &fake).make_credential(&req, None);
     assert_eq!(r, Err(CoreError::CredentialExcluded));
 }
+
+struct Hook<'h> {
+    hook: RefCell<Option<Box<dyn FnOnce() + 'h>>>,
+    answer: Approval,
+}
+
+impl<'h> Hook<'h> {
+    fn new(answer: Approval, hook: impl FnOnce() + 'h) -> Hook<'h> {
+        Hook {
+            hook: RefCell::new(Some(Box::new(hook))),
+            answer,
+        }
+    }
+}
+
+impl Approver for Hook<'_> {
+    fn approve(&self, _: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        if let Some(hook) = self.hook.borrow_mut().take() {
+            hook();
+        }
+        Ok(self.answer)
+    }
+}
+
+fn two_devices(t: &TempDir) -> (Vault, Vault) {
+    let (first, phrase) = Vault::create(&t.path("vault"), &t.path("state"), "laptop").unwrap();
+    let second =
+        Vault::join_with_recovery(&t.path("vault"), &t.path("state2"), &phrase, "phone").unwrap();
+    (first, second)
+}
+
+const DENIED: CoreError = CoreError::Approval(ApprovalError::Denied);
+
+#[test]
+fn a_cancel_during_the_prompt_creates_and_signs_nothing() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let made = create(&mut vault, &make_req("alice", &[-7]), up());
+    let before = vault.list_all().len();
+
+    let cancelled = std::cell::Cell::new(false);
+    let hook = Hook::new(up(), || cancelled.set(true));
+    let flag = || cancelled.get();
+    let r = Engine::new(&mut vault, &hook)
+        .with_cancel(&flag)
+        .make_credential(&make_req("bob", &[-7]), None);
+    assert_eq!(r.unwrap_err(), DENIED);
+    vault.reload().unwrap();
+    assert_eq!(vault.list_all().len(), before);
+
+    cancelled.set(false);
+    let hook = Hook::new(up(), || cancelled.set(true));
+    let r = Engine::new(&mut vault, &hook)
+        .with_cancel(&flag)
+        .get_assertion(&get_req(&[&made.credential_id]), None, None);
+    assert_eq!(r.unwrap_err(), DENIED);
+}
+
+#[test]
+fn a_cancel_after_the_credential_was_stored_takes_it_back() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let calls = std::cell::Cell::new(0u32);
+    let flag = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= 2
+    };
+    let r = Engine::new(&mut vault, &Minimal)
+        .with_cancel(&flag)
+        .make_credential(&make_req("alice", &[-7]), None);
+    assert_eq!(r.unwrap_err(), DENIED);
+    assert_eq!(calls.get(), 2);
+    vault.reload().unwrap();
+    assert!(vault.list_all().is_empty());
+}
+
+#[test]
+fn a_credential_deleted_during_the_prompt_is_not_signed_with() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let made = create(&mut vault, &make_req("alice", &[-7]), up());
+    let id = made.credential_id.clone();
+    let mut other = Vault::open(&t.path("vault"), &t.path("state")).unwrap();
+    let hook = Hook::new(up(), || {
+        other.delete(&id).unwrap();
+    });
+    let r = Engine::new(&mut vault, &hook).get_assertion(&get_req(&[&id]), None, None);
+    assert_eq!(r.unwrap_err(), CoreError::NoCredentials);
+}
+
+#[test]
+fn a_device_removed_during_the_prompt_neither_creates_nor_signs() {
+    let t = TempDir::new();
+    let (mut first, mut second) = two_devices(&t);
+    let made = create(&mut first, &make_req("alice", &[-7]), up());
+    let me = first.device_id();
+    let hook = Hook::new(up(), || second.remove_device(&me).unwrap());
+    let r =
+        Engine::new(&mut first, &hook).get_assertion(&get_req(&[&made.credential_id]), None, None);
+    assert_eq!(
+        r.unwrap_err(),
+        CoreError::Approval(ApprovalError::Unavailable)
+    );
+
+    let t = TempDir::new();
+    let (mut first, mut second) = two_devices(&t);
+    let me = first.device_id();
+    let hook = Hook::new(up(), || second.remove_device(&me).unwrap());
+    let r = Engine::new(&mut first, &hook).make_credential(&make_req("bob", &[-7]), None);
+    drop(hook);
+    assert_eq!(
+        r.unwrap_err(),
+        CoreError::Approval(ApprovalError::Unavailable)
+    );
+    second.reload().unwrap();
+    assert!(second.list_all().is_empty());
+}
+
+fn refused<T>(r: &Result<T, CoreError>) -> bool {
+    matches!(r, Err(CoreError::Approval(ApprovalError::Unavailable)))
+}
+
+#[test]
+fn every_machine_login_rp_id_is_refused_without_a_prompt() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let allowed = create(&mut vault, &make_req("alice", &[-7]), up());
+    let fake = Fake::with(vec![Ok(uv()), Ok(uv()), Ok(uv())]);
+    let mut engine = Engine::new(&mut vault, &fake);
+
+    let ids = [
+        "io.systemd.home",
+        "IO.SYSTEMD.HOME",
+        "io.systemd.cryptsetup",
+        "Io.Systemd.CryptSetup",
+        "pam://laptop",
+        "PAM://",
+        "pam://example.com",
+    ];
+    for id in ids {
+        let mut req = make_req("alice", &[-7]);
+        req.rp.id = id.to_owned();
+        assert!(refused(&engine.make_credential(&req, None)), "{id}");
+        assert!(
+            refused(&engine.make_credential(&req, Some("https://example.com"))),
+            "{id}"
+        );
+        for up in [true, false] {
+            for allow in [&[allowed.credential_id.as_slice()][..], &[]] {
+                let mut get = get_req(allow);
+                get.rp_id = id.to_owned();
+                get.up = up;
+                assert!(refused(&engine.get_assertion(&get, None, None)), "{id}");
+            }
+        }
+    }
+    assert_eq!(fake.calls(), 0);
+    assert_eq!(engine.vault().list_all().len(), 1);
+
+    for id in [
+        "io.systemd.home.example.com",
+        "systemd.home",
+        "io.systemd.cryptsetup.example.org",
+    ] {
+        let mut req = make_req("alice", &[-7]);
+        req.rp.id = id.to_owned();
+        engine.make_credential(&req, None).unwrap();
+    }
+    assert_eq!(fake.calls(), 3);
+}
+
+fn hide_generation(vault: &std::path::Path, number: u32) {
+    let prefix = format!("{number:010}-");
+    let keys = vault.join("keys");
+    let name = fs::read_dir(&keys)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .find(|n| n.starts_with(&prefix))
+        .unwrap();
+    fs::rename(keys.join(&name), vault.join(format!(".hidden-{name}"))).unwrap();
+}
+
+#[test]
+fn a_loaded_vault_skips_only_the_first_look_before_the_prompt() {
+    let t = TempDir::new();
+    let mut first = t.vault();
+    let mut second = Vault::open(&t.path("vault"), &t.path("state")).unwrap();
+    let made = create(&mut second, &make_req("alice", &[-7]), up());
+    let fake = Fake::with(vec![Ok(up())]);
+    let mut engine = Engine::new(&mut first, &fake).with_loaded_vault();
+
+    let early = engine.get_assertion(&get_req(&[&made.credential_id]), None, None);
+    assert_eq!(early, Err(CoreError::NoCredentials));
+    assert_eq!(fake.calls(), 0);
+
+    let a = engine
+        .get_assertion(&get_req(&[&made.credential_id]), None, None)
+        .unwrap();
+    verify(&public_key(&made), &a);
+    assert_eq!(fake.calls(), 1);
+}
+
+#[test]
+fn the_look_after_the_approval_still_happens_with_a_loaded_vault() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let made = create(&mut vault, &make_req("alice", &[-7]), up());
+    let id = made.credential_id.clone();
+    let mut other = Vault::open(&t.path("vault"), &t.path("state")).unwrap();
+    let hook = Hook::new(up(), || {
+        other.delete(&id).unwrap();
+    });
+    let r = Engine::new(&mut vault, &hook)
+        .with_loaded_vault()
+        .get_assertion(&get_req(&[&id]), None, None);
+    assert_eq!(r.unwrap_err(), CoreError::NoCredentials);
+
+    let t = TempDir::new();
+    let (mut first, mut second) = two_devices(&t);
+    let made = create(&mut first, &make_req("alice", &[-7]), up());
+    let me = first.device_id();
+    let hook = Hook::new(up(), || second.remove_device(&me).unwrap());
+    let r = Engine::new(&mut first, &hook)
+        .with_loaded_vault()
+        .get_assertion(&get_req(&[&made.credential_id]), None, None);
+    assert!(refused(&r));
+
+    let t = TempDir::new();
+    let (mut first, mut second) = two_devices(&t);
+    let me = first.device_id();
+    let hook = Hook::new(up(), || second.remove_device(&me).unwrap());
+    let r = Engine::new(&mut first, &hook)
+        .with_loaded_vault()
+        .make_credential(&make_req("bob", &[-7]), None);
+    drop(hook);
+    assert!(refused(&r));
+    second.reload().unwrap();
+    assert!(second.list_all().is_empty());
+}
+
+#[test]
+fn a_removed_device_is_refused_before_any_prompt() {
+    let t = TempDir::new();
+    let (mut first, mut second) = two_devices(&t);
+    let made = create(&mut first, &make_req("alice", &[-7]), up());
+    second.reload().unwrap();
+    second.remove_device(&first.device_id()).unwrap();
+
+    let fake = Fake::with(vec![Ok(up()), Ok(up()), Ok(up())]);
+    let mut engine = Engine::new(&mut first, &fake);
+    assert!(refused(
+        &engine.make_credential(&make_req("bob", &[-7]), None)
+    ));
+    assert!(refused(&engine.get_assertion(
+        &get_req(&[&made.credential_id]),
+        None,
+        None
+    )));
+    assert!(refused(&engine.get_assertion(&get_req(&[]), None, None)));
+    assert!(refused(&engine.get_assertion(
+        &silent(&[&made.credential_id]),
+        None,
+        None
+    )));
+    assert_eq!(fake.calls(), 0);
+}
+
+#[test]
+fn a_fork_stops_registrations_before_the_prompt_and_keeps_sign_ins() {
+    let t = TempDir::new();
+    let (mut first, second) = two_devices(&t);
+    let made = create(&mut first, &make_req("alice", &[-7]), up());
+    first.remove_device(&second.device_id()).unwrap();
+    hide_generation(&t.path("vault"), 2);
+    assert!(first.reload().unwrap().fork_detected);
+
+    let fake = Fake::with(vec![Ok(up()), Ok(up())]);
+    let mut engine = Engine::new(&mut first, &fake);
+    assert!(refused(
+        &engine.make_credential(&make_req("bob", &[-7]), None)
+    ));
+    assert_eq!(
+        fake.calls(),
+        0,
+        "nothing is asked when nothing can be saved"
+    );
+
+    let a = engine
+        .get_assertion(&get_req(&[&made.credential_id]), None, None)
+        .unwrap();
+    verify(&public_key(&made), &a);
+    assert_eq!(fake.calls(), 1);
+    assert_eq!(engine.vault().list_all().len(), 1);
+}
+
+#[test]
+fn a_fork_that_appears_during_the_prompt_is_a_refusal_not_a_vault_failure() {
+    let t = TempDir::new();
+    let (mut first, second) = two_devices(&t);
+    first.remove_device(&second.device_id()).unwrap();
+    let vault_dir = t.path("vault");
+    let hook = Hook::new(up(), || hide_generation(&vault_dir, 2));
+    let r = Engine::new(&mut first, &hook).make_credential(&make_req("bob", &[-7]), None);
+    drop(hook);
+    assert!(refused(&r), "{r:?}");
+    assert!(first.report().fork_detected);
+    assert!(first.list_all().is_empty());
+}
+
+#[test]
+fn a_commit_that_says_no_takes_the_new_passkey_back_and_keeps_the_older_one() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let older = create(&mut vault, &make_req("alice", &[-7]), up());
+    let asked = std::cell::Cell::new(0u32);
+    let refuse = || {
+        asked.set(asked.get() + 1);
+        false
+    };
+    let r = Engine::new(&mut vault, &Minimal)
+        .with_commit(&refuse)
+        .make_credential(&make_req("alice", &[-8]), None);
+    assert_eq!(r.unwrap_err(), DENIED);
+    assert_eq!(
+        asked.get(),
+        1,
+        "asked once, after the credential was stored"
+    );
+    vault.reload().unwrap();
+    let all = vault.list_all();
+    assert_eq!(
+        all.len(),
+        1,
+        "the new credential is gone and nothing else changed"
+    );
+    assert_eq!(all[0].credential_id, older.credential_id);
+}
+
+#[test]
+fn a_commit_that_says_yes_replaces_the_older_passkey() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let older = create(&mut vault, &make_req("alice", &[-7]), up());
+    let allow = || true;
+    let newer = Engine::new(&mut vault, &Minimal)
+        .with_commit(&allow)
+        .make_credential(&make_req("alice", &[-8]), None)
+        .unwrap();
+    assert!(vault.get(&older.credential_id).is_none());
+    assert!(vault.get(&newer.credential_id).is_some());
+}
+
+#[test]
+fn a_commit_is_never_asked_for_a_request_that_failed_earlier() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let asked = std::cell::Cell::new(false);
+    let commit = || {
+        asked.set(true);
+        true
+    };
+    let fake = Fake::with(vec![Err(ApprovalError::Denied)]);
+    let r = Engine::new(&mut vault, &fake)
+        .with_commit(&commit)
+        .make_credential(&make_req("alice", &[-7]), None);
+    assert_eq!(r.unwrap_err(), DENIED);
+    assert!(!asked.get());
+}
+
+#[test]
+fn a_refusal_before_any_window_for_a_protected_credential_tries_the_others() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let open = protected(&mut vault, "alice", CredProtect::UserVerificationOptional);
+    let _locked = protected(&mut vault, "bob", CredProtect::UserVerificationRequired);
+
+    let fake = Fake::with(vec![Err(ApprovalError::NothingShown), Ok(up())]);
+    let a = Engine::new(&mut vault, &fake)
+        .get_assertion(&get_req(&[]), None, None)
+        .unwrap();
+    assert_eq!(a.credential_id, open.credential_id);
+    assert_eq!(fake.calls(), 2);
+    assert!(fake.seen.borrow()[0].uv_required);
+    assert!(!fake.seen.borrow()[1].uv_required);
+}
+
+#[test]
+fn a_refusal_before_any_window_is_passed_on_as_it_is() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let made = create(&mut vault, &make_req("alice", &[-7]), up());
+    let nothing = CoreError::Approval(ApprovalError::NothingShown);
+
+    let fake = Fake::with(vec![Err(ApprovalError::NothingShown)]);
+    let r =
+        Engine::new(&mut vault, &fake).get_assertion(&get_req(&[&made.credential_id]), None, None);
+    assert_eq!(r.unwrap_err(), nothing);
+    assert_eq!(fake.calls(), 1);
+
+    let mut req = get_req(&[&made.credential_id]);
+    req.uv = UvRequirement::Required;
+    let fake = Fake::with(vec![Err(ApprovalError::NothingShown)]);
+    let r = Engine::new(&mut vault, &fake).get_assertion(&req, None, None);
+    assert_eq!(r.unwrap_err(), nothing, "not turned into a UV error");
+
+    let fake = Fake::with(vec![Err(ApprovalError::NothingShown)]);
+    let r = Engine::new(&mut vault, &fake).make_credential(&make_req("bob", &[-7]), None);
+    assert_eq!(r.unwrap_err(), nothing);
+}

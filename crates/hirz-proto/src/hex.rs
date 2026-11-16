@@ -1,5 +1,6 @@
 //! Lowercase hexadecimal, with a strict decoder.
 
+use crate::wipe::Buffer;
 use crate::{Error, Result};
 
 const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -30,10 +31,11 @@ pub fn decode(s: &str) -> Result<Vec<u8>> {
     if !rest.is_empty() {
         return Err(Error::Malformed);
     }
-    pairs
-        .iter()
-        .map(|[hi, lo]| Ok(nibble(*hi)?.wrapping_shl(4) | nibble(*lo)?))
-        .collect()
+    let mut out = Buffer::with_capacity(pairs.len());
+    for [hi, lo] in pairs {
+        out.push(nibble(*hi)?.wrapping_shl(4) | nibble(*lo)?);
+    }
+    Ok(out.into_vec())
 }
 
 pub fn decode_array<const N: usize>(s: &str) -> Result<[u8; N]> {
@@ -51,6 +53,15 @@ pub fn decode_array<const N: usize>(s: &str) -> Result<[u8; N]> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_decode_that_fails_wipes_the_bytes_it_had_made() {
+        let _ = crate::wipe::take_wiped();
+        assert!(decode("aabbzz").is_err());
+        assert_eq!(crate::wipe::take_wiped(), 2);
+        assert_eq!(decode("aabb").unwrap(), [0xaa, 0xbb]);
+        assert_eq!(crate::wipe::take_wiped(), 0);
+    }
 
     #[test]
     fn round_trip() {
