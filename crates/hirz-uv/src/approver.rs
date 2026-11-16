@@ -121,6 +121,22 @@ pub fn map_pkcheck(r: RunResult) -> Result<(), ApprovalError> {
     }
 }
 
+/// Structure of unexpected dialog output for diagnostics: digits and separators are kept,
+/// every other character becomes `a`, so no account name reaches the log.
+fn shape(out: &[u8]) -> String {
+    String::from_utf8_lossy(out)
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_digit() || matches!(c, '|' | '\n' | ' ' | '.' | '-') {
+                c
+            } else {
+                'a'
+            }
+        })
+        .collect()
+}
+
 fn outcome(r: &Result<(), ApprovalError>) -> &'static str {
     match r {
         Ok(()) => "approved",
@@ -309,8 +325,9 @@ impl<R: CommandRunner> HirzApprover<R> {
                 })?;
                 let idx = display::parse_list_selection(&out, n).ok_or_else(|| {
                     diag(&format!(
-                        "account list returned an unreadable selection ({} bytes)",
-                        out.len()
+                        "account list returned an unreadable selection ({} bytes, shape {:?})",
+                        out.len(),
+                        shape(&out)
                     ));
                     ApprovalError::Denied
                 })?;
