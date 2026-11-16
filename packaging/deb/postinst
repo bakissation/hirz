@@ -1,0 +1,50 @@
+#!/bin/sh
+# hirz postinst. Safe to run more than once. The unit state handling follows what debhelper
+# generates: the broker socket is enabled on the first install, and an administrator's
+# "systemctl disable" is kept across upgrades and reinstalls.
+set -e
+
+UNIT=hirz-uhid-broker.socket
+
+case "$1" in
+    configure|abort-upgrade|abort-deconfigure|abort-remove)
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper unmask "$UNIT" >/dev/null || true
+            # was-enabled is true for a unit it has never seen, so a new install enables it.
+            if deb-systemd-helper --quiet was-enabled "$UNIT"; then
+                deb-systemd-helper enable "$UNIT" >/dev/null || true
+            else
+                deb-systemd-helper update-state "$UNIT" >/dev/null || true
+            fi
+        elif [ -z "$2" ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl enable "$UNIT" >/dev/null 2>&1 || true
+        fi
+
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload || true
+        fi
+        if command -v modprobe >/dev/null 2>&1; then
+            modprobe uhid 2>/dev/null || true
+        fi
+
+        if [ -d /run/systemd/system ]; then
+            if [ -n "$2" ]; then
+                systemctl try-restart hirz-uhid-broker.service || true
+            fi
+            if systemctl is-enabled --quiet "$UNIT" 2>/dev/null; then
+                systemctl start "$UNIT" || true
+            fi
+        fi
+        ;;
+esac
+
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    echo "hirz is installed. Each user sets it up with:"
+    echo "    hirz init"
+    echo "    systemctl --user enable --now hirzd"
+fi
+
+exit 0

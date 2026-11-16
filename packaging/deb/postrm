@@ -1,0 +1,32 @@
+#!/bin/sh
+# hirz postrm. Never touches vaults or per-user state in home directories.
+set -e
+
+UNIT=hirz-uhid-broker.socket
+
+if command -v deb-systemd-helper >/dev/null 2>&1; then
+    case "$1" in
+        remove)
+            # Keeps the enablement state for a reinstall, and stops the unit from starting.
+            deb-systemd-helper mask "$UNIT" >/dev/null || true
+            ;;
+        purge)
+            deb-systemd-helper purge "$UNIT" >/dev/null || true
+            deb-systemd-helper unmask "$UNIT" >/dev/null || true
+            ;;
+    esac
+fi
+
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload || true
+        fi
+        rmdir /run/hirz 2>/dev/null || true
+        ;;
+esac
+
+exit 0

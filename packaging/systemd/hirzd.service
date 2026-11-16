@@ -13,7 +13,7 @@ Requisite=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/libexec/hirz/hirzd
+ExecStart=/usr/bin/hirzd
 # hirzd retries the broker itself (1 s doubling to 60 s), so it only exits on a fatal error.
 Restart=on-failure
 RestartSec=5s

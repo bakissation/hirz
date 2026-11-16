@@ -111,7 +111,7 @@ vault cannot be read or this device was removed from it.
   "approval": { "methods": ["polkit", "pin"], "error": null, "zenity": true,
                 "pin_set": true, "pin_locked": false, "polkit_action": "/usr/share/..." },
   "firefox": { "manifests": [{"path": "...", "scope": "your user", "state": "ok",
-                              "program": "/usr/libexec/hirz-nmh"}],
+                              "program": "/usr/lib/hirz/hirz-nmh"}],
                "snap": false, "flatpak": false },
   "uhid_broker": { "socket": "/run/hirz/uhid.sock", "present": false }
 }

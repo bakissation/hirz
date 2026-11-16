@@ -1,0 +1,21 @@
+# shellcheck shell=bash
+# pacman's hooks already reload systemd and udev after files change.
+
+post_install() {
+  modprobe uhid 2>/dev/null || true
+  cat <<'MSG'
+==> hirz: start the virtual security key broker (once, as root):
+      systemctl enable --now hirz-uhid-broker.socket
+==> hirz: then each user sets up their vault and daemon:
+      hirz init
+      systemctl --user enable --now hirzd
+MSG
+}
+
+post_upgrade() {
+  echo '==> hirz: restart the broker to run the new version: systemctl restart hirz-uhid-broker.service'
+}
+
+pre_remove() {
+  systemctl disable --now hirz-uhid-broker.socket hirz-uhid-broker.service 2>/dev/null || true
+}

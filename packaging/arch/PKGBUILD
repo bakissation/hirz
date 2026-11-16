@@ -1,0 +1,75 @@
+# Maintainer: Abdelbaki Berkati <bakissation@users.noreply.github.com>
+
+pkgname=hirz
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Passkey authenticator for Linux: a virtual security key and a Firefox extension host'
+arch=('x86_64' 'aarch64')
+url='https://github.com/bakissation/hirz'
+license=('MIT OR Apache-2.0')
+depends=('glibc' 'gcc-libs' 'polkit' 'zenity' 'systemd')
+makedepends=('cargo' 'cmake')
+optdepends=(
+  'fprintd: approve with your fingerprint'
+  'xdg-native-messaging-proxy: run the native host for Flatpak Firefox'
+)
+install=hirz.install
+# AWS-LC (C code built by aws-lc-sys) is not built with makepkg's LTO flags.
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# No release tag exists yet. Replace SKIP with the real sum (updpkgsums) once v$pkgver is tagged.
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export CARGO_PROFILE_RELEASE_STRIP=symbols
+  cargo build --frozen --release -p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local nmh=/usr/lib/hirz/hirz-nmh
+  local broker=/usr/lib/hirz/hirz-uhid-broker
+
+  install -Dm0755 target/release/hirz "$pkgdir/usr/bin/hirz"
+  install -Dm0755 target/release/hirzd "$pkgdir/usr/bin/hirzd"
+  install -Dm0755 target/release/hirz-nmh "$pkgdir$nmh"
+  install -Dm0755 target/release/hirz-uhid-broker "$pkgdir$broker"
+
+  install -d "$pkgdir/usr/lib/systemd/system" "$pkgdir/usr/lib/systemd/user"
+  sed -E "s#^ExecStart=[^ ]*/hirz-uhid-broker( |\$)#ExecStart=$broker\1#" \
+    packaging/systemd/hirz-uhid-broker.service > "$pkgdir/usr/lib/systemd/system/hirz-uhid-broker.service"
+  grep -qx "ExecStart=$broker" "$pkgdir/usr/lib/systemd/system/hirz-uhid-broker.service"
+  install -m0644 packaging/systemd/hirz-uhid-broker.socket "$pkgdir/usr/lib/systemd/system/"
+  sed -E 's#^ExecStart=[^ ]*/hirzd( |$)#ExecStart=/usr/bin/hirzd\1#' \
+    packaging/systemd/hirzd.service > "$pkgdir/usr/lib/systemd/user/hirzd.service"
+  grep -Eq '^ExecStart=/usr/bin/hirzd( |$)' "$pkgdir/usr/lib/systemd/user/hirzd.service"
+
+  install -Dm0644 packaging/udev/70-hirz.rules "$pkgdir/usr/lib/udev/rules.d/70-hirz.rules"
+  install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
+    "$pkgdir/usr/share/polkit-1/actions/dev.hirz.authenticate.policy"
+  install -d "$pkgdir/usr/lib/modules-load.d"
+  echo uhid > "$pkgdir/usr/lib/modules-load.d/hirz.conf"
+
+  install -d "$pkgdir/usr/lib/mozilla/native-messaging-hosts"
+  sed "s#@HIRZ_NMH_PATH@#$nmh#" packaging/native-messaging/hirz.json \
+    > "$pkgdir/usr/lib/mozilla/native-messaging-hosts/hirz.json"
+  grep -q "\"path\": \"$nmh\"" "$pkgdir/usr/lib/mozilla/native-messaging-hosts/hirz.json"
+
+  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE-MIT LICENSE-APACHE
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname" README.md SECURITY.md docs/install.md
+}

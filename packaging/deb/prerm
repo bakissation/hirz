@@ -1,0 +1,15 @@
+#!/bin/sh
+# hirz prerm. Stops the system broker on removal; upgrades keep it running.
+# Per-user hirzd units belong to each user: systemctl --user disable --now hirzd
+set -e
+
+if [ "$1" = "remove" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl stop hirz-uhid-broker.socket hirz-uhid-broker.service || true
+    fi
+    if ! command -v deb-systemd-helper >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+        systemctl disable hirz-uhid-broker.socket >/dev/null 2>&1 || true
+    fi
+fi
+
+exit 0

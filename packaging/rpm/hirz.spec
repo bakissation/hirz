@@ -1,0 +1,146 @@
+# hirz for Fedora. Builds offline from the release tarball plus a tarball of vendored crates:
+#
+#   git archive --prefix=hirz-VERSION/ -o hirz-VERSION.tar.gz HEAD
+#   cargo vendor --locked vendor && tar -cJf hirz-VERSION-vendor.tar.xz vendor
+#
+# scripts/package-rpm.sh does both and runs rpmbuild.
+
+%global upstream_version 0.1.0-dev
+# AWS-LC is C code built by aws-lc-sys; Fedora's LTO flags are not meant for it.
+%global _lto_cflags %{nil}
+# The release profile strips the binaries, so there is no debug information to package.
+%global debug_package %{nil}
+
+Name:           hirz
+Version:        %{lua: print((string.gsub(rpm.expand("%{upstream_version}"), "-", "~")))}
+Release:        1%{?dist}
+Summary:        Passkey authenticator for Linux
+
+License:        MIT OR Apache-2.0
+URL:            https://github.com/bakissation/hirz
+Source0:        %{url}/archive/v%{upstream_version}/hirz-%{upstream_version}.tar.gz
+Source1:        hirz-%{upstream_version}-vendor.tar.xz
+
+ExclusiveArch:  x86_64 aarch64
+
+BuildRequires:  cargo >= 1.88
+BuildRequires:  rust >= 1.88
+BuildRequires:  gcc
+BuildRequires:  cmake
+BuildRequires:  systemd-rpm-macros
+
+Requires:       polkit
+Requires:       zenity
+Requires:       mozilla-filesystem
+Recommends:     fprintd
+Suggests:       xdg-native-messaging-proxy
+
+%description
+hirz keeps your passkeys (WebAuthn / FIDO2) in an encrypted vault folder that
+your own folder sync can copy between your computers. It appears to browsers
+as a USB security key, so it works in Firefox and Chromium, and offers a
+Firefox extension as a second path. Every signature needs your approval: your
+account password through polkit, your fingerprint through fprintd, or a hirz
+PIN.
+
+%prep
+%autosetup -n hirz-%{upstream_version} -a 1
+mkdir -p .cargo
+cat > .cargo/config.toml <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+EOF
+
+%build
+# rust-toolchain.toml pins a rustup toolchain; the distribution compiler is used instead.
+rm -f rust-toolchain.toml
+export CARGO_HOME=$PWD/.cargo-home
+export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_RELEASE_STRIP=symbols
+export RUSTFLAGS="--remap-path-prefix=$PWD=/build/hirz"
+cargo build --release --locked --frozen --offline \
+  -p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker
+
+%install
+install -Dm0755 target/release/hirz %{buildroot}%{_bindir}/hirz
+install -Dm0755 target/release/hirzd %{buildroot}%{_bindir}/hirzd
+install -Dm0755 target/release/hirz-nmh %{buildroot}%{_prefix}/lib/hirz/hirz-nmh
+install -Dm0755 target/release/hirz-uhid-broker %{buildroot}%{_libexecdir}/hirz/hirz-uhid-broker
+
+install -d %{buildroot}%{_unitdir} %{buildroot}%{_userunitdir}
+sed -E 's#^ExecStart=[^ ]*/hirz-uhid-broker( |$)#ExecStart=%{_libexecdir}/hirz/hirz-uhid-broker\1#' \
+  packaging/systemd/hirz-uhid-broker.service > %{buildroot}%{_unitdir}/hirz-uhid-broker.service
+grep -qx 'ExecStart=%{_libexecdir}/hirz/hirz-uhid-broker' %{buildroot}%{_unitdir}/hirz-uhid-broker.service
+install -m0644 packaging/systemd/hirz-uhid-broker.socket %{buildroot}%{_unitdir}/
+sed -E 's#^ExecStart=[^ ]*/hirzd( |$)#ExecStart=%{_bindir}/hirzd\1#' \
+  packaging/systemd/hirzd.service > %{buildroot}%{_userunitdir}/hirzd.service
+grep -Eq '^ExecStart=%{_bindir}/hirzd( |$)' %{buildroot}%{_userunitdir}/hirzd.service
+
+# Third-party package: a preset enables the broker socket on install. A package inside
+# Fedora would ask for an entry in the distribution presets instead.
+install -d %{buildroot}%{_presetdir}
+echo 'enable hirz-uhid-broker.socket' > %{buildroot}%{_presetdir}/80-hirz.preset
+
+install -Dm0644 packaging/udev/70-hirz.rules %{buildroot}%{_udevrulesdir}/70-hirz.rules
+install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
+  %{buildroot}%{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
+install -d %{buildroot}%{_modulesloaddir}
+echo uhid > %{buildroot}%{_modulesloaddir}/hirz.conf
+
+# Firefox on Fedora reads /usr/lib64/mozilla; the portal and the proxy also read /usr/lib.
+for d in %{_prefix}/lib/mozilla/native-messaging-hosts %{_libdir}/mozilla/native-messaging-hosts; do
+  install -d %{buildroot}$d
+  sed 's#@HIRZ_NMH_PATH@#%{_prefix}/lib/hirz/hirz-nmh#' packaging/native-messaging/hirz.json \
+    > %{buildroot}$d/hirz.json
+  grep -q '"path": "%{_prefix}/lib/hirz/hirz-nmh"' %{buildroot}$d/hirz.json
+done
+
+%check
+cargo test --release --locked --frozen --offline --workspace
+
+%post
+%systemd_post hirz-uhid-broker.socket hirz-uhid-broker.service
+%systemd_user_post hirzd.service
+%udev_rules_update
+modprobe uhid >/dev/null 2>&1 || :
+if [ $1 -eq 1 ] && [ -d /run/systemd/system ]; then
+  if systemctl is-enabled --quiet hirz-uhid-broker.socket; then
+    systemctl start hirz-uhid-broker.socket || :
+  fi
+  echo "hirz is installed. Each user sets it up with: hirz init; systemctl --user enable --now hirzd"
+fi
+
+%preun
+%systemd_preun hirz-uhid-broker.socket hirz-uhid-broker.service
+%systemd_user_preun hirzd.service
+
+%postun
+%systemd_postun_with_restart hirz-uhid-broker.service
+%systemd_user_postun hirzd.service
+%udev_rules_update
+
+%files
+%license LICENSE-MIT LICENSE-APACHE
+%doc README.md SECURITY.md docs/install.md
+%{_bindir}/hirz
+%{_bindir}/hirzd
+%dir %{_prefix}/lib/hirz
+%{_prefix}/lib/hirz/hirz-nmh
+%dir %{_libexecdir}/hirz
+%{_libexecdir}/hirz/hirz-uhid-broker
+%{_unitdir}/hirz-uhid-broker.service
+%{_unitdir}/hirz-uhid-broker.socket
+%{_userunitdir}/hirzd.service
+%{_presetdir}/80-hirz.preset
+%{_udevrulesdir}/70-hirz.rules
+%{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
+%{_modulesloaddir}/hirz.conf
+%{_prefix}/lib/mozilla/native-messaging-hosts/hirz.json
+%{_libdir}/mozilla/native-messaging-hosts/hirz.json
+
+%changelog
+* Mon Nov 16 2026 Abdelbaki Berkati <bakissation@users.noreply.github.com> - 0.1.0~dev-1
+- First package
