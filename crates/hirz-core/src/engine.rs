@@ -155,11 +155,7 @@ impl<'a> Engine<'a> {
         let (private_key_pkcs8, public_key_cose) = generate_key(algorithm)?;
         let mut credential_id = vec![0u8; CREDENTIAL_ID_LEN];
         hirz_crypto::random_fill(&mut credential_id).map_err(crypto_error)?;
-        let hmac_secret = if req.extensions.hmac_secret {
-            Some(new_hmac_pair()?)
-        } else {
-            None
-        };
+        let hmac_secret = req.extensions.hmac_secret.then(new_hmac_pair).transpose()?;
         let cred_protect = req.extensions.cred_protect.map(cred_protect_level);
         let record = CredentialRecord {
             credential_id: credential_id.clone(),
@@ -284,10 +280,11 @@ impl<'a> Engine<'a> {
         };
         let uv = approval.user_verified;
 
-        let output = match &req.extensions.hmac_secret {
-            Some(salts) => hmac_secret_output(record, salts, uv),
-            None => None,
-        };
+        let output = req
+            .extensions
+            .hmac_secret
+            .as_ref()
+            .and_then(|salts| hmac_secret_output(record, salts, uv));
         let (extensions, hmac_secret_output) = match (output, hmac) {
             (None, _) => (None, None),
             (Some(out), Some(wrap)) => (
@@ -300,7 +297,7 @@ impl<'a> Engine<'a> {
             ),
             (Some(out), None) => (None, Some(out.to_vec())),
         };
-        let (auth_data, signature) = sign_assertion(
+        let assertion = sign_assertion(
             record,
             req,
             flags(true, uv, vault.backup_state()),
@@ -313,12 +310,9 @@ impl<'a> Engine<'a> {
             display_name: record.user_display_name.clone().filter(|_| uv),
         });
         Ok(AssertionResponse {
-            credential_id: record.credential_id.clone(),
-            auth_data,
-            signature,
-            user_handle: record.user_id.clone(),
             user,
             hmac_secret_output,
+            ..assertion
         })
     }
 
@@ -336,16 +330,7 @@ impl<'a> Engine<'a> {
             .into_iter()
             .find(|r| !needs_uv(r, true))
             .ok_or(CoreError::NoCredentials)?;
-        let (auth_data, signature) =
-            sign_assertion(record, req, flags(false, false, vault.backup_state()), None)?;
-        Ok(AssertionResponse {
-            credential_id: record.credential_id.clone(),
-            auth_data,
-            signature,
-            user_handle: record.user_id.clone(),
-            user: None,
-            hmac_secret_output: None,
-        })
+        sign_assertion(record, req, flags(false, false, vault.backup_state()), None)
     }
 
     /// CTAP authenticatorSelection: user presence only.
@@ -568,13 +553,14 @@ fn hmac_secret_output(
     Some(out)
 }
 
-/// authenticatorData for an assertion and the signature over it and the client data hash.
+/// authenticatorData for an assertion and the signature over it and the client data hash,
+/// without a user entity or a raw hmac-secret output.
 fn sign_assertion(
     record: &CredentialRecord,
     req: &GetAssertionRequest,
     flags: u8,
     extensions: Option<hirz_proto::cbor::Value>,
-) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
+) -> Result<AssertionResponse, CoreError> {
     let auth_data = AuthenticatorData {
         rp_id_hash: hirz_crypto::sha256(req.rp_id.as_bytes()),
         flags,
@@ -588,7 +574,14 @@ fn sign_assertion(
     message.extend_from_slice(&auth_data);
     message.extend_from_slice(&req.client_data_hash);
     let signature = sign(record, &message)?;
-    Ok((auth_data, signature))
+    Ok(AssertionResponse {
+        credential_id: record.credential_id.clone(),
+        auth_data,
+        signature,
+        user_handle: record.user_id.clone(),
+        user: None,
+        hmac_secret_output: None,
+    })
 }
 
 fn sign(rec: &CredentialRecord, message: &[u8]) -> Result<Vec<u8>, CoreError> {

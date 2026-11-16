@@ -55,23 +55,23 @@ pub fn validate_rp_id(rp_id: Option<&str>, origin: &Origin) -> Result<String, Rp
     if rp_id == domain {
         return Ok(rp_id.to_owned());
     }
-    let is_parent = domain
-        .strip_suffix(rp_id)
-        .is_some_and(|prefix| prefix.ends_with('.'));
-    if !is_parent {
+    if !is_subdomain(domain, rp_id) {
         return Err(RpIdError::RelatedOriginRequired);
     }
     if psl::is_public_suffix(rp_id) {
         return Err(RpIdError::PublicSuffix);
     }
     let origin_suffix = psl::public_suffix(domain).ok_or(RpIdError::PublicSuffix)?;
-    let crosses = origin_suffix
-        .strip_suffix(rp_id)
-        .is_some_and(|prefix| prefix.ends_with('.'));
-    if crosses || origin_suffix == rp_id {
+    if origin_suffix == rp_id || is_subdomain(origin_suffix, rp_id) {
         return Err(RpIdError::PublicSuffix);
     }
     Ok(rp_id.to_owned())
+}
+
+fn is_subdomain(child: &str, parent: &str) -> bool {
+    child
+        .strip_suffix(parent)
+        .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 #[cfg(test)]

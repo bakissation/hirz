@@ -462,28 +462,23 @@ fn encode_into(value: &Value, out: &mut Vec<u8>) -> Result<()> {
             }
         }
         Value::Map(entries) => {
-            let mut encoded = Vec::with_capacity(entries.len());
+            let mut keyed = Vec::with_capacity(entries.len());
             for (k, v) in entries {
                 if !matches!(k, Value::Unsigned(_) | Value::Negative(_) | Value::Text(_)) {
                     return Err(Error::Unsupported);
                 }
                 let mut kb = Vec::new();
                 encode_into(k, &mut kb)?;
-                let mut vb = Vec::new();
-                encode_into(v, &mut vb)?;
-                encoded.push((kb, vb));
+                keyed.push((kb, v));
             }
-            encoded.sort_by(|a, b| cmp_keys(&a.0, &b.0));
-            if encoded
-                .windows(2)
-                .any(|w| matches!(w, [a, b] if a.0 == b.0))
-            {
+            keyed.sort_by(|a, b| cmp_keys(&a.0, &b.0));
+            if keyed.windows(2).any(|w| matches!(w, [a, b] if a.0 == b.0)) {
                 return Err(Error::DuplicateKey);
             }
-            write_head(out, MAJOR_MAP, len_u64(encoded.len()));
-            for (k, v) in encoded {
+            write_head(out, MAJOR_MAP, len_u64(keyed.len()));
+            for (k, v) in keyed {
                 out.extend_from_slice(&k);
-                out.extend_from_slice(&v);
+                encode_into(v, out)?;
             }
         }
         Value::Bool(false) => out.push(SIMPLE_FALSE),

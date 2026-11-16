@@ -24,12 +24,11 @@ use crate::create::prepare_create;
 use crate::error::Error;
 use crate::get::{prepare_get, prepare_list};
 use crate::origin::Origin;
-use crate::response::{authentication_response, registration_response};
+use crate::response::{authentication_response, b64, obj, registration_response};
 use hirz_core::{
     AssertionResponse, CandidateAccount, CoreError, GetAssertionRequest, MakeCredentialRequest,
     MakeCredentialResponse,
 };
-use hirz_proto::base64url;
 use hirz_proto::json::Json;
 
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -74,12 +73,12 @@ pub trait Engine {
 
 fn reply(id: Option<u64>, ok: bool, body: Vec<(&str, Json)>) -> Json {
     let mut members = vec![
-        ("v".to_owned(), Json::from(PROTOCOL_VERSION)),
-        ("id".to_owned(), id.map_or(Json::Null, Json::from)),
-        ("ok".to_owned(), Json::Bool(ok)),
+        ("v", Json::from(PROTOCOL_VERSION)),
+        ("id", id.map_or(Json::Null, Json::from)),
+        ("ok", Json::Bool(ok)),
     ];
-    members.extend(body.into_iter().map(|(k, v)| (k.to_owned(), v)));
-    Json::Object(members)
+    members.extend(body);
+    obj(members)
 }
 
 /// The error reply for `err`.
@@ -96,18 +95,13 @@ pub fn error_reply(id: Option<u64>, err: &Error) -> Json {
 
 fn capabilities(engine: &dyn Engine) -> Json {
     let uv = engine.user_verification_available();
-    Json::Object(
-        [
-            ("userVerifyingPlatformAuthenticator", uv),
-            ("passkeyPlatformAuthenticator", uv),
-            ("extension:credProps", true),
-            ("extension:credProtect", true),
-            ("extension:prf", true),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), Json::Bool(v)))
-        .collect(),
-    )
+    obj(vec![
+        ("userVerifyingPlatformAuthenticator", Json::Bool(uv)),
+        ("passkeyPlatformAuthenticator", Json::Bool(uv)),
+        ("extension:credProps", Json::Bool(true)),
+        ("extension:credProtect", Json::Bool(true)),
+        ("extension:prf", Json::Bool(true)),
+    ])
 }
 
 fn truncated(s: Option<&str>) -> Json {
@@ -124,16 +118,10 @@ fn accounts(list: &[CandidateAccount]) -> Json {
         list.iter()
             .take(MAX_DESCRIPTORS)
             .map(|a| {
-                Json::Object(vec![
-                    (
-                        "id".to_owned(),
-                        Json::from(base64url::encode(&a.credential_id)),
-                    ),
-                    ("name".to_owned(), truncated(a.user_name.as_deref())),
-                    (
-                        "displayName".to_owned(),
-                        truncated(a.user_display_name.as_deref()),
-                    ),
+                obj(vec![
+                    ("id", b64(&a.credential_id)),
+                    ("name", truncated(a.user_name.as_deref())),
+                    ("displayName", truncated(a.user_display_name.as_deref())),
                 ])
             })
             .collect(),

@@ -121,12 +121,10 @@ impl SharedSecret {
                 ctap_pin_uv::aes256_cbc_decrypt(key, &[0u8; AES_BLOCK], ciphertext)
             }
             PinUvAuthProtocol::Two => {
-                if ciphertext.len() < AES_BLOCK {
-                    return Err(CryptoError::Invalid);
-                }
-                let (iv, ct) = ciphertext.split_at(AES_BLOCK);
-                let iv = <[u8; AES_BLOCK]>::try_from(iv).map_err(|_| CryptoError::Invalid)?;
-                ctap_pin_uv::aes256_cbc_decrypt(key, &iv, ct)
+                let (iv, ct) = ciphertext
+                    .split_first_chunk::<AES_BLOCK>()
+                    .ok_or(CryptoError::Invalid)?;
+                ctap_pin_uv::aes256_cbc_decrypt(key, iv, ct)
             }
         }
     }

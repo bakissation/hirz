@@ -16,11 +16,11 @@ use hirz_proto::{attestation, base64url, cbor, cose};
 
 type Result<T> = core::result::Result<T, Error>;
 
-fn b64(bytes: &[u8]) -> Json {
+pub(crate) fn b64(bytes: &[u8]) -> Json {
     Json::String(base64url::encode(bytes))
 }
 
-fn obj(members: Vec<(&str, Json)>) -> Json {
+pub(crate) fn obj(members: Vec<(&str, Json)>) -> Json {
     Json::Object(
         members
             .into_iter()

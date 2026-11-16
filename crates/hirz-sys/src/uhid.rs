@@ -182,6 +182,13 @@ fn put_str(
     Ok(())
 }
 
+fn data_size(data: &[u8]) -> Result<u16, UhidError> {
+    if data.len() > UHID_DATA_MAX {
+        return Err(UhidError::DataTooLarge);
+    }
+    u16::try_from(data.len()).map_err(|_| UhidError::DataTooLarge)
+}
+
 fn get<const N: usize>(buf: &[u8], off: usize) -> [u8; N] {
     let mut out = [0u8; N];
     if let Some(src) = buf.get(off..off.saturating_add(N)) {
@@ -238,10 +245,7 @@ pub fn encode_destroy() -> Vec<u8> {
 
 /// `UHID_INPUT2`: one input report from the device to the host.
 pub fn encode_input2(data: &[u8]) -> Result<Vec<u8>, UhidError> {
-    if data.len() > UHID_DATA_MAX {
-        return Err(UhidError::DataTooLarge);
-    }
-    let size = u16::try_from(data.len()).map_err(|_| UhidError::DataTooLarge)?;
+    let size = data_size(data)?;
     let mut buf = new_event(event_type::INPUT2);
     put(&mut buf, INPUT2_SIZE, &size.to_ne_bytes());
     put(&mut buf, INPUT2_DATA, data);
@@ -250,10 +254,7 @@ pub fn encode_input2(data: &[u8]) -> Result<Vec<u8>, UhidError> {
 
 /// `UHID_GET_REPORT_REPLY`. A non-zero `err` is an errno value reported to the requester.
 pub fn encode_get_report_reply(id: u32, err: u16, data: &[u8]) -> Result<Vec<u8>, UhidError> {
-    if data.len() > UHID_DATA_MAX {
-        return Err(UhidError::DataTooLarge);
-    }
-    let size = u16::try_from(data.len()).map_err(|_| UhidError::DataTooLarge)?;
+    let size = data_size(data)?;
     let mut buf = new_event(event_type::GET_REPORT_REPLY);
     put(&mut buf, REQ_ID, &id.to_ne_bytes());
     put(&mut buf, REPLY_ERR, &err.to_ne_bytes());

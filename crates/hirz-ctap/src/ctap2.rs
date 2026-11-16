@@ -156,6 +156,10 @@ fn required(v: Option<&Value>) -> Res<&Value> {
     v.ok_or(Status::MissingParameter)
 }
 
+fn opt_bytes(v: Option<&Value>) -> Res<Option<Vec<u8>>> {
+    v.map(|v| as_bytes(v).map(<[u8]>::to_vec)).transpose()
+}
+
 fn opt_text(map: &Value, key: &str) -> Res<Option<String>> {
     map.get_text(key)
         .map(|v| as_text(v).map(str::to_owned))
@@ -285,10 +289,11 @@ pub fn parse_make_credential(params: &[u8]) -> Res<MakeCredentialParams> {
         }
     }
 
-    let exclude_list = match m.get_int(0x05) {
-        Some(v) => descriptor_ids(v)?,
-        None => Vec::new(),
-    };
+    let exclude_list = m
+        .get_int(0x05)
+        .map(descriptor_ids)
+        .transpose()?
+        .unwrap_or_default();
 
     let mut extensions = MakeExtensions::default();
     if let Some(ext) = m.get_int(0x06) {
@@ -307,10 +312,7 @@ pub fn parse_make_credential(params: &[u8]) -> Res<MakeCredentialParams> {
     }
 
     let options = options(m.get_int(0x07))?;
-    let pin_uv_auth_param = m
-        .get_int(0x08)
-        .map(|v| as_bytes(v).map(<[u8]>::to_vec))
-        .transpose()?;
+    let pin_uv_auth_param = opt_bytes(m.get_int(0x08))?;
     let pin_uv_auth_protocol = m.get_int(0x09).map(as_uint).transpose()?;
     let enterprise_attestation = m.get_int(0x0a).is_some();
 
@@ -408,10 +410,11 @@ pub fn parse_get_assertion(params: &[u8]) -> Res<GetAssertionParams> {
     let m = decode_params(params)?;
     let rp_id = as_text(required(m.get_int(0x01))?)?.to_owned();
     let client_data_hash = client_data_hash(m.get_int(0x02))?;
-    let allow_list = match m.get_int(0x03) {
-        Some(v) => descriptor_ids(v)?,
-        None => Vec::new(),
-    };
+    let allow_list = m
+        .get_int(0x03)
+        .map(descriptor_ids)
+        .transpose()?
+        .unwrap_or_default();
     let mut hmac_secret = None;
     if let Some(ext) = m.get_int(0x04) {
         let ext = as_map(ext)?;
@@ -425,10 +428,7 @@ pub fn parse_get_assertion(params: &[u8]) -> Res<GetAssertionParams> {
     if opts.and_then(|o| o.get_text("rk")).is_some() {
         options.rk = Some(true);
     }
-    let pin_uv_auth_param = m
-        .get_int(0x06)
-        .map(|v| as_bytes(v).map(<[u8]>::to_vec))
-        .transpose()?;
+    let pin_uv_auth_param = opt_bytes(m.get_int(0x06))?;
     let pin_uv_auth_protocol = m.get_int(0x07).map(as_uint).transpose()?;
     Ok(GetAssertionParams {
         rp_id,
@@ -462,14 +462,14 @@ impl GetAssertionParams {
         if self.pin_uv_auth_param.is_some() {
             return Err(Status::PinAuthInvalid);
         }
-        let hmac = match self.hmac_secret {
-            Some(h) => {
-                let p = PinUvAuthProtocol::from_u64(h.pin_uv_auth_protocol)
-                    .ok_or(Status::InvalidParameter)?;
-                Some((h, p))
-            }
-            None => None,
-        };
+        let hmac = self
+            .hmac_secret
+            .map(|h| {
+                PinUvAuthProtocol::from_u64(h.pin_uv_auth_protocol)
+                    .map(|p| (h, p))
+                    .ok_or(Status::InvalidParameter)
+            })
+            .transpose()?;
         let req = GetAssertionRequest {
             client_data_hash: self.client_data_hash,
             rp_id: self.rp_id,
@@ -648,10 +648,18 @@ impl<A: Authenticator> Ctap2Handler<A> {
         }
     }
 
-    fn touch(&self, ctx: &RequestContext) -> Res<()> {
+    fn with_engine<T>(
+        &self,
+        ctx: &RequestContext,
+        call: impl FnOnce(&mut A) -> Result<T, CoreError>,
+    ) -> Res<T> {
         let mut engine = self.engine.lock().map_err(|_| Status::Other)?;
         ctx.set_status(KeepaliveStatus::UpNeeded);
-        engine.select(ctx).map_err(|e| Self::engine_error(&e, ctx))
+        call(&mut engine).map_err(|e| Self::engine_error(&e, ctx))
+    }
+
+    fn touch(&self, ctx: &RequestContext) -> Res<()> {
+        self.with_engine(ctx, |e| e.select(ctx))
     }
 
     /// 6.1.2 / 6.2.2 step 1: after a gesture, report that no PIN is set.
@@ -666,11 +674,7 @@ impl<A: Authenticator> Ctap2Handler<A> {
             return self.touch_probe(ctx);
         }
         let req = p.into_request()?;
-        let mut engine = self.engine.lock().map_err(|_| Status::Other)?;
-        ctx.set_status(KeepaliveStatus::UpNeeded);
-        let resp = engine
-            .make_credential(&req, ctx)
-            .map_err(|e| Self::engine_error(&e, ctx))?;
+        let resp = self.with_engine(ctx, |e| e.make_credential(&req, ctx))?;
         encode_make_credential(&resp)
     }
 
@@ -695,15 +699,8 @@ impl<A: Authenticator> Ctap2Handler<A> {
             None => None,
         };
         let user_selected = req.allow_list.is_empty() && req.up;
-        let mut engine = self.engine.lock().map_err(|_| Status::Other)?;
-        ctx.set_status(KeepaliveStatus::UpNeeded);
-        let resp = engine
-            .get_assertion(
-                &req,
-                wrapper.as_ref().map(|w| w as &dyn HmacSecretWrap),
-                ctx,
-            )
-            .map_err(|e| Self::engine_error(&e, ctx))?;
+        let hmac = wrapper.as_ref().map(|w| w as &dyn HmacSecretWrap);
+        let resp = self.with_engine(ctx, |e| e.get_assertion(&req, hmac, ctx))?;
         encode_get_assertion(&resp, user_selected)
     }
 

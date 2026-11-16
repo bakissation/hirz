@@ -87,7 +87,11 @@ impl<'a> Obj<'a> {
         max: usize,
     ) -> Result<Option<Vec<u8>>> {
         self.get(key)
-            .map(|v| bytes(v, min, max).ok_or(Error::InvalidOptions(key)))
+            .map(|v| {
+                v.as_str()
+                    .and_then(|s| b64(s, min, max))
+                    .ok_or(Error::InvalidOptions(key))
+            })
             .transpose()
     }
 
@@ -122,11 +126,6 @@ pub(crate) fn text(v: &Json, max_chars: usize) -> Option<&str> {
 
 /// Unpadded base64url decoding to `min..=max` bytes, with the encoded length bounded
 /// before decoding.
-pub(crate) fn bytes(v: &Json, min: usize, max: usize) -> Option<Vec<u8>> {
-    let s = v.as_str()?;
-    b64(s, min, max)
-}
-
 pub(crate) fn b64(s: &str, min: usize, max: usize) -> Option<Vec<u8>> {
     let max_encoded = max.div_ceil(3).saturating_mul(4);
     if s.len() > max_encoded {

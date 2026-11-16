@@ -55,44 +55,31 @@ pub struct KeyAgreementKey {
     pub y: [u8; 32],
 }
 
-fn ec2_key(alg: i64, x: &[u8; 32], y: &[u8; 32]) -> Vec<u8> {
+/// Writes `{1: kty, 3: alg, -1: crv, -2: x [, -3: y]}`, already in canonical key order.
+fn encode_key(kty: i64, alg: i64, crv: i64, x: &[u8; 32], y: Option<&[u8; 32]>) -> Vec<u8> {
     let mut out = Vec::with_capacity(77);
-    cbor::write_map_header(&mut out, 5);
-    for (label, value) in [
-        (LABEL_KTY, KTY_EC2),
-        (LABEL_ALG, alg),
-        (LABEL_CRV, CRV_P256),
-    ] {
+    cbor::write_map_header(&mut out, if y.is_some() { 5 } else { 4 });
+    for (label, value) in [(LABEL_KTY, kty), (LABEL_ALG, alg), (LABEL_CRV, crv)] {
         cbor::write_int(&mut out, label);
         cbor::write_int(&mut out, value);
     }
     cbor::write_int(&mut out, LABEL_X);
     cbor::write_bytes(&mut out, x);
-    cbor::write_int(&mut out, LABEL_Y);
-    cbor::write_bytes(&mut out, y);
+    if let Some(y) = y {
+        cbor::write_int(&mut out, LABEL_Y);
+        cbor::write_bytes(&mut out, y);
+    }
     out
 }
 
 /// Encodes an ES256 public key as a canonical COSE_Key `{1:2, 3:-7, -1:1, -2:x, -3:y}`.
 pub fn encode_es256(x: &[u8; 32], y: &[u8; 32]) -> Vec<u8> {
-    ec2_key(ALG_ES256, x, y)
+    encode_key(KTY_EC2, ALG_ES256, CRV_P256, x, Some(y))
 }
 
 /// Encodes an Ed25519 public key as a canonical COSE_Key `{1:1, 3:-8, -1:6, -2:x}`.
 pub fn encode_ed25519(x: &[u8; 32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(42);
-    cbor::write_map_header(&mut out, 4);
-    for (label, value) in [
-        (LABEL_KTY, KTY_OKP),
-        (LABEL_ALG, ALG_EDDSA),
-        (LABEL_CRV, CRV_ED25519),
-    ] {
-        cbor::write_int(&mut out, label);
-        cbor::write_int(&mut out, value);
-    }
-    cbor::write_int(&mut out, LABEL_X);
-    cbor::write_bytes(&mut out, x);
-    out
+    encode_key(KTY_OKP, ALG_EDDSA, CRV_ED25519, x, None)
 }
 
 /// Returns the authenticator key-agreement key `{1:2, 3:-25, -1:1, -2:x, -3:y}` as a value.

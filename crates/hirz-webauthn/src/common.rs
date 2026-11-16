@@ -8,7 +8,7 @@ use hirz_proto::json::Json;
 
 pub(crate) const CHALLENGE_MIN: usize = 16;
 pub(crate) const CHALLENGE_MAX: usize = 1024;
-pub(crate) const CREDENTIAL_ID_MAX: usize = 1023;
+pub(crate) const CREDENTIAL_ID_MAX: usize = hirz_proto::auth_data::MAX_CREDENTIAL_ID_LEN;
 pub(crate) const MAX_DESCRIPTORS: usize = 64;
 pub(crate) const MAX_HINTS: usize = 16;
 pub(crate) const MAX_TRANSPORTS: usize = 16;

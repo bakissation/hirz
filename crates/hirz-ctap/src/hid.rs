@@ -141,34 +141,28 @@ impl std::error::Error for MessageTooLarge {}
 /// Parses one report. The data slice of an initialization packet is always the full 57
 /// bytes; the caller trims it to `bcnt`.
 pub fn parse_packet(report: &[u8]) -> Result<Packet<'_>, BadReportSize> {
+    let bad = BadReportSize(report.len());
     if report.len() != REPORT_SIZE {
-        return Err(BadReportSize(report.len()));
+        return Err(bad);
     }
-    let (Some(cid), Some(&kind)) = (report.get(..4), report.get(4)) else {
-        return Err(BadReportSize(report.len()));
+    let Some((cid, [kind, rest @ ..])) = report.split_first_chunk::<4>() else {
+        return Err(bad);
     };
-    let cid = u32::from_be_bytes([
-        cid.first().copied().unwrap_or(0),
-        cid.get(1).copied().unwrap_or(0),
-        cid.get(2).copied().unwrap_or(0),
-        cid.get(3).copied().unwrap_or(0),
-    ]);
-    if kind & TYPE_INIT != 0 {
-        let hi = report.get(5).copied().unwrap_or(0);
-        let lo = report.get(6).copied().unwrap_or(0);
-        Ok(Packet::Init {
+    let cid = u32::from_be_bytes(*cid);
+    if kind & TYPE_INIT == 0 {
+        return Ok(Packet::Cont {
             cid,
-            cmd: kind & !TYPE_INIT,
-            bcnt: u16::from_be_bytes([hi, lo]),
-            data: report.get(7..).unwrap_or(&[]),
-        })
-    } else {
-        Ok(Packet::Cont {
-            cid,
-            seq: kind,
-            data: report.get(5..).unwrap_or(&[]),
-        })
+            seq: *kind,
+            data: rest,
+        });
     }
+    let (bcnt, data) = rest.split_first_chunk::<2>().ok_or(bad)?;
+    Ok(Packet::Init {
+        cid,
+        cmd: kind & !TYPE_INIT,
+        bcnt: u16::from_be_bytes(*bcnt),
+        data,
+    })
 }
 
 /// Splits a message into one initialization packet and as many continuation packets as
@@ -352,6 +346,12 @@ impl Transport {
         }
     }
 
+    fn cancel_job(cid: u32, job: JobId, status: u8) -> Vec<Output> {
+        let mut out = vec![Output::CancelJob(job)];
+        out.extend(Self::cbor_response(cid, &[status]));
+        out
+    }
+
     /// Aborts whatever runs on `cid`; returns the cancel action for a running job.
     fn abort_channel(&mut self, cid: u32) -> Vec<Output> {
         match &self.state {
@@ -406,12 +406,7 @@ impl Transport {
                 if command == cmd::CANCEL {
                     let job = p.job;
                     self.state = State::Idle;
-                    let mut out = vec![Output::CancelJob(job)];
-                    out.extend(Self::cbor_response(
-                        cid,
-                        &[ctap2_status::ERR_KEEPALIVE_CANCEL],
-                    ));
-                    return out;
+                    return Self::cancel_job(cid, job, ctap2_status::ERR_KEEPALIVE_CANCEL);
                 }
                 return Self::error(cid, err::CHANNEL_BUSY);
             }
@@ -575,12 +570,7 @@ impl Transport {
                 if now >= p.deadline {
                     let (cid, job) = (p.cid, p.job);
                     self.state = State::Idle;
-                    let mut out = vec![Output::CancelJob(job)];
-                    out.extend(Self::cbor_response(
-                        cid,
-                        &[ctap2_status::ERR_USER_ACTION_TIMEOUT],
-                    ));
-                    return out;
+                    return Self::cancel_job(cid, job, ctap2_status::ERR_USER_ACTION_TIMEOUT);
                 }
                 if now < p.next_keepalive {
                     return Vec::new();

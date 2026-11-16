@@ -171,11 +171,7 @@ pub mod ed25519 {
     }
 
     fn public_of(kp: &Ed25519KeyPair) -> Result<[u8; 32]> {
-        let pk = kp.public_key().as_ref();
-        if pk.len() != 32 {
-            return Err(CryptoError::Invalid);
-        }
-        Ok(super::to_array(pk))
+        <[u8; 32]>::try_from(kp.public_key().as_ref()).map_err(|_| CryptoError::Invalid)
     }
 
     /// Returns (PKCS#8 private key, 32-byte public key).
@@ -193,13 +189,7 @@ pub mod ed25519 {
     pub fn sign(pkcs8: &[u8], msg: &[u8]) -> Result<[u8; 64]> {
         let kp = load(pkcs8)?;
         let sig = kp.try_sign(msg).map_err(|_| CryptoError::Invalid)?;
-        let bytes = sig.as_ref();
-        if bytes.len() != 64 {
-            return Err(CryptoError::Invalid);
-        }
-        let mut out = [0u8; 64];
-        out.copy_from_slice(bytes);
-        Ok(out)
+        <[u8; 64]>::try_from(sig.as_ref()).map_err(|_| CryptoError::Invalid)
     }
     pub fn public_key(pkcs8: &[u8]) -> Result<[u8; 32]> {
         public_of(&load(pkcs8)?)
@@ -266,14 +256,14 @@ pub mod aead {
         if sealed.len() < NONCE_LEN + TAG_LEN {
             return Err(CryptoError::Auth);
         }
-        let (nonce_bytes, body) = sealed.split_at(NONCE_LEN);
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce.copy_from_slice(nonce_bytes);
+        let (nonce, body) = sealed
+            .split_first_chunk::<NONCE_LEN>()
+            .ok_or(CryptoError::Auth)?;
         let lk = self::key(key)?;
         let mut buf = Zeroizing::new(body.to_vec());
         let pt_len = lk
             .open_in_place(
-                Nonce::assume_unique_for_key(nonce),
+                Nonce::assume_unique_for_key(*nonce),
                 Aad::from(aad),
                 buf.as_mut_slice(),
             )
@@ -303,10 +293,7 @@ pub mod x25519 {
 
     fn public_of(k: &PrivateKey) -> Result<[u8; 32]> {
         let pk = k.compute_public_key().map_err(|_| CryptoError::Invalid)?;
-        if pk.as_ref().len() != 32 {
-            return Err(CryptoError::Invalid);
-        }
-        Ok(super::to_array(pk.as_ref()))
+        <[u8; 32]>::try_from(pk.as_ref()).map_err(|_| CryptoError::Invalid)
     }
 
     /// Raw X25519 (RFC 7748). Fails on an all-zero shared secret (small-order peer key).
@@ -353,9 +340,9 @@ pub mod x25519 {
     }
     /// Output: 32-byte ephemeral public key || aead::seal output.
     pub fn seal_to(recipient: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-        let (eph_private, eph_pub) = generate()?;
-        let eph_arr: Zeroizing<[u8; 32]> = Zeroizing::new(super::to_array(&eph_private));
-        let shared = agree(&eph_arr, recipient)?;
+        let eph = PrivateKey::generate(&X25519).map_err(|_| CryptoError::Rng)?;
+        let eph_pub = public_of(&eph)?;
+        let shared = agree_with(&eph, recipient)?;
         let key = seal_key(&shared, &eph_pub, recipient)?;
         let sealed = super::aead::seal(&key, aad, plaintext)?;
         let mut out = Vec::with_capacity(sealed.len().saturating_add(32));
@@ -367,12 +354,11 @@ pub mod x25519 {
         if sealed.len() < 32 + super::aead::NONCE_LEN + super::aead::TAG_LEN {
             return Err(CryptoError::Auth);
         }
-        let (eph, body) = sealed.split_at(32);
-        let eph_pub = super::to_array(eph);
+        let (eph_pub, body) = sealed.split_first_chunk::<32>().ok_or(CryptoError::Auth)?;
         let k = load(private)?;
         let own_pub = public_of(&k)?;
-        let shared = agree_with(&k, &eph_pub).map_err(|_| CryptoError::Auth)?;
-        let key = seal_key(&shared, &eph_pub, &own_pub)?;
+        let shared = agree_with(&k, eph_pub).map_err(|_| CryptoError::Auth)?;
+        let key = seal_key(&shared, eph_pub, &own_pub)?;
         super::aead::open(&key, aad, body)
     }
 }
