@@ -1,0 +1,185 @@
+[package]
+name = "hirz-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the main workspace and never shipped: libfuzzer-sys is allowed here only.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+hirz-proto = { path = "../crates/hirz-proto" }
+hirz-crypto = { path = "../crates/hirz-crypto" }
+hirz-core = { path = "../crates/hirz-core" }
+hirz-ctap = { path = "../crates/hirz-ctap" }
+hirz-webauthn = { path = "../crates/hirz-webauthn" }
+hirz-vault = { path = "../crates/hirz-vault" }
+hirz-uv = { path = "../crates/hirz-uv" }
+
+[profile.release]
+debug = 1
+overflow-checks = true
+debug-assertions = true
+
+[lib]
+name = "hirz_fuzz"
+path = "src/lib.rs"
+test = false
+doc = false
+
+[[example]]
+name = "gen-seeds"
+path = "examples/gen_seeds.rs"
+test = false
+
+[[bin]]
+name = "cbor_strict"
+path = "fuzz_targets/cbor_strict.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor_lenient"
+path = "fuzz_targets/cbor_lenient.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cose_key"
+path = "fuzz_targets/cose_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_data"
+path = "fuzz_targets/auth_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attestation"
+path = "fuzz_targets/attestation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "base64url"
+path = "fuzz_targets/base64url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_data"
+path = "fuzz_targets/client_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctaphid_packet"
+path = "fuzz_targets/ctaphid_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctaphid_transport"
+path = "fuzz_targets/ctaphid_transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap2_make_credential"
+path = "fuzz_targets/ctap2_make_credential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap2_get_assertion"
+path = "fuzz_targets/ctap2_get_assertion.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap2_client_pin"
+path = "fuzz_targets/ctap2_client_pin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap2_handler"
+path = "fuzz_targets/ctap2_handler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webauthn_origin"
+path = "fuzz_targets/webauthn_origin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webauthn_prepare"
+path = "fuzz_targets/webauthn_prepare.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webauthn_handle"
+path = "fuzz_targets/webauthn_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_backup"
+path = "fuzz_targets/vault_backup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uv_config"
+path = "fuzz_targets/uv_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uv_pin_verifier"
+path = "fuzz_targets/uv_pin_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uv_tool_output"
+path = "fuzz_targets/uv_tool_output.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,5 @@
+hirz-pin 1
+kdf argon2id 65536 3 4
+salt abababababababababababababababab
+hash cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+failures 2

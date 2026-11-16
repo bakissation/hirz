@@ -123,6 +123,9 @@ fn parse_u32(s: &str) -> Option<u32> {
     if s.is_empty() || s.len() > 10 || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
+    if s.len() > 1 && s.starts_with('0') {
+        return None;
+    }
     s.parse().ok()
 }
 

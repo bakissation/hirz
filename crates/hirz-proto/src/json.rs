@@ -498,6 +498,8 @@ impl fmt::Display for Json {
             Json::Bool(false) => f.write_str("false"),
             Json::Number(n) => match n.exact {
                 Some(e) => write!(f, "{e}"),
+                // JSON has no distinct negative zero once read back as an integer.
+                None if n.value == 0.0 => f.write_str("0"),
                 None => write!(f, "{}", n.value),
             },
             Json::String(s) => write_string(f, s),
@@ -555,6 +557,8 @@ mod tests {
     fn numbers() {
         assert_eq!(p("0").unwrap().as_u64(), Some(0));
         assert_eq!(p("-0").unwrap().as_i64(), Some(0));
+        assert_eq!(p("-0E1").unwrap().to_string(), "0");
+        assert_eq!(p("-0.0").unwrap().to_string(), "0");
         assert_eq!(p("18446744073709551615").unwrap().as_u64(), Some(u64::MAX));
         assert_eq!(p("18446744073709551616").unwrap().as_u64(), None);
         assert_eq!(

@@ -1,0 +1,5 @@
+# approval
+methods = polkit, fingerprint, pin
+click_to_allow = example.com, other.example
+timeout = 120
+prompts_per_minute = 5
