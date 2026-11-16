@@ -3,8 +3,7 @@
 
 /// AAGUID of hirz: `c049d046-0de0-4b9c-824f-5b5eeeff218f`.
 pub const AAGUID: [u8; 16] = [
-    0xc0, 0x49, 0xd0, 0x46, 0x0d, 0xe0, 0x4b, 0x9c, 0x82, 0x4f, 0x5b, 0x5e, 0xee, 0xff, 0x21,
-    0x8f,
+    0xc0, 0x49, 0xd0, 0x46, 0x0d, 0xe0, 0x4b, 0x9c, 0x82, 0x4f, 0x5b, 0x5e, 0xee, 0xff, 0x21, 0x8f,
 ];
 
 /// Length of every credential id hirz creates.
@@ -73,7 +72,7 @@ pub struct MakeCredentialRequest {
     pub algorithms: Vec<i64>,
     pub exclude_list: Vec<Vec<u8>>,
     /// What the RP asked for. hirz stores every credential in the vault either way;
-    /// this only changes what credProps reports.
+    /// this sets the record's discoverable flag, which credProps reports.
     pub resident_key: bool,
     pub uv: UvRequirement,
     pub extensions: MakeExtensions,
@@ -101,7 +100,7 @@ pub struct MakeCredentialResponse {
     pub algorithm: i64,
     /// True when hmac-secret was requested and enabled.
     pub hmac_secret: bool,
-    /// Always true: every hirz credential is discoverable.
+    /// The credential's discoverable flag (equal to the request's `resident_key`).
     pub resident_key: bool,
 }
 
@@ -179,6 +178,14 @@ pub trait HmacSecretWrap {
 /// Implemented by hirz-uv. The engine never signs unless `approve` returns `Ok`.
 pub trait Approver {
     fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError>;
+
+    /// CTAP authenticatorSelection: the user only confirms that this authenticator should
+    /// handle the platform's next request. No site, account or signature is involved; only
+    /// `user_present` of the result is used. The default refuses, so an approver that cannot
+    /// show such a prompt never reports presence it did not observe.
+    fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
+        Err(ApprovalError::Unavailable)
+    }
 }
 
 /// Errors the engine reports; frontends map them to CTAP status codes or DOMException names.
@@ -195,6 +202,9 @@ pub enum CoreError {
     /// The RP requires UV and only click-to-allow is possible (NotAllowedError).
     UvRequiredUnavailable,
     Approval(ApprovalError),
+    /// getAssertion with `up: false`. hirz never signs without a prompt, so silent
+    /// assertions are refused before any credential lookup.
+    SilentNotAllowed,
     InvalidRequest(&'static str),
     Vault(String),
     Crypto(String),

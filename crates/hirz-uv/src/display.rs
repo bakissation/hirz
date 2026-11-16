@@ -223,6 +223,21 @@ pub fn question_args(
     args
 }
 
+/// authenticatorSelection: the browser asks which security key to use. Focus is on Cancel.
+pub fn selection_args(remaining: Duration) -> Vec<String> {
+    vec![
+        "--question".to_owned(),
+        "--no-markup".to_owned(),
+        "--title=hirz".to_owned(),
+        "--text=Your browser is asking which security key to use.\n\nUse hirz?".to_owned(),
+        "--ok-label=Use hirz".to_owned(),
+        "--cancel-label=Cancel".to_owned(),
+        "--width=420".to_owned(),
+        zenity_timeout(remaining),
+        "--default-cancel".to_owned(),
+    ]
+}
+
 /// Hidden-text entry for the hirz PIN. The context is in the same dialog.
 pub fn pin_args(
     ctx: &ApprovalContext<'_>,

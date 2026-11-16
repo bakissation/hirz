@@ -489,6 +489,26 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
             };
         }
     }
+
+    fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
+        let _busy = match self.busy.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::WouldBlock) => return Err(ApprovalError::Denied),
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        };
+        let config = self.config()?;
+        if !self.runner.tool_available(Tool::Zenity) {
+            diag(ZENITY_MISSING);
+            return Err(ApprovalError::Unavailable);
+        }
+        let deadline = Deadline::start(config.timeout);
+        self.dialog(&deadline, display::selection_args)?;
+        Ok(Approval {
+            user_present: true,
+            user_verified: false,
+            selected: None,
+        })
+    }
 }
 
 #[cfg(test)]
