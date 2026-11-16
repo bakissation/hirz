@@ -15,6 +15,8 @@ const QUIZ_ROUNDS: usize = 3;
 const PHRASE_ATTEMPTS: usize = 3;
 const MAX_NAME_CHARS: usize = 64;
 const ID_PREFIX_HEX: usize = 12;
+/// Clears the screen and the scrollback, so the recovery phrase does not stay on screen.
+const CLEAR_SCREEN: &str = "\x1b[2J\x1b[3J\x1b[H";
 
 fn device_name(ctx: &Ctx<'_>, given: Option<String>) -> CliResult<String> {
     let name = match given {
@@ -45,7 +47,7 @@ fn dir_is_empty(dir: &Path) -> CliResult<bool> {
     }
 }
 
-fn already_set_up(ctx: &Ctx<'_>) -> CliError {
+pub(crate) fn already_set_up(ctx: &Ctx<'_>) -> CliError {
     let where_ = ctx
         .env
         .vault_dir(None)
@@ -67,6 +69,8 @@ fn show_phrase(ctx: &mut Ctx<'_>, words: &[&str]) -> CliResult {
         }
         ctx.say(line.trim_end())?;
     }
+    ctx.say("")?;
+    ctx.say("Do not copy, paste or screenshot this screen.")?;
     ctx.say("")
 }
 
@@ -210,20 +214,30 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
             ctx.env.state_dir().display()
         )));
     } else {
+        if ctx.out_is_terminal {
+            ctx.write_raw(CLEAR_SCREEN)?;
+            ctx.say(&format!("Your vault is in {}.", dir.display()))?;
+        }
         ctx.say("Correct. Keep the paper safe.")?;
     }
     ctx.say("")?;
-    ctx.say(
+    ctx.say(&format!(
         "Next steps:\n\
-         - Connect Firefox: hirz setup firefox\n\
+         - Connect Firefox: {p} setup firefox\n\
          - To use your passkeys on another computer, sync this vault folder to it (see\n  \
-           docs/sync.md), then run `hirz join --vault DIR` there.\n\
-         - Check everything with: hirz status",
-    )?;
+           docs/sync.md), run `hirz join --vault DIR --request` there and approve it here\n  \
+           with `{p} devices approve`.\n\
+         - Check everything with: {p} status",
+        p = ctx.program
+    ))?;
     Ok(Exit::Ok)
 }
 
-pub fn join(ctx: &mut Ctx<'_>, name: Option<String>) -> CliResult<Exit> {
+/// The vault folder and device name for `join`, after the checks both join modes share.
+pub(crate) fn join_target(
+    ctx: &Ctx<'_>,
+    name: Option<String>,
+) -> CliResult<(std::path::PathBuf, String)> {
     let flag = ctx
         .vault_flag
         .clone()
@@ -240,6 +254,14 @@ pub fn join(ctx: &mut Ctx<'_>, name: Option<String>) -> CliResult<Exit> {
         )));
     }
     let name = device_name(ctx, name)?;
+    Ok((dir, name))
+}
+
+pub fn join(ctx: &mut Ctx<'_>, name: Option<String>, request: bool) -> CliResult<Exit> {
+    if request {
+        return crate::cmd_pair::join_request(ctx, name);
+    }
+    let (dir, name) = join_target(ctx, name)?;
     ctx.say(
         "Type the 24-word recovery phrase of this vault. Put spaces between the words; the\n\
          first four letters of each word are enough.",
@@ -285,10 +307,11 @@ pub fn join(ctx: &mut Ctx<'_>, name: Option<String>) -> CliResult<Exit> {
         dir.display(),
         count(n, "passkey")
     ))?;
-    ctx.say(
+    ctx.say(&format!(
         "Passkeys you add on any device appear on the others once your sync tool has copied\n\
-         the files. Connect Firefox with: hirz setup firefox",
-    )?;
+         the files. Connect Firefox with: {} setup firefox",
+        ctx.program
+    ))?;
     Ok(Exit::Ok)
 }
 
@@ -493,7 +516,7 @@ fn sorted_devices(vault: &Vault) -> Vec<DeviceInfo> {
 }
 
 pub fn devices(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
-    let (vault, _) = ctx.open_vault()?;
+    let (mut vault, _) = ctx.open_vault()?;
     let devs = sorted_devices(&vault);
     if json_out {
         let items: Vec<Value> = devs
@@ -517,8 +540,19 @@ pub fn devices(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
     ctx.write_raw(&table)?;
     let active = devs.iter().filter(|d| !d.removed).count();
     ctx.say(&format!("{} in use.", count(active, "device")))?;
-    if active == 1 {
-        ctx.say("Add another computer with `hirz join` there (see docs/sync.md).")?;
+    let waiting = vault.pairing_requests().map(|r| r.len()).unwrap_or(0);
+    if waiting > 0 {
+        ctx.say(&format!(
+            "{} waiting for approval: run `{} devices approve`.",
+            count(waiting, "device"),
+            ctx.program
+        ))?;
+    } else if active == 1 {
+        ctx.say(&format!(
+            "Add another computer: run `hirz join --vault DIR --request` there, then\n\
+             `{} devices approve` here (see docs/sync.md).",
+            ctx.program
+        ))?;
     }
     Ok(Exit::Ok)
 }

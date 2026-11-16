@@ -32,6 +32,8 @@ pub enum Command {
     },
     Join {
         name: Option<String>,
+        /// Ask an existing device for approval instead of typing the recovery phrase.
+        request: bool,
     },
     Status {
         json: bool,
@@ -46,6 +48,13 @@ pub enum Command {
     },
     Devices {
         json: bool,
+    },
+    DevicesApprove {
+        /// Leading hex digits of the request id.
+        request: Option<String>,
+    },
+    DevicesDeny {
+        request: String,
     },
     RemoveDevice {
         prefix: String,
@@ -88,7 +97,14 @@ struct Raw {
 
 /// Options that take a value, so `--opt value` and `--opt=value` both work.
 const VALUE_OPTS: &[&str] = &["--vault", "--name", "--site", "--cxf", "--nmh-path"];
-const BOOL_OPTS: &[&str] = &["--json", "--yes", "--yes-i-saved-it", "--plain", "--force"];
+const BOOL_OPTS: &[&str] = &[
+    "--json",
+    "--yes",
+    "--yes-i-saved-it",
+    "--plain",
+    "--force",
+    "--request",
+];
 
 fn split_raw(args: &[OsString]) -> CliResult<Raw> {
     let mut raw = Raw::default();
@@ -253,13 +269,14 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
         "join" => {
             expect_args(rest, 0, "join")?;
             let name = raw.string_value("--name")?;
+            let request = raw.flag("--request");
             raw.finish("join")?;
             if vault.is_none() {
                 return Err(CliError::usage(
                     "`hirz join` needs the synced vault folder: hirz join --vault DIR",
                 ));
             }
-            Command::Join { name }
+            Command::Join { name, request }
         }
         "status" => {
             expect_args(rest, 0, "status")?;
@@ -293,12 +310,51 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
             };
             Command::Delete { target, yes }
         }
-        "devices" => {
-            expect_args(rest, 0, "devices")?;
-            let json = raw.flag("--json");
-            raw.finish("devices")?;
-            Command::Devices { json }
-        }
+        "devices" => match rest {
+            [] => {
+                let json = raw.flag("--json");
+                raw.finish("devices")?;
+                Command::Devices { json }
+            }
+            [action, more @ ..] if action == "approve" => {
+                raw.finish("devices approve")?;
+                match more {
+                    [] => Command::DevicesApprove { request: None },
+                    [id] => Command::DevicesApprove {
+                        request: Some(id.clone()),
+                    },
+                    _ => {
+                        return Err(CliError::usage(
+                            "Too many arguments for `hirz devices approve`.",
+                        ));
+                    }
+                }
+            }
+            [action, more @ ..] if action == "deny" => {
+                raw.finish("devices deny")?;
+                match more {
+                    [id] => Command::DevicesDeny {
+                        request: id.clone(),
+                    },
+                    [] => {
+                        return Err(CliError::usage(
+                            "Say which request to deny: hirz devices deny REQUEST. \
+                             `hirz devices approve` lists them.",
+                        ));
+                    }
+                    _ => {
+                        return Err(CliError::usage(
+                            "Too many arguments for `hirz devices deny`.",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(CliError::usage(
+                    "Use: hirz devices, hirz devices approve [REQUEST] or hirz devices deny REQUEST.",
+                ));
+            }
+        },
         "remove-device" => {
             expect_args(rest, 1, "remove-device")?;
             let yes = raw.flag("--yes");

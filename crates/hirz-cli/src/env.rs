@@ -186,6 +186,41 @@ pub fn create_new_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     r
 }
 
+/// How to write this program in commands printed for the user: `hirz` when it was started
+/// by name or a `hirz` is on `PATH`, otherwise the path it was started with (`argv[0]`),
+/// quoted for a POSIX shell when needed.
+pub fn command_name(
+    argv0: Option<&std::ffi::OsStr>,
+    path_var: Option<&std::ffi::OsStr>,
+    is_executable: &dyn Fn(&Path) -> bool,
+) -> String {
+    const NAME: &str = "hirz";
+    let Some(arg) = argv0.and_then(|a| a.to_str()) else {
+        return NAME.to_string();
+    };
+    if !arg.contains('/') || arg.len() > 4096 || arg.chars().any(char::is_control) {
+        return NAME.to_string();
+    }
+    let on_path = path_var.is_some_and(|p| {
+        std::env::split_paths(p).any(|d| d.is_absolute() && is_executable(&d.join(NAME)))
+    });
+    if on_path {
+        return NAME.to_string();
+    }
+    shell_quote(arg)
+}
+
+fn shell_quote(s: &str) -> String {
+    let plain = s
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/._-+,:@%=".contains(&b));
+    if plain {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 pub fn is_executable_file(p: &Path) -> bool {
     fs::metadata(p)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -200,6 +235,17 @@ pub trait System {
     fn zenity(&self) -> bool;
     /// This computer's name, for the device name.
     fn hostname(&self) -> Option<String>;
+    /// Unix time in seconds.
+    fn now(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+    /// Waits between polls of the vault folder.
+    fn sleep(&self, d: std::time::Duration) {
+        std::thread::sleep(d);
+    }
 }
 
 #[derive(Debug, Default)]

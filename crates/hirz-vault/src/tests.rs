@@ -1061,3 +1061,326 @@ fn concurrent_processes_share_counter() {
     assert_eq!(lamports.len(), n, "no counter value used twice");
     assert!(!sdir.join("lock").exists());
 }
+
+// ---- device pairing ----
+
+use crate::pairing::{PAIRING_DIR, PendingJoin, seal_approval};
+use crate::{PAIRING_LIFETIME_SECS, PairingPoll, PairingRequest};
+
+fn pairing_files(vault: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(vault.join(PAIRING_DIR))
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn joined(p: PairingPoll) -> Vault {
+    match p {
+        PairingPoll::Joined(v) => *v,
+        other => panic!("not joined: {other:?}"),
+    }
+}
+
+#[test]
+fn pairing_joins_and_shares_credentials() {
+    let t = TempDir::new("pair");
+    let vdir = t.path("vault");
+    let (mut a, phrase) = Vault::create(&vdir, &t.path("a"), "laptop").unwrap();
+    a.put(cred(1, "example.com")).unwrap();
+    // A rotation first, so the approval has to carry a chain of two generations.
+    let c = Vault::join_with_recovery(&vdir, &t.path("c"), &phrase, "old").unwrap();
+    a.reload().unwrap();
+    a.remove_device(&c.device_id()).unwrap();
+    assert_eq!(a.report().generation, 2);
+
+    let sb = t.path("b");
+    let pending = PendingJoin::start(&vdir, &sb, "desk").unwrap();
+    assert!(!Vault::is_set_up(&sb));
+    let words: Vec<&str> = pending.words().split(' ').collect();
+    assert_eq!(words.len(), 4);
+    let list = crate::recovery::wordlist_for_tests();
+    assert!(words.iter().all(|w| list.lines().any(|l| l == *w)));
+    assert!(matches!(pending.poll(&sb).unwrap(), PairingPoll::Waiting));
+
+    let reqs = a.pairing_requests().unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0], *pending.request());
+    assert_eq!(reqs[0].name, "desk");
+    assert_eq!(a.pairing_words(&reqs[0]).unwrap(), pending.words());
+    a.approve_pairing(&reqs[0]).unwrap();
+    assert!(a.devices().iter().any(|d| d.name == "desk" && !d.removed));
+    assert!(a.pairing_requests().unwrap().is_empty());
+
+    let mut b = joined(pending.poll(&sb).unwrap());
+    assert!(
+        pairing_files(&vdir).is_empty(),
+        "{:?}",
+        pairing_files(&vdir)
+    );
+    assert_eq!(b.report().generation, 2);
+    assert_eq!(b.get(&[1; 32]).unwrap().rp_id, "example.com");
+    assert!(b.backup_state());
+    b.put(cred(2, "example.org")).unwrap();
+    a.reload().unwrap();
+    assert_eq!(a.get(&[2; 32]).unwrap().rp_id, "example.org");
+
+    // The joined state is complete: it opens on its own and survives a rotation.
+    let b2 = Vault::open(&vdir, &sb).unwrap();
+    assert_eq!(b2.list_all().len(), 2);
+    let d = Vault::join_with_recovery(&vdir, &t.path("d"), &phrase, "spare").unwrap();
+    a.reload().unwrap();
+    a.remove_device(&d.device_id()).unwrap();
+    let mut b3 = Vault::open(&vdir, &sb).unwrap();
+    b3.reload().unwrap();
+    assert_eq!(b3.report().generation, 3);
+    assert!(!b3.report().locked_out);
+    assert_eq!(b3.list_all().len(), 2);
+}
+
+#[test]
+fn pairing_request_is_approved_once_and_can_be_denied() {
+    let t = TempDir::new("pair-once");
+    let vdir = t.path("vault");
+    let (mut a, _) = Vault::create(&vdir, &t.path("a"), "laptop").unwrap();
+    let pending = PendingJoin::start(&vdir, &t.path("b"), "desk").unwrap();
+    let req = a.pairing_requests().unwrap().remove(0);
+    a.approve_pairing(&req).unwrap();
+    assert!(matches!(a.approve_pairing(&req), Err(VaultError::NotFound)));
+    // A copy of the used request that comes back is not offered again and is deleted.
+    let req_file = format!("{}.req", hex(&req.request_id));
+    fs::write(
+        vdir.join(PAIRING_DIR).join(&req_file),
+        req.encode().unwrap(),
+    )
+    .unwrap();
+    assert!(a.pairing_requests().unwrap().is_empty());
+    assert!(!pairing_files(&vdir).contains(&req_file));
+    joined(pending.poll(&t.path("b")).unwrap());
+    assert!(matches!(
+        pending.poll(&t.path("b")),
+        Err(VaultError::AlreadyExists)
+    ));
+
+    let other = PendingJoin::start(&vdir, &t.path("e"), "tablet").unwrap();
+    let r = a.pairing_requests().unwrap();
+    assert_eq!(r.len(), 1);
+    assert!(a.deny_pairing(&r[0].request_id).unwrap());
+    assert!(!a.deny_pairing(&r[0].request_id).unwrap());
+    assert!(a.pairing_requests().unwrap().is_empty());
+    assert!(matches!(
+        a.approve_pairing(&r[0]),
+        Err(VaultError::NotFound)
+    ));
+    assert!(matches!(
+        other.poll(&t.path("e")).unwrap(),
+        PairingPoll::Waiting
+    ));
+    assert!(!Vault::is_set_up(&t.path("e")));
+}
+
+#[test]
+fn pairing_requests_expire_and_junk_is_cleaned() {
+    let t = TempDir::new("pair-exp");
+    let vdir = t.path("vault");
+    let (mut a, _) = Vault::create(&vdir, &t.path("a"), "laptop").unwrap();
+    let now = crate::vault::now();
+    let old = PendingJoin::start_at(&vdir, &t.path("b"), "desk", now - PAIRING_LIFETIME_SECS - 1)
+        .unwrap();
+    let future = PendingJoin::start_at(&vdir, &t.path("f"), "clock", now + 3600).unwrap();
+    let junk = vdir
+        .join(PAIRING_DIR)
+        .join(format!("{}.req", "ab".repeat(16)));
+    fs::write(&junk, b"HIRZ junk").unwrap();
+    let fresh_junk = vdir
+        .join(PAIRING_DIR)
+        .join(format!("{}.ok", "cd".repeat(16)));
+    fs::write(&fresh_junk, b"junk").unwrap();
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(&junk)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+
+    assert!(a.pairing_requests_at(now).unwrap().is_empty());
+    let left = pairing_files(&vdir);
+    // Expired and long-unreadable files are deleted; a request from a device whose clock
+    // runs ahead and a file that may still be syncing stay.
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left.contains(&format!("{}.req", hex(&future.request().request_id))));
+    assert!(fresh_junk.exists());
+    assert!(matches!(
+        a.approve_pairing_at(old.request(), now),
+        Err(VaultError::NotFound)
+    ));
+    assert!(matches!(
+        a.approve_pairing_at(future.request(), now),
+        Err(VaultError::NotFound)
+    ));
+    assert!(matches!(
+        old.poll(&t.path("b")).unwrap(),
+        PairingPoll::Waiting
+    ));
+}
+
+#[test]
+fn tampered_pairing_request_changes_the_words() {
+    let t = TempDir::new("pair-tamper");
+    let vdir = t.path("vault");
+    let (mut a, _) = Vault::create(&vdir, &t.path("a"), "laptop").unwrap();
+    let pending = PendingJoin::start(&vdir, &t.path("b"), "desk").unwrap();
+    let path = vdir
+        .join(PAIRING_DIR)
+        .join(format!("{}.req", hex(&pending.request().request_id)));
+    let seen = a.pairing_requests().unwrap().remove(0);
+    assert_eq!(a.pairing_words(&seen).unwrap(), pending.words());
+
+    // Someone with write access swaps in their own key: the words differ.
+    let (_, attacker_pub) = hirz_crypto::x25519::generate().unwrap();
+    let mut forged = pending.request().clone();
+    forged.public_key = attacker_pub;
+    fs::write(&path, forged.encode().unwrap()).unwrap();
+    let listed = a.pairing_requests().unwrap().remove(0);
+    assert_eq!(listed.public_key, attacker_pub);
+    assert_ne!(a.pairing_words(&listed).unwrap(), pending.words());
+    // Swapping the file after the user compared the words does not redirect the approval.
+    assert!(matches!(
+        a.approve_pairing(&seen),
+        Err(VaultError::Corrupt(_))
+    ));
+
+    let mut renamed = pending.request().clone();
+    renamed.name = "desk2".into();
+    assert_ne!(a.pairing_words(&renamed).unwrap(), pending.words());
+
+    // A request that reuses an existing device id is never offered.
+    let mut takeover = pending.request().clone();
+    takeover.device_id = a.device_id();
+    fs::write(&path, takeover.encode().unwrap()).unwrap();
+    assert!(a.pairing_requests().unwrap().is_empty());
+    assert!(matches!(
+        a.approve_pairing(&takeover),
+        Err(VaultError::NotFound)
+    ));
+}
+
+#[test]
+fn forged_or_replayed_approval_is_rejected() {
+    let t = TempDir::new("pair-forge");
+    let vdir = t.path("vault");
+    let (mut a, _) = Vault::create(&vdir, &t.path("a"), "laptop").unwrap();
+    a.put(cred(1, "example.com")).unwrap();
+    let sb = t.path("b");
+    let pending = PendingJoin::start(&vdir, &sb, "desk").unwrap();
+    let req = pending.request().clone();
+    let genesis = GenId {
+        number: 1,
+        rotator: a.device_id(),
+    };
+    let ok_path = vdir
+        .join(PAIRING_DIR)
+        .join(format!("{}.ok", hex(&req.request_id)));
+    let entry = |gen_id, key: [u8; 32]| crate::format::KeyringEntry {
+        gen_id,
+        key: Zeroizing::new(key),
+        root: true,
+    };
+
+    // Sealed to the right key, but without the vault key.
+    fs::write(
+        &ok_path,
+        seal_approval(&a.vault_id(), &req, &[entry(genesis, [0x42; 32])]).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        pending.poll(&sb).unwrap(),
+        PairingPoll::Invalid(_)
+    ));
+    assert!(!Vault::is_set_up(&sb));
+
+    // A whole fake vault start planted next to the real one.
+    let fake = GenId {
+        number: 1,
+        rotator: [0x77; 16],
+    };
+    fs::write(
+        &ok_path,
+        seal_approval(&a.vault_id(), &req, &[entry(fake, [0x42; 32])]).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        pending.poll(&sb).unwrap(),
+        PairingPoll::Invalid(_)
+    ));
+
+    // A genuine approval of another request, copied to this one's name.
+    let other = PendingJoin::start(&vdir, &t.path("e"), "tablet").unwrap();
+    let other_req = a
+        .pairing_requests()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.request_id == other.request().request_id)
+        .unwrap();
+    a.approve_pairing(&other_req).unwrap();
+    let other_ok = vdir
+        .join(PAIRING_DIR)
+        .join(format!("{}.ok", hex(&other_req.request_id)));
+    fs::copy(&other_ok, &ok_path).unwrap();
+    assert!(matches!(
+        pending.poll(&sb).unwrap(),
+        PairingPoll::Invalid(_)
+    ));
+    assert!(!Vault::is_set_up(&sb));
+
+    // The genuine approval still works after the forgeries.
+    a.approve_pairing(&req).unwrap();
+    let b = joined(pending.poll(&sb).unwrap());
+    assert_eq!(b.list_all().len(), 1);
+    joined(other.poll(&t.path("e")).unwrap());
+}
+
+#[test]
+fn pairing_request_encoding() {
+    let req = PairingRequest {
+        request_id: [1; 16],
+        device_id: [2; 16],
+        name: "desk".into(),
+        public_key: [3; 32],
+        created_at: 1000,
+        expires_at: 1000 + PAIRING_LIFETIME_SECS,
+    };
+    let enc = req.encode().unwrap();
+    assert_eq!(PairingRequest::decode(&enc).unwrap(), req);
+    for bad in [
+        PairingRequest {
+            expires_at: 1000 + PAIRING_LIFETIME_SECS + 1,
+            ..req.clone()
+        },
+        PairingRequest {
+            expires_at: 999,
+            ..req.clone()
+        },
+    ] {
+        let mut w = crate::codec::Writer::new(1);
+        w.field(0x01, &bad.request_id).unwrap();
+        w.field(0x02, &bad.device_id).unwrap();
+        w.field(0x03, bad.name.as_bytes()).unwrap();
+        w.field(0x04, &bad.public_key).unwrap();
+        w.u64_field(0x05, bad.created_at).unwrap();
+        w.u64_field(0x06, bad.expires_at).unwrap();
+        let mut data = format::prefix(format::FileType::PairingRequest).to_vec();
+        data.extend_from_slice(&w.finish());
+        assert!(PairingRequest::decode(&data).is_err());
+    }
+    for n in 0..enc.len() {
+        assert!(PairingRequest::decode(&enc[..n]).is_err());
+    }
+    let mut extra = enc.clone();
+    extra.extend_from_slice(&[0x07, 0, 0]);
+    assert!(PairingRequest::decode(&extra).is_err());
+}

@@ -414,14 +414,14 @@ pub(crate) fn append_tag(body: &mut Zeroizing<Vec<u8>>, tag: &[u8; 32]) {
     body.extend_from_slice(tag);
 }
 
-fn expect_field<'a>(f: &mut Fields<'a>, tag: u8) -> Result<&'a [u8], VaultError> {
+pub(crate) fn expect_field<'a>(f: &mut Fields<'a>, tag: u8) -> Result<&'a [u8], VaultError> {
     match f.next_field()? {
         Some((t, v)) if t == tag => Ok(v),
         _ => Err(VaultError::Corrupt("unexpected field")),
     }
 }
 
-fn expect_end(f: &mut Fields<'_>) -> Result<(), VaultError> {
+pub(crate) fn expect_end(f: &mut Fields<'_>) -> Result<(), VaultError> {
     match f.next_field()? {
         None => Ok(()),
         Some(_) => Err(VaultError::Corrupt("unexpected field")),

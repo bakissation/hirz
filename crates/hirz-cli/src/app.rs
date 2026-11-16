@@ -17,6 +17,10 @@ pub struct Ctx<'a> {
     /// Argon2id cost for new export envelopes and PINs (the RFC 9106 default outside tests).
     pub kdf: Argon2Params,
     pub vault_flag: Option<PathBuf>,
+    /// How to write this program in commands for this computer (see `env::command_name`).
+    pub program: String,
+    /// Standard output is a terminal, so the screen may be cleared.
+    pub out_is_terminal: bool,
 }
 
 impl core::fmt::Debug for Ctx<'_> {
@@ -68,7 +72,7 @@ impl Ctx<'_> {
 pub fn not_set_up() -> CliError {
     CliError::not_set_up(
         "hirz is not set up on this computer. Run `hirz init` to start a new vault, or \
-         `hirz join --vault DIR` to use a vault you already have on another device.",
+         `hirz join --vault DIR --request` to use a vault you already have on another device.",
     )
 }
 
@@ -85,11 +89,13 @@ pub fn run(inv: Invocation, ctx: &mut Ctx<'_>) -> CliResult<Exit> {
             Ok(Exit::Ok)
         }
         Command::Init { name, saved } => crate::cmd_vault::init(ctx, name, saved),
-        Command::Join { name } => crate::cmd_vault::join(ctx, name),
+        Command::Join { name, request } => crate::cmd_vault::join(ctx, name, request),
         Command::Status { json } => crate::cmd_status::status(ctx, json),
         Command::List { site, json } => crate::cmd_vault::list(ctx, site, json),
         Command::Delete { target, yes } => crate::cmd_vault::delete(ctx, target, yes),
         Command::Devices { json } => crate::cmd_vault::devices(ctx, json),
+        Command::DevicesApprove { request } => crate::cmd_pair::approve(ctx, request),
+        Command::DevicesDeny { request } => crate::cmd_pair::deny(ctx, &request),
         Command::RemoveDevice { prefix, yes } => crate::cmd_vault::remove_device(ctx, &prefix, yes),
         Command::BackupConfirm { yes } => crate::cmd_vault::backup_confirm(ctx, yes),
         Command::Pin(action) => crate::cmd_pin::pin(ctx, action),
@@ -109,6 +115,7 @@ Usage: hirz [--vault DIR] COMMAND [OPTIONS]
 Getting started:
   init                 Create a new vault on this computer
   join --vault DIR     Use an existing (synced) vault on this computer
+                       (--request: get approval from another device)
   setup firefox        Connect hirz to Firefox
 
 Everyday:
@@ -119,6 +126,8 @@ Everyday:
 
 Devices and backups:
   devices              List the devices that use this vault
+  devices approve      Let a new device join (compare four words first)
+  devices deny ID      Refuse a device that asked to join
   remove-device ID     Stop a lost or old device from reading new passkeys
   backup confirm       Tell hirz that your passkeys are backed up
   export --cxf FILE    Save all passkeys to a file (encrypted by default)
@@ -149,12 +158,19 @@ your passkeys back if you lose every device, and you need it to add a computer.
 ";
 
 const HELP_JOIN: &str = "\
-Usage: hirz join --vault DIR [--name NAME]
+Usage: hirz join --vault DIR --request [--name NAME]
+       hirz join --vault DIR [--name NAME]
 
 Sets up this computer to use a vault that already exists, for example one that your
-sync tool copied here. You type the 24-word recovery phrase of the vault.
+sync tool copied here.
+
+With --request, this computer shows four words and waits (up to 15 minutes) until you
+approve it on a device that already uses the vault: run `hirz devices approve` there
+and check that it shows the same four words. Without --request, you type the 24-word
+recovery phrase of the vault instead.
 
   --vault DIR    The synced vault folder (required)
+  --request      Ask another device for approval instead of typing the phrase
   --name NAME    Name of this computer (default: the computer's host name)
 ";
 
@@ -191,8 +207,15 @@ account settings; remove it there too.
 
 const HELP_DEVICES: &str = "\
 Usage: hirz devices [--json]
+       hirz devices approve [REQUEST]
+       hirz devices deny REQUEST
 
 Lists the devices (computers) that use this vault.
+
+  approve    Shows the devices waiting to join (after `hirz join --request` on them)
+             and four words for the one you pick. Approve only if the new device shows
+             exactly the same words. REQUEST (the start of its id) picks one directly.
+  deny       Deletes the request of a device waiting to join.
 ";
 
 const HELP_REMOVE: &str = "\

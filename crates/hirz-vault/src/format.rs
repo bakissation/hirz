@@ -32,6 +32,8 @@ pub(crate) enum FileType {
     DeviceSlot = 4,
     RecoverySlot = 5,
     Backup = 6,
+    PairingRequest = 7,
+    PairingApproval = 8,
     LocalDevice = 0x10,
     LocalKeyring = 0x11,
     LocalCounter = 0x12,

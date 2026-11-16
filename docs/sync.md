@@ -42,9 +42,10 @@ Replace the example paths with yours.
 hirz init --vault ~/Sync/hirz
 ```
 
-hirz shows your 24-word **recovery phrase** once. Write it on paper. You need it to add a
-computer, and it is the only way back if you lose every computer. hirz then asks you to
-type three of the words to check.
+hirz shows your 24-word **recovery phrase** once. Write it on paper; do not copy, paste or
+screenshot it. It is the only way back if you lose every computer, and it adds a computer
+when no other one is at hand. hirz then asks you to type three of the words to check, and
+clears the phrase from the terminal.
 
 Already created the vault in the default place? Move it before adding passkeys: run
 `hirz status` to see the folders, then start over (delete the vault folder and
@@ -121,20 +122,52 @@ synced too. Do not keep anything else in this folder.
 1. Install hirz on the second computer.
 2. Set up your sync program there and wait until the vault folder has been copied
    completely.
-3. Run:
+3. On the **new** computer, run:
 
    ```
-   hirz join --vault ~/Sync/hirz
+   hirz join --vault ~/Sync/hirz --request
    ```
 
-4. Type the 24-word recovery phrase. The first four letters of each word are enough.
+   It shows four words, for example `MAPLE   ORBIT   QUARTZ   EMBER`, and waits.
+4. On a computer that **already uses** the vault, once your sync program has copied the
+   request there, run:
 
-The new computer gets its own key; the recovery phrase is not stored. Your passkeys now
-count as backed up, so sites can see that you will not lose them with one computer. Check
-both computers with `hirz devices` and `hirz status`.
+   ```
+   hirz devices approve
+   ```
 
-If `join` says the phrase does not open the vault even though the words are right, the
-folder is probably not completely copied yet: wait and try again.
+   It shows the new computer's name and four words. Compare them with the words on the new
+   computer. Type `yes` only if all four are exactly the same and you started the join
+   yourself. If anything differs, answer no: someone who can change files in your synced
+   folder may be trying to get your passkeys. hirz then deletes the request.
+5. The new computer finishes as soon as the sync program has copied the approval back to
+   it, and lists the other devices of the vault so you can check that it is yours.
+
+The request is valid for 15 minutes. To refuse a request without looking at its words, run
+`hirz devices deny ID` with the start of the id that `hirz devices approve` shows. Several
+waiting requests when you started only one are a warning sign: deny the ones you do not
+know.
+
+Why four words are enough: an attacker would have to find another request with the same
+words within those 15 minutes, and each attempt is deliberately slow to compute; see
+[vault-format.md](vault-format.md), section 11.6. The approval itself is encrypted for the
+new computer's own key, so a copy of the folder does not reveal it; it only shows the
+names of computers that asked to join. The words protect you only if you compare them:
+hirz never approves on its own.
+
+**No other computer at hand?** Use the recovery phrase instead:
+
+```
+hirz join --vault ~/Sync/hirz
+```
+
+and type the 24 words (the first four letters of each word are enough). If `join` says the
+phrase does not open the vault even though the words are right, the folder is probably not
+completely copied yet: wait and try again.
+
+Either way, the new computer gets its own key; the recovery phrase is not stored. Your
+passkeys now count as backed up, so sites can see that you will not lose them with one
+computer. Check both computers with `hirz devices` and `hirz status`.
 
 New passkeys created on one computer appear on the others as soon as the sync program has
 copied the new files. `hirz status` lists files that could not be read. A few files listed

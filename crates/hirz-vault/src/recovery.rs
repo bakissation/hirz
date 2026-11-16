@@ -12,7 +12,7 @@ const INFO_X25519: &[u8] = b"hirz recovery x25519 v1";
 const INFO_AUTH: &[u8] = b"hirz recovery auth v1";
 const INFO_BACKUP: &[u8] = b"hirz recovery backup v1";
 
-fn word_at(index: u16) -> Option<&'static str> {
+pub(crate) fn word_at(index: u16) -> Option<&'static str> {
     WORDLIST.lines().nth(usize::from(index))
 }
 

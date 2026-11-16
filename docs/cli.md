@@ -15,6 +15,10 @@ account name that starts with `-` can still be given. `hirz help COMMAND` or
 Messages are short and plain. Questions are written to standard error, so standard output
 stays clean when it is redirected. `status`, `list` and `devices` accept `--json`.
 
+Commands that hirz suggests for this computer start with `hirz`. When hirz was started by
+a path (for example `./target/release/hirz`) and no `hirz` is on `PATH`, they start with
+that path instead, quoted for the shell when needed.
+
 ## Where hirz keeps things
 
 | What | Default | Synced |
@@ -59,17 +63,31 @@ Creates a new vault and sets up this computer to use it.
   make it a new folder inside your sync folder, for example `~/Sync/hirz`.
 - `--name NAME`: this computer's name as other devices see it (1 to 64 characters,
   default: the host name).
-- Shows the 24-word recovery phrase once, with instructions to write it down, then asks you
-  to retype three words chosen at random. After three failed rounds the command stops with
+- Shows the 24-word recovery phrase once, with instructions to write it down and not to
+  copy, paste or screenshot it, then asks you to retype three words chosen at random. When
+  standard output is a terminal and the check succeeds, hirz clears the screen and the
+  scrollback so the phrase does not stay visible. After three failed rounds the command stops with
   exit status 4; the vault exists but the phrase was not confirmed.
 - `--yes-i-saved-it` skips the check (for scripts that store the phrase themselves).
 - Refuses when this computer is already set up, when DIR already holds a vault (use
   `join`), or when DIR is not empty.
 
+### `hirz join --vault DIR --request [--name NAME]`
+
+Sets up this computer to use an existing vault that your sync tool copied to DIR, approved
+from a device that already uses it ([vault-format.md](vault-format.md), section 11). hirz
+writes a request into the vault folder, shows four verification words and waits, polling
+the folder every two seconds. On the other device, run `hirz devices approve` and check
+the words. The request expires after 15 minutes; hirz keeps waiting two more minutes for
+an approval that is still being copied, then deletes the request and exits with status 1.
+Nothing is written to this computer's state until a valid approval arrives. An approval
+file that does not open this vault is reported once and ignored. After joining, hirz lists
+the other devices of the vault so you can check that it is yours. Pressing Ctrl-C stops
+waiting; the request then expires on its own.
+
 ### `hirz join --vault DIR [--name NAME]`
 
-Sets up this computer to use an existing vault that your sync tool copied to DIR. You type
-the recovery phrase (case does not matter; the first four letters of each word are enough).
+The same without another device: you type the recovery phrase (case does not matter; the first four letters of each word are enough).
 A phrase with a wrong word count, an unknown word or a bad checksum is explained and asked
 again, up to three times. A valid phrase of another vault exits with status 5 and changes
 nothing.
@@ -144,6 +162,27 @@ lists the passkey in your account; hirz reminds you to remove it there.
 
 Lists the devices of the vault: name, id prefix, date added, status (this computer,
 active, removed).
+
+The text output also says when devices are waiting for approval.
+
+### `hirz devices approve [REQUEST]`
+
+Lists the devices waiting to join (requests made with `join --request` that have not
+expired) and, for the chosen one, shows its name, how long ago it asked and the four
+verification words computed on this device. With one request it is chosen directly; with
+several hirz lists them, warns that unexpected ones may be planted, and asks for a number.
+REQUEST, at least four hex digits of the request id, picks one directly.
+
+You must type `yes` to approve, and only if the new device shows exactly the same words.
+There is no option to skip this question. Any other answer deletes the request (exit
+status 4). On approval hirz gives the new device the vault key, its key slot and a `device
+added` entry. If the request changed or expired while you were checking, nothing is
+approved (exit status 1). Exit status 1 also when no device is waiting.
+
+### `hirz devices deny REQUEST`
+
+Deletes the request whose id starts with REQUEST (at least four hex digits), so that device
+cannot join with it.
 
 ### `hirz remove-device ID-PREFIX [--yes]`
 

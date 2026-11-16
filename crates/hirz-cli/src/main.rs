@@ -4,6 +4,7 @@
 mod app;
 mod args;
 mod cmd_cxf;
+mod cmd_pair;
 mod cmd_pin;
 mod cmd_setup;
 mod cmd_status;
@@ -18,7 +19,7 @@ mod ui;
 #[cfg(test)]
 mod tests;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -42,6 +43,12 @@ fn run_process(args: &[std::ffi::OsString]) -> u8 {
             sys: &sys,
             kdf: hirz_crypto::kdf::DEFAULT,
             vault_flag: None,
+            program: env::command_name(
+                std::env::args_os().next().as_deref(),
+                std::env::var_os("PATH").as_deref(),
+                &env::is_executable_file,
+            ),
+            out_is_terminal: std::io::stdout().is_terminal(),
         };
         let r = app::run(inv, &mut ctx);
         let _ = out.flush();

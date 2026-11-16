@@ -206,7 +206,29 @@ fn os(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }
 
+struct Opts<'a> {
+    sys: &'a dyn System,
+    program: &'a str,
+    terminal: bool,
+    wrong_words: bool,
+}
+
 fn run_with(m: &Machine, args: &[&str], answers: &[&str], wrong_words: bool) -> Run {
+    run_opts(
+        m,
+        args,
+        answers,
+        Opts {
+            sys: &FakeSys,
+            program: "hirz",
+            terminal: false,
+            wrong_words,
+        },
+    )
+}
+
+fn run_opts(m: &Machine, args: &[&str], answers: &[&str], o: Opts<'_>) -> Run {
+    let wrong_words = o.wrong_words;
     let inv = args::parse(&os(args)).unwrap();
     let out = SharedBuf::default();
     let mut writer = out.clone();
@@ -220,9 +242,11 @@ fn run_with(m: &Machine, args: &[&str], answers: &[&str], wrong_words: bool) -> 
         out: &mut writer,
         prompt: &mut script,
         env: &m.env,
-        sys: &FakeSys,
+        sys: o.sys,
         kdf: FAST,
         vault_flag: None,
+        program: o.program.into(),
+        out_is_terminal: o.terminal,
     };
     let result = app::run(inv, &mut ctx);
     Run {
@@ -343,6 +367,39 @@ fn parse_table() {
                 Some("/v"),
                 Command::Join {
                     name: Some("desk".into()),
+                    request: false,
+                },
+            ),
+        ),
+        (
+            &["join", "--vault", "/v", "--request"],
+            inv(
+                Some("/v"),
+                Command::Join {
+                    name: None,
+                    request: true,
+                },
+            ),
+        ),
+        (
+            &["devices", "approve"],
+            inv(None, Command::DevicesApprove { request: None }),
+        ),
+        (
+            &["devices", "approve", "abcd"],
+            inv(
+                None,
+                Command::DevicesApprove {
+                    request: Some("abcd".into()),
+                },
+            ),
+        ),
+        (
+            &["devices", "deny", "abcd"],
+            inv(
+                None,
+                Command::DevicesDeny {
+                    request: "abcd".into(),
                 },
             ),
         ),
@@ -488,6 +545,13 @@ fn parse_table() {
         &["setup", "chrome"],
         &["--vault", "/a", "--vault", "/b", "status"],
         &["list", "--site", "a", "--site", "b"],
+        &["join", "--request"],
+        &["devices", "approve", "a", "b"],
+        &["devices", "approve", "--yes"],
+        &["devices", "approve", "--json"],
+        &["devices", "deny"],
+        &["devices", "frob"],
+        &["init", "--request"],
     ];
     for args in usage {
         let e = args::parse(&os(args)).unwrap_err();
@@ -1224,4 +1288,330 @@ fn commands_need_setup() {
     ] {
         assert_eq!(run(&m, args, &[]).exit(), Exit::NotSetUp, "{args:?}");
     }
+}
+
+// ---- recovery phrase screen and program name ----
+
+#[test]
+fn command_name_uses_argv0_only_when_hirz_is_not_on_path() {
+    use crate::env::command_name;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let none = |_: &Path| false;
+    let in_bin = |p: &Path| p == Path::new("/usr/bin/hirz");
+    let path = Some(OsStr::new("/usr/local/bin:/usr/bin"));
+    let rel_path = Some(OsStr::new("bin:.:"));
+    type Case<'a> = (
+        Option<&'a OsStr>,
+        Option<&'a OsStr>,
+        &'a dyn Fn(&Path) -> bool,
+        &'a str,
+    );
+    let cases: &[Case<'_>] = &[
+        (None, path, &none, "hirz"),
+        (Some(OsStr::new("hirz")), path, &none, "hirz"),
+        (
+            Some(OsStr::new("./target/debug/hirz")),
+            path,
+            &none,
+            "./target/debug/hirz",
+        ),
+        (
+            Some(OsStr::new("/opt/hirz/hirz")),
+            None,
+            &none,
+            "/opt/hirz/hirz",
+        ),
+        (
+            Some(OsStr::new("./target/debug/hirz")),
+            path,
+            &in_bin,
+            "hirz",
+        ),
+        // Relative PATH entries are not used to decide.
+        (
+            Some(OsStr::new("./hirz")),
+            rel_path,
+            &|_: &Path| true,
+            "./hirz",
+        ),
+        (
+            Some(OsStr::new("/home/alice/my tools/hirz")),
+            path,
+            &none,
+            "'/home/alice/my tools/hirz'",
+        ),
+        (
+            Some(OsStr::new("/tmp/it's/hirz")),
+            path,
+            &none,
+            "'/tmp/it'\\''s/hirz'",
+        ),
+        (Some(OsStr::new("/tmp/a\nb/hirz")), path, &none, "hirz"),
+        (
+            Some(OsStr::from_bytes(b"/tmp/\xff/hirz")),
+            path,
+            &none,
+            "hirz",
+        ),
+    ];
+    for (argv0, path_var, exec, expected) in cases {
+        assert_eq!(
+            command_name(*argv0, *path_var, *exec),
+            *expected,
+            "{argv0:?}"
+        );
+    }
+}
+
+#[test]
+fn init_warns_and_clears_the_phrase_on_a_terminal() {
+    let m = Machine::new("clear");
+    let r = run_opts(
+        &m,
+        &["init"],
+        &[],
+        Opts {
+            sys: &FakeSys,
+            program: "./bin/hirz",
+            terminal: true,
+            wrong_words: false,
+        },
+    );
+    let out = r.ok();
+    assert!(out.contains("Do not copy, paste or screenshot this screen."));
+    let clear = "\x1b[2J\x1b[3J\x1b[H";
+    let after = &out[out.find(clear).expect("screen cleared") + clear.len()..];
+    let words = phrase_words(out);
+    assert!(words.iter().all(|w| !after.contains(&format!(" {w} "))));
+    assert!(after.contains("Correct. Keep the paper safe."));
+    assert!(after.contains("./bin/hirz setup firefox"));
+    assert!(after.contains("./bin/hirz devices approve"));
+    assert!(after.contains("hirz join --vault DIR --request"));
+
+    // Not a terminal, or no check: nothing is cleared.
+    let m2 = Machine::new("noclear");
+    let out = run(&m2, &["init"], &[]).ok().to_string();
+    assert!(!out.contains(clear));
+    assert!(out.contains("Do not copy, paste or screenshot"));
+    assert!(out.contains("Connect Firefox: hirz setup firefox"));
+    let m3 = Machine::new("noclear-saved");
+    let r = run_opts(
+        &m3,
+        &["init", "--yes-i-saved-it"],
+        &[],
+        Opts {
+            sys: &FakeSys,
+            program: "hirz",
+            terminal: true,
+            wrong_words: false,
+        },
+    );
+    assert!(!r.ok().contains(clear));
+}
+
+// ---- pairing ----
+
+/// A system whose clock advances on every poll and that runs `on_sleep` while the joining
+/// command waits, standing in for the user at the other device.
+struct PairSys<'a> {
+    clock: std::cell::Cell<u64>,
+    step: u64,
+    sleeps: std::cell::Cell<u32>,
+    on_sleep: RefCell<Box<dyn FnMut(u32) + 'a>>,
+}
+
+impl<'a> PairSys<'a> {
+    fn new(step: u64, f: impl FnMut(u32) + 'a) -> Self {
+        PairSys {
+            clock: std::cell::Cell::new(FakeSys.now()),
+            step,
+            sleeps: std::cell::Cell::new(0),
+            on_sleep: RefCell::new(Box::new(f)),
+        }
+    }
+}
+
+impl System for PairSys<'_> {
+    fn uv_methods(&self, env: &Env) -> Result<Vec<UvMethod>, String> {
+        FakeSys.uv_methods(env)
+    }
+    fn zenity(&self) -> bool {
+        true
+    }
+    fn hostname(&self) -> Option<String> {
+        Some("new-host".into())
+    }
+    fn now(&self) -> u64 {
+        self.clock.get()
+    }
+    fn sleep(&self, _d: std::time::Duration) {
+        let n = self.sleeps.get() + 1;
+        self.sleeps.set(n);
+        self.clock.set(self.clock.get() + self.step);
+        (self.on_sleep.borrow_mut())(n);
+    }
+}
+
+fn join_request(m: &Machine, vault: &str, sys: &dyn System) -> Run {
+    run_opts(
+        m,
+        &["join", "--vault", vault, "--request", "--name", "desk"],
+        &[],
+        Opts {
+            sys,
+            program: "hirz",
+            terminal: false,
+            wrong_words: false,
+        },
+    )
+}
+
+/// The line with the four upper-case verification words.
+fn words_line(out: &str) -> String {
+    out.lines()
+        .find(|l| {
+            let t: Vec<&str> = l.split_whitespace().collect();
+            l.starts_with("        ")
+                && t.len() == 4
+                && t.iter().all(|w| w.chars().all(|c| c.is_ascii_uppercase()))
+        })
+        .unwrap_or_else(|| panic!("no words in:\n{out}"))
+        .to_string()
+}
+
+fn pairing_dir_files(vault: &Path) -> Vec<String> {
+    fs::read_dir(vault.join("pairing"))
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn pairing_adds_a_device_without_the_phrase() {
+    let a = Machine::new("pair-a");
+    init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    put(&a, &vault, vec![record("example.com", "alice", false, 1)]);
+    let r = run(&a, &["devices", "approve"], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("No device is waiting"));
+
+    let b = Machine::new("pair-b");
+    let approved = RefCell::new(String::new());
+    let sys = PairSys::new(2, |n| match n {
+        1 => {
+            // A forged approval appears first: the new device warns and keeps waiting.
+            let dir = vault.join("pairing");
+            let req = pairing_dir_files(&vault)
+                .into_iter()
+                .find(|f| f.ends_with(".req"))
+                .unwrap();
+            fs::write(dir.join(req.replace(".req", ".ok")), b"HIRZ\x08\x01forged").unwrap();
+            let listed = run(&a, &["devices"], &[]);
+            assert!(listed.ok().contains("1 device waiting for approval"));
+        }
+        2 => {
+            let r = run(&a, &["devices", "approve"], &["yes"]);
+            *approved.borrow_mut() = r.ok().to_string();
+        }
+        _ => {}
+    });
+    let r = join_request(&b, &vs, &sys);
+    let out = r.ok();
+    let a_out = approved.borrow().clone();
+    assert!(out.contains("hirz devices approve"));
+    assert!(out.contains("Warning: an approval appeared"));
+    assert_eq!(words_line(out), words_line(&a_out));
+    assert!(a_out.contains("\"desk\""));
+    assert!(a_out.contains("Approved \"desk\""));
+    assert!(out.contains("Approved. This computer (\"desk\")"));
+    assert!(out.contains("1 passkey here"));
+    assert!(out.contains("\"test-host\""));
+    assert!(pairing_dir_files(&vault).is_empty());
+
+    assert_eq!(records(&b, &vault).len(), 1);
+    put(&b, &vault, vec![record("example.org", "bob", true, 2)]);
+    assert_eq!(records(&a, &vault).len(), 2);
+    let devs = run(&a, &["devices", "--json"], &[]);
+    let v: Value = serde_json::from_str(devs.ok()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    let st = run(&b, &["status", "--json"], &[]);
+    let v: Value = serde_json::from_str(st.ok()).unwrap();
+    assert_eq!(v["vault"]["backed_up"], true);
+    assert_eq!(v["vault"]["passkeys"], 2);
+
+    let again = join_request(&b, &vs, &FakeSys);
+    assert_eq!(again.exit(), Exit::Failed);
+    assert!(again.message().contains("already set up"));
+}
+
+#[test]
+fn pairing_mismatch_deny_and_expiry_change_nothing() {
+    let a = Machine::new("pair-no-a");
+    init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+
+    // The user says the words differ: nothing is approved and the request is removed.
+    let b = Machine::new("pair-no-b");
+    let refused = RefCell::new(None);
+    let sys = PairSys::new(60, |n| {
+        if n == 1 {
+            let r = run(&a, &["devices", "approve"], &["no"]);
+            assert!(r.out.contains("Compare the words"));
+            *refused.borrow_mut() = Some(r.exit());
+            assert!(pairing_dir_files(&vault).is_empty());
+        }
+    });
+    let r = join_request(&b, &vs, &sys);
+    assert_eq!(*refused.borrow(), Some(Exit::Cancelled));
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("No approval arrived in time"));
+    assert!(!b.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    assert_eq!(
+        run(&a, &["devices", "--json"], &[])
+            .ok()
+            .matches("\"id\"")
+            .count(),
+        1
+    );
+
+    // Denied by id; then the request runs out.
+    let c = Machine::new("pair-no-c");
+    let sys = PairSys::new(60, |n| {
+        if n == 1 {
+            let req = pairing_dir_files(&vault)
+                .into_iter()
+                .find(|f| f.ends_with(".req"))
+                .unwrap();
+            assert_eq!(run(&a, &["devices", "deny", "zz"], &[]).exit(), Exit::Usage);
+            assert_eq!(
+                run(&a, &["devices", "deny", "0000ffff"], &[]).exit(),
+                Exit::Failed
+            );
+            let r = run(&a, &["devices", "deny", &req[..8]], &[]);
+            assert!(r.ok().contains("Removed the request from \"desk\""));
+        }
+    });
+    let r = join_request(&c, &vs, &sys);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(!c.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    assert!(pairing_dir_files(&vault).is_empty());
+
+    // A request nobody answers expires and is withdrawn.
+    let d = Machine::new("pair-no-d");
+    let sys = PairSys::new(60, |_| {});
+    let r = join_request(&d, &vs, &sys);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.out.contains("expires in 15 minutes"));
+    assert!(pairing_dir_files(&vault).is_empty());
+    assert!(sys.sleeps.get() >= 15);
+
+    let missing = d.tmp.path("nothing-here");
+    let r = join_request(&d, missing.to_str().unwrap(), &FakeSys);
+    assert_eq!(r.exit(), Exit::NotSetUp);
 }

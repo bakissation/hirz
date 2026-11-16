@@ -9,6 +9,7 @@ use crate::format::{
     STATE_COUNTER, STATE_DEVICE, STATE_KEYRING, VaultKey,
 };
 use crate::fsutil::{self, MAX_FILE_LEN, StateLock};
+use crate::pairing::{self, PairingRequest};
 use crate::record::{
     CredentialRecord, DeviceAnnouncement, Event, EventKind, MAX_DEVICE_NAME_LEN, append_tag,
 };
@@ -27,7 +28,7 @@ pub(crate) fn now() -> u64 {
         .unwrap_or(0)
 }
 
-fn random16() -> Result<[u8; 16], VaultError> {
+pub(crate) fn random16() -> Result<[u8; 16], VaultError> {
     let mut out = [0u8; 16];
     hirz_crypto::random_fill(&mut out)?;
     Ok(out)
@@ -667,7 +668,7 @@ fn snapshot(
     })
 }
 
-fn read_header(vault_dir: &Path) -> Result<Header, VaultError> {
+pub(crate) fn read_header(vault_dir: &Path) -> Result<Header, VaultError> {
     match read_optional(&vault_dir.join(HEADER_NAME))? {
         Some(d) => Header::decode(&d),
         None => Err(VaultError::NotFound),
@@ -1482,6 +1483,109 @@ impl Vault {
         self.rotate(&[*device_id])
     }
 
+    // ---- device pairing (pairing.rs) ----
+
+    /// Pairing requests that can still be approved, oldest first. Also deletes expired,
+    /// already used and long unreadable pairing files.
+    pub fn pairing_requests(&mut self) -> Result<Vec<PairingRequest>, VaultError> {
+        self.pairing_requests_at(now())
+    }
+
+    pub(crate) fn pairing_requests_at(
+        &mut self,
+        at: u64,
+    ) -> Result<Vec<PairingRequest>, VaultError> {
+        self.scan()?;
+        let mut known: BTreeSet<DeviceId> = self.view.devices.keys().copied().collect();
+        known.extend(self.view.removed());
+        known.insert(self.device.device_id);
+        pairing::list_requests(&self.vault_dir, at, &known)
+    }
+
+    /// The four words the new device shows for `req`, computed from this device's own view of
+    /// the vault (vault id and genesis), never from claims in the request.
+    pub fn pairing_words(&self, req: &PairingRequest) -> Result<String, VaultError> {
+        let genesis = self.genesis()?;
+        let fingerprint = pairing::genesis_fingerprint(&self.vault_dir, &genesis)?;
+        pairing::words_text(&self.header.vault_id, &fingerprint, req)
+    }
+
+    fn genesis(&self) -> Result<GenId, VaultError> {
+        self.keyring
+            .entries
+            .iter()
+            .find(|e| e.root && e.gen_id.number == 1)
+            .map(|e| e.gen_id)
+            .ok_or(VaultError::NoAccess)
+    }
+
+    /// Approves `req` exactly as shown to the user: seals every key generation from the
+    /// genesis to the current one to its public key, writes its key slot and a `device added`
+    /// event, then deletes the request. The caller must have had the user compare the words.
+    pub fn approve_pairing(&mut self, req: &PairingRequest) -> Result<(), VaultError> {
+        self.approve_pairing_at(req, now())
+    }
+
+    pub(crate) fn approve_pairing_at(
+        &mut self,
+        req: &PairingRequest,
+        at: u64,
+    ) -> Result<(), VaultError> {
+        self.scan()?;
+        self.content_writable()?;
+        pairing::check_unchanged(&self.vault_dir, req, at)?;
+        if req.device_id == self.device.device_id
+            || self.view.devices.contains_key(&req.device_id)
+            || self.view.removed().contains(&req.device_id)
+        {
+            return Err(VaultError::AlreadyExists);
+        }
+        let mut chain = Vec::with_capacity(self.current_chain.len());
+        for id in &self.current_chain {
+            let e = self.keyring.get(id).ok_or(VaultError::NoAccess)?;
+            chain.push(KeyringEntry {
+                gen_id: *id,
+                key: e.key.clone(),
+                root: e.root,
+            });
+        }
+        if chain.first().map(|e| e.gen_id) != Some(self.genesis()?) {
+            return Err(VaultError::NoAccess);
+        }
+        let vault_id = self.header.vault_id;
+        let current = self.current;
+        fsutil::write_atomic(
+            &self.vault_dir.join(KEYS_DIR).join(current.dir_name()),
+            &format::slot_name(&req.device_id),
+            &format::seal_device_slot(
+                &vault_id,
+                &current,
+                &req.device_id,
+                &req.public_key,
+                &self.current_key,
+            )?,
+        )?;
+        pairing::write_approval(
+            &self.vault_dir,
+            req,
+            &pairing::seal_approval(&vault_id, req, &chain)?,
+        )?;
+        let ann = DeviceAnnouncement {
+            device_id: req.device_id,
+            name: req.name.clone(),
+            x25519_public: req.public_key,
+            added_at: at,
+        };
+        self.write(vec![(EventKind::DeviceAdded(ann), Origin::Fresh)])?;
+        pairing::remove_request(&self.vault_dir, &req.request_id)?;
+        Ok(())
+    }
+
+    /// Deletes a pairing request. Returns false when it was already gone.
+    pub fn deny_pairing(&self, request_id: &[u8; 16]) -> Result<bool, VaultError> {
+        pairing::remove_request(&self.vault_dir, request_id)
+    }
+
     // ---- crate internals for backup.rs ----
 
     pub(crate) fn recovery_pub(&self) -> [u8; 32] {
@@ -1489,7 +1593,93 @@ impl Vault {
     }
 }
 
-fn new_device(vault_id: [u8; 16], name: &str) -> Result<LocalDevice, VaultError> {
+/// Outcome of joining with keys received through pairing.
+pub(crate) enum KeyedJoin {
+    Joined(Box<Vault>),
+    /// The keys are genuine but the vault does not list this device yet, or a newer key
+    /// generation has no slot for it yet: the sync tool has not delivered everything.
+    NotReady,
+    Rejected(&'static str),
+}
+
+/// Finishes a pairing join, like `join_with_recovery` once the keys are known. `keyring`
+/// holds the received chain with the genesis as root; every entry must be an authentic key
+/// generation of this folder whose key matches its commitment, so keys made up by someone
+/// without the vault key are rejected.
+pub(crate) fn join_with_keys(
+    vault_dir: &Path,
+    state_dir: &Path,
+    header: Header,
+    device: LocalDevice,
+    keyring: Keyring,
+) -> Result<KeyedJoin, VaultError> {
+    let opener = Opener::Device {
+        dev: &device,
+        keyring: &keyring,
+    };
+    let snap = match snapshot(vault_dir, &header.vault_id, &opener, Some(&device)) {
+        Ok(s) => s,
+        Err(VaultError::NoAccess) => {
+            return Ok(KeyedJoin::Rejected(
+                "the approved keys do not open this vault",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    for e in &keyring.entries {
+        let genuine = snap
+            .resolved
+            .nodes
+            .get(&e.gen_id)
+            .and_then(|n| n.key.as_ref())
+            .is_some_and(|k| hirz_crypto::ct_eq(k.as_slice(), e.key.as_slice()));
+        if !genuine {
+            return Ok(KeyedJoin::Rejected(
+                "the approved keys do not match the vault's key generations",
+            ));
+        }
+    }
+    if snap.report.locked_out || snap.report.rotation_conflict {
+        return Ok(KeyedJoin::NotReady);
+    }
+    let node = snap
+        .resolved
+        .nodes
+        .get(&snap.current)
+        .ok_or(VaultError::NoAccess)?;
+    let public = hirz_crypto::x25519::public_key(&device.x25519_private)?;
+    let announced = snap.loaded.iter().any(|l| {
+        l.gen_id == snap.current
+            && !node.removed_cum.contains(&l.writer)
+            && matches!(&l.event.kind, EventKind::DeviceAdded(d)
+                if d.device_id == device.device_id && d.x25519_public == public)
+    });
+    if !announced {
+        return Ok(KeyedJoin::NotReady);
+    }
+    if Vault::is_set_up(state_dir) {
+        return Err(VaultError::AlreadyExists);
+    }
+    fsutil::state_dir(state_dir)?;
+    let full = Keyring {
+        recovery_pub: keyring.recovery_pub,
+        entries: snap
+            .resolved
+            .keyed()
+            .map(|(n, k)| KeyringEntry {
+                gen_id: n.id,
+                key: k.clone(),
+                root: n.parent.is_none(),
+            })
+            .collect(),
+    };
+    save_device(state_dir, &device)?;
+    save_keyring(state_dir, &full, &device)?;
+    let vault = Vault::assemble(vault_dir, state_dir, header, device, full)?;
+    Ok(KeyedJoin::Joined(Box::new(vault)))
+}
+
+pub(crate) fn new_device(vault_id: [u8; 16], name: &str) -> Result<LocalDevice, VaultError> {
     let (x_private, _) = hirz_crypto::x25519::generate()?;
     Ok(LocalDevice {
         vault_id,

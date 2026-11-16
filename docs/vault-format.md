@@ -35,6 +35,8 @@ Design rules:
 | 0x04 | device key slot |
 | 0x05 | recovery key slot |
 | 0x06 | backup export |
+| 0x07 | pairing request |
+| 0x08 | pairing approval |
 | 0x10 | local device state |
 | 0x11 | local keyring |
 | 0x12 | local counter |
@@ -62,6 +64,8 @@ Design rules:
   keys/<gen-dir>/<hex(device id)>.slot           vault key sealed to a device
   keys/<gen-dir>/recovery.slot                   vault key sealed to the recovery key
   records/<hex(writer device id)>/<lamport>-<hex(random [8])>.rec   events
+  pairing/<hex(request id)>.req                  pairing request (section 11)
+  pairing/<hex(request id)>.ok                   pairing approval (section 11)
 ```
 
 - `<gen-dir>` = `number` as 10 decimal digits, `-`, `hex(rotator)`. Example:
@@ -124,7 +128,8 @@ recovery.slot:  prefix(0x05) || sealed box to the recovery X25519 key,
 ```
 
 A rotator writes the slots of all active devices and the recovery slot. A device that joins
-writes its own slot into the current generation.
+writes its own slot into the current generation; for a device added by pairing, the
+approving device writes it (section 11).
 
 ### 4.3 Resolving the current generation
 
@@ -401,6 +406,11 @@ device's keyring or in the recovery key. Deletion and rollback cannot be prevent
 reports `rollback_suspected` when the highest counter in the folder drops below one it saw
 before.
 
+**Pairing** (section 11) adds plaintext files that reveal the names and public keys of
+devices asking to join, and lets anyone who can write to the folder ask to join. Such a
+request is only approved when the user confirms on a trusted device that its four words
+match those on the new device; section 11.6 explains why that is enough.
+
 **A device that holds the current key** is fully trusted by the format: it can read and write
 everything. Removing it is section 9.
 
@@ -411,3 +421,148 @@ Accepted limits: metadata in section 10 is visible; record sizes are not padded;
 that delivers a rotation's files to one device long before another leaves the second on the
 old generation until it receives them (its writes are carried forward afterwards); a device
 that joins while a rotation is in flight may need to join again.
+
+## 11. Device pairing
+
+A new device can join without the recovery key: it asks through the folder, and a device
+that already holds the vault key approves it after the user has compared four words shown on
+both screens. The folder is the only channel; there is no relay, no server and no password
+exchange (PAKE). The recovery key (section 8) stays the fallback.
+
+### 11.1 Request: `pairing/<hex(request id)>.req`
+
+Written by the new device. Plaintext, because it holds only public data:
+
+```
+prefix(0x07) || TLV v1 { 0x01 request_id [16], 0x02 device_id [16], 0x03 name (UTF-8, 1 to 256 bytes),
+                         0x04 X25519 public key [32], 0x05 created_at u64, 0x06 expires_at u64 }
+```
+
+The device id and X25519 key pair are created for this request and kept in memory only.
+`expires_at - created_at` is between 1 second and 15 minutes (writers use 15 minutes); other
+values make the request malformed. The request id must equal the file name. A request is
+**usable** while `now <= expires_at` and `created_at <= now + 5 minutes` (device clocks
+differ). A new device refuses to start pairing when the folder holds no genesis generation
+(not synced yet) or more than one generation directory with number 1 and a `gen.info`.
+
+### 11.2 Verification words
+
+```
+F     = SHA-256(bytes of keys/<genesis>/gen.info)
+input = aad("hirz pairing words v1", [0x01, vault_id, F, request_id, device_id, name,
+                                      public key, created_at u64, expires_at u64])
+h     = Argon2id(password = input, salt = request_id, m = 64 MiB, t = 3, p = 4, 32 bytes)
+words = the first 44 bits of h as four 11-bit indices into the BIP-39 English list
+```
+
+The new device computes the words from the vault id and genesis it found in the folder. The
+approving device computes them from the request it read and **its own** vault id and
+genesis (the root entry of its keyring), never from claims in the request. Every field of the
+request and the identity of the vault are therefore bound into the words: changing the public
+key, the name, the device id or the times, or showing the new device a different vault,
+changes them. The genesis `gen.info` is written once and never collected (6.5), so `F`
+identifies the vault even if a header with the same vault id is copied.
+
+### 11.3 Approval
+
+The user runs the approve command on a device that holds the current key and confirms that
+the words match. That device then:
+
+1. checks that the request file still holds exactly the request the user saw and is still
+   usable (otherwise nothing is written: the file changed or expired in the meantime), that
+   its device id is not a device the vault already knows (active or removed), and that the
+   vault allows content writes (no rotation conflict, not locked out);
+2. writes `keys/<current>/<hex(device id)>.slot`, the current key sealed to the request key
+   (section 4.2);
+3. writes `pairing/<hex(request id)>.ok`:
+
+   ```
+   prefix(0x08) || expires_at u64 || sealed box to the request's X25519 key,
+     aad = aad("hirz pairing approval v1", [0x01, vault_id, request_id, device_id,
+                                            public key, expires_at u64]),
+     plaintext = n x (GenId [20] || K [32])
+   ```
+
+   with every generation from the genesis to the current one, in order (numbers 1, 2, ...,
+   current; at most 10000 entries). `expires_at` must equal the request's;
+4. writes a `device added` event (kind 3) for the new device with its name and public key.
+   It is an ordinary event under the current generation, covered by the author tag, the
+   generation rules and the merge rule (6.2);
+5. deletes the request file.
+
+A request whose device id the vault already knows is never offered again and is deleted,
+so a request can be approved once.
+
+### 11.4 Finishing on the new device
+
+The new device polls the folder for `pairing/<hex(request id)>.ok`. When it appears, the
+device:
+
+1. opens it with its private key (the AAD binds the vault, the request id, the device id,
+   the public key and the expiry, so an approval of another request does not open);
+2. checks that the chain starts at the genesis it saw when it made the request, opens that
+   genesis `gen.info` with the first key and checks the key commitment, and takes the
+   recovery public key from it;
+3. resolves the generations (4.3) with the received keys as its keyring, genesis as root;
+   every received key must belong to an authentic generation and match its commitment;
+4. waits (keeps polling) while it would be locked out, while there is a rotation conflict, or
+   while the current generation does not yet hold a `device added` event for its own device
+   id and public key from a non-removed writer: the sync tool may deliver those files later;
+5. then writes its local state (section 7) with every key it can now open, exactly as a
+   recovery join does, and deletes the request and approval files.
+
+It writes nothing into the folder: its slot and `device added` event come from the approver.
+An approval that fails step 1, 2 or 3 is reported and ignored; polling continues, because a
+file still being copied fails the same way. The new device stops polling two minutes after
+`expires_at` and then deletes its request.
+
+### 11.5 Cleanup
+
+When a device lists requests it deletes requests that expired or name a known device,
+approvals more than one hour past their `expires_at`, and request or approval files that have
+been unreadable for more than 20 minutes (by modification time; a shorter-lived unreadable
+file may still be syncing). Other names in `pairing/` are ignored.
+
+### 11.6 Security
+
+**Someone who can only read the folder** learns the names and public keys of devices asking
+to join and when they asked. The approval is sealed to the new device's key.
+
+**Someone who can write to the folder** can plant requests with their own key, delete or
+replace requests, and write fake approvals.
+
+- A planted request is only approved if the user confirms on a trusted device that its words
+  match the words on the screen of the new device. That comparison is the security of
+  pairing: the approve command shows the words prominently, explains that a mismatch means
+  tampering, asks the user to type `yes`, has no option to skip the question, and deletes the
+  request on any other answer. Several waiting requests are flagged as suspicious.
+- To pass the comparison, a planted request must produce the same four words as the genuine
+  one. The words carry 44 bits. The attacker sees the genuine request only once it is in the
+  folder and must find a matching request before the user approves, within the 15-minute
+  lifetime: a second preimage on 44 bits, about 2^43 tries on average, each costing one
+  Argon2id evaluation with 64 MiB. At a generous 10^4 evaluations per second that takes
+  about 28 years, so the success probability within 15 minutes is about 2^-21. A plain hash
+  would not be enough: 2^43 SHA-256 evaluations take minutes on one graphics card. Requests
+  made in advance do not help either, since every word evaluation costs the same and the
+  creation time must be within the usable window. 44 bits are enough because the
+  comparison is interactive and short-lived; they would not be for a long-term fingerprint.
+- Swapping the request file after the user compared the words does not redirect the key: the
+  approver seals to the request as shown and refuses if the file changed.
+- A fake approval written without the vault key fails at 11.4: the keys do not open the
+  genesis `gen.info` the new device saw, or do not match the commitments of the generations.
+  A removed device that still holds old keys can open old generations but not the current
+  one, so the new device stays waiting and gives up at expiry.
+- A request that reuses the id of an existing device is refused, so pairing cannot replace a
+  device's public key.
+
+**Limits.** The new device has no prior anchor: it trusts the single genesis it finds in the
+folder when it makes the request. A sync service that shows the new device a completely
+different, attacker-made vault can approve its own vault immediately; the new device then
+holds none of the user's passkeys and new passkeys made on it go to that vault. The words do
+not match on the user's trusted device in that case (the genesis is bound into them), and the
+new device lists the other devices of the vault it joined, so the user can notice. The
+recovery key join (section 8) has an anchor and is not affected.
+
+Approving requires no user verification beyond typing `yes` in a terminal session of the
+user: any process that can run hirz as that user can also read the device state file
+(section 7), which already gives it the vault key.
