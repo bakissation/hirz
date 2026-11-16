@@ -26,8 +26,14 @@ pub use backup::{IMPORT_LIMIT, import_backup};
 pub use error::{PhraseError, VaultError};
 pub use format::GenId;
 pub use record::{
-    CREDENTIAL_ID_LEN, CredentialRecord, HmacSecretPair, MAX_DEVICE_NAME_LEN, MAX_PKCS8_LEN,
+    CredentialRecord, HmacSecretPair, MAX_CREDENTIAL_ID_LEN, MAX_DEVICE_NAME_LEN, MAX_PKCS8_LEN,
     MAX_STRING_LEN, MAX_USER_ID_LEN,
 };
 pub use recovery::RecoveryPhrase;
 pub use vault::{DeviceInfo, ScanReport, SkippedFile, Vault};
+
+/// Name of the vault header file inside the vault directory (`docs/vault-format.md`, section 3).
+pub const HEADER_FILE: &str = format::HEADER_NAME;
+/// Name of the device state file inside the local state directory (`docs/vault-format.md`,
+/// section 7).
+pub const DEVICE_STATE_FILE: &str = format::STATE_DEVICE;

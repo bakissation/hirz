@@ -6,13 +6,20 @@ use crate::error::VaultError;
 use core::fmt;
 use hirz_crypto::Zeroizing;
 
-pub const CREDENTIAL_ID_LEN: usize = 32;
+/// WebAuthn limit on credential id length. hirz creates 32-byte ids; imported passkeys keep
+/// the id their original authenticator chose.
+pub const MAX_CREDENTIAL_ID_LEN: usize = 1023;
 pub const MAX_USER_ID_LEN: usize = 64;
 pub const MAX_STRING_LEN: usize = 1024;
 pub const MAX_PKCS8_LEN: usize = 1024;
 pub const MAX_DEVICE_NAME_LEN: usize = 256;
 
-const RECORD_VERSION: u8 = 1;
+/// Version 2 allows credential ids of 1 to 1023 bytes. Version 1 (fixed 32-byte ids) is
+/// still read.
+const RECORD_VERSION: u8 = 2;
+const TOMBSTONE_VERSION: u8 = 2;
+const V1: u8 = 1;
+const V1_CREDENTIAL_ID_LEN: usize = 32;
 const EVENT_VERSION: u8 = 1;
 
 /// The two CTAP hmac-secret values of a credential (CredRandomWithUV / WithoutUV).
@@ -31,7 +38,8 @@ impl fmt::Debug for HmacSecretPair {
 /// One passkey as stored in the vault.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialRecord {
-    pub credential_id: [u8; CREDENTIAL_ID_LEN],
+    /// 1 to 1023 bytes. Lookups compare the full id.
+    pub credential_id: Vec<u8>,
     pub rp_id: String,
     pub rp_name: Option<String>,
     /// WebAuthn user handle, at most 64 bytes.
@@ -76,8 +84,30 @@ fn check_opt_string(s: &Option<String>) -> Result<(), VaultError> {
     }
 }
 
+fn valid_credential_id(id: &[u8]) -> bool {
+    !id.is_empty() && id.len() <= MAX_CREDENTIAL_ID_LEN
+}
+
+/// Reads a credential id field of a version 1 (exactly 32 bytes) or version 2 body.
+fn credential_id_value(v: &[u8], version: u8) -> Result<Vec<u8>, VaultError> {
+    let ok = if version == V1 {
+        v.len() == V1_CREDENTIAL_ID_LEN
+    } else {
+        valid_credential_id(v)
+    };
+    if !ok {
+        return Err(VaultError::Corrupt("credential_id"));
+    }
+    Ok(v.to_vec())
+}
+
 impl CredentialRecord {
     pub fn validate(&self) -> Result<(), VaultError> {
+        if !valid_credential_id(&self.credential_id) {
+            return Err(VaultError::InvalidRecord(
+                "credential_id must be 1 to 1023 bytes",
+            ));
+        }
         if self.rp_id.is_empty() || self.rp_id.len() > MAX_STRING_LEN {
             return Err(VaultError::InvalidRecord("rp_id"));
         }
@@ -135,7 +165,7 @@ impl CredentialRecord {
     }
 
     pub(crate) fn decode(data: &[u8]) -> Result<Self, VaultError> {
-        let mut f = Fields::new(data, RECORD_VERSION)?;
+        let (mut f, version) = Fields::new_versions(data, &[V1, RECORD_VERSION])?;
         let mut credential_id = None;
         let mut rp_id = None;
         let mut rp_name = None;
@@ -151,7 +181,7 @@ impl CredentialRecord {
         let mut backup_eligible = None;
         while let Some((tag, v)) = f.next_field()? {
             match tag {
-                0x01 => credential_id = Some(codec::fixed::<CREDENTIAL_ID_LEN>(v)?),
+                0x01 => credential_id = Some(credential_id_value(v, version)?),
                 0x02 => rp_id = Some(codec::string_value(v, MAX_STRING_LEN)?),
                 0x03 => rp_name = Some(codec::string_value(v, MAX_STRING_LEN)?),
                 0x04 => {
@@ -220,7 +250,7 @@ pub(crate) struct DeviceAnnouncement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EventKind {
     Put(Box<CredentialRecord>),
-    Tombstone([u8; CREDENTIAL_ID_LEN]),
+    Tombstone(Vec<u8>),
     DeviceAdded(DeviceAnnouncement),
     DeviceRemoved { device_id: DeviceId, at: u64 },
     BackupConfirmed { at: u64 },
@@ -263,7 +293,10 @@ impl Event {
         match &self.kind {
             EventKind::Put(rec) => rec.encode(),
             EventKind::Tombstone(id) => {
-                let mut w = Writer::new(1);
+                if !valid_credential_id(id) {
+                    return Err(VaultError::InvalidRecord("credential_id"));
+                }
+                let mut w = Writer::new(TOMBSTONE_VERSION);
                 w.field(0x01, id)?;
                 Ok(w.finish())
             }
@@ -327,9 +360,9 @@ impl Event {
         let kind = match kind.ok_or(missing.clone())? {
             1 => EventKind::Put(Box::new(CredentialRecord::decode(payload)?)),
             2 => {
-                let mut f = Fields::new(payload, 1)?;
+                let (mut f, version) = Fields::new_versions(payload, &[V1, TOMBSTONE_VERSION])?;
                 let id = match f.next_field()? {
-                    Some((0x01, v)) => codec::fixed::<CREDENTIAL_ID_LEN>(v)?,
+                    Some((0x01, v)) => credential_id_value(v, version)?,
                     _ => return Err(VaultError::Corrupt("tombstone")),
                 };
                 expect_end(&mut f)?;

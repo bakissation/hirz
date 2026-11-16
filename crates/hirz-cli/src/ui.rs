@@ -77,10 +77,12 @@ pub fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Normalises a user-typed id prefix: lowercase hex digits, at least 4.
+/// Normalises a user-typed id prefix: lowercase hex digits, at least 4, at most a whole
+/// credential id.
 pub fn hex_prefix(input: &str) -> Option<String> {
     let p: String = input.trim().to_ascii_lowercase();
-    (p.len() >= 4 && p.len() <= 64 && p.bytes().all(|b| b.is_ascii_hexdigit())).then_some(p)
+    let max = hirz_vault::MAX_CREDENTIAL_ID_LEN.saturating_mul(2);
+    (p.len() >= 4 && p.len() <= max && p.bytes().all(|b| b.is_ascii_hexdigit())).then_some(p)
 }
 
 /// `YYYY-MM-DD` (UTC) for a unix time in seconds.
@@ -192,6 +194,8 @@ mod tests {
         assert_eq!(hex_prefix(" ABcd12 ").unwrap(), "abcd12");
         assert!(hex_prefix("abc").is_none());
         assert!(hex_prefix("zzzz").is_none());
+        assert!(hex_prefix(&"ab".repeat(1023)).is_some());
+        assert!(hex_prefix(&"ab".repeat(1024)).is_none());
         assert_eq!(hex(&[0x0f, 0xa0]), "0fa0");
     }
 

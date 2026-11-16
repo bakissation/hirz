@@ -432,3 +432,56 @@ fn closed_port_cancels_the_running_ceremony() {
             .is_empty()
     );
 }
+
+#[test]
+fn imported_credential_with_a_16_byte_id_signs_through_handle() {
+    let dir = TempDir::new();
+    let (vault_dir, state_dir) = (dir.0.join("vault"), dir.0.join("state"));
+    let (mut vault, _) = Vault::create(&vault_dir, &state_dir, "test").unwrap();
+    let id: Vec<u8> = (0x40..0x50).collect();
+    let (pkcs8, x, y) = hirz_crypto::es256::generate().unwrap();
+    vault
+        .put(hirz_vault::CredentialRecord {
+            credential_id: id.clone(),
+            rp_id: "example.com".to_owned(),
+            rp_name: None,
+            user_id: b"alice".to_vec(),
+            user_name: Some("alice".to_owned()),
+            user_display_name: None,
+            algorithm: hirz_core::COSE_ALG_ES256,
+            private_key_pkcs8: pkcs8,
+            created_at: 1,
+            cred_protect: None,
+            hmac_secret: None,
+            discoverable: true,
+            backup_eligible: true,
+        })
+        .unwrap();
+    drop(vault);
+    let key = cose::PublicKey::Es256 { x, y };
+
+    let mut session = Session::new(settings(&vault_dir, &state_dir), plain());
+    assert!(matches!(session.ensure_vault(), VaultStatus::Ready));
+    let cancelled = || false;
+    let mut engine = HostEngine {
+        session: &mut session,
+        uv: true,
+        cancelled: &cancelled,
+    };
+    for (n, allow) in [(1, Some(id.as_slice())), (2, None)] {
+        let challenge = [n; 32];
+        let msg = get_msg(u64::from(n), &challenge, allow);
+        let msg = json::parse(msg.as_bytes(), &Limits::default()).unwrap();
+        let reply = hirz_webauthn::handle(&msg, &mut engine);
+        authentication(&reply, &challenge, &id, &key);
+        let raw = unb64(at(&reply, &["credential", "rawId"]));
+        assert_eq!(raw, id);
+    }
+
+    let mut longer = id.clone();
+    longer.extend_from_slice(&[0; 16]);
+    let msg = get_msg(3, &[3; 32], Some(&longer));
+    let msg = json::parse(msg.as_bytes(), &Limits::default()).unwrap();
+    let reply = hirz_webauthn::handle(&msg, &mut engine);
+    assert_eq!(reply.get("ok"), Some(&Json::Bool(false)), "{reply}");
+}

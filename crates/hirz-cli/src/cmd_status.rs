@@ -4,10 +4,10 @@ use crate::app::Ctx;
 use crate::cmd_setup::{
     ManifestState, flatpak_firefox, manifest_locations, manifest_state, snap_firefox,
 };
-use crate::env::{STATE_DEVICE, VAULT_HEADER};
 use crate::error::{CliError, CliResult, Exit};
 use crate::ui::{clean, count, hex};
 use hirz_uv::PinStore;
+use hirz_vault::Vault;
 use serde_json::{Value, json};
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
@@ -61,8 +61,8 @@ struct Report {
 fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
     let env = ctx.env;
     let vault_dir = ctx.vault_dir()?;
-    let set_up = env.state_dir().join(STATE_DEVICE).exists();
-    let vault_found = vault_dir.join(VAULT_HEADER).exists();
+    let set_up = env.device_state_exists();
+    let vault_found = Vault::exists(&vault_dir);
     let mut vault = None;
     let mut vault_error = None;
     if set_up && vault_found {

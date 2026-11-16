@@ -251,7 +251,7 @@ Every passkey is checked on its own; one bad passkey never stops the others.
 
 | Field | Rule |
 |---|---|
-| `credentialId` | base64url (trailing `=` padding tolerated). This version of hirz stores only 32-byte credential ids, which is what hirz creates; passkeys with other lengths are skipped with that reason |
+| `credentialId` | base64url (trailing `=` padding tolerated). Any length from 1 to 1023 bytes (the WebAuthn limit) is kept unchanged, so the site still recognises the passkey; hirz itself creates 32-byte ids. An empty or longer id skips the passkey |
 | `rpId` | lowercased, must be a valid host name (`xn--` form for international names) |
 | `username`, `userDisplayName` | text up to 1024 bytes; empty means unknown |
 | `userHandle` | base64url, at most 64 bytes |
@@ -260,6 +260,12 @@ Every passkey is checked on its own; one bad passkey never stops the others.
 | `credBlob`, `largeBlob` | not supported: the passkey is imported and the data is reported as not kept |
 | `Item.creationAt` | creation time; missing or in the future means now |
 | unknown fields | ignored, as CXF requires |
+
+Imported passkeys with ids of other lengths work through the Firefox extension. Over the
+virtual security key, hirz reports a maximum credential id length of 32 bytes (the ids it
+creates), and browsers may leave longer ids out of the list of credentials a site allows, so
+a passkey with an id over 32 bytes may only be offered there when the site does not name
+its credentials.
 
 A passkey whose credential id is already in hirz is reported as already present when the key
 is the same, and skipped when it differs. The file may be at most 64 MiB and hold at most

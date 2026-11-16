@@ -147,7 +147,7 @@ impl<'a> Engine<'a> {
         }
 
         let (private_key_pkcs8, public_key_cose) = generate_key(algorithm)?;
-        let mut credential_id = [0u8; CREDENTIAL_ID_LEN];
+        let mut credential_id = vec![0u8; CREDENTIAL_ID_LEN];
         hirz_crypto::random_fill(&mut credential_id).map_err(crypto_error)?;
         let hmac_secret = if req.extensions.hmac_secret {
             Some(new_hmac_pair()?)
@@ -156,7 +156,7 @@ impl<'a> Engine<'a> {
         };
         let cred_protect = req.extensions.cred_protect.map(cred_protect_level);
         let record = CredentialRecord {
-            credential_id,
+            credential_id: credential_id.clone(),
             rp_id: req.rp.id.clone(),
             rp_name: clip(req.rp.name.as_deref()),
             user_id: req.user.id.clone(),
@@ -192,7 +192,7 @@ impl<'a> Engine<'a> {
             sign_count: 0,
             attested_credential: Some(AttestedCredentialData {
                 aaguid: AAGUID,
-                credential_id: credential_id.to_vec(),
+                credential_id: credential_id.clone(),
                 public_key: public_key_cose.clone(),
             }),
             extensions: has_ext.then(|| ext.build()),
@@ -202,7 +202,7 @@ impl<'a> Engine<'a> {
 
         Ok(MakeCredentialResponse {
             auth_data,
-            credential_id: credential_id.to_vec(),
+            credential_id,
             public_key_cose,
             algorithm,
             hmac_secret: req.extensions.hmac_secret,
@@ -228,13 +228,13 @@ impl<'a> Engine<'a> {
         (plain, uv_only)
     }
 
-    fn replace_older(&mut self, rp_id: &str, user_id: &[u8], keep: &[u8; CREDENTIAL_ID_LEN]) {
-        let older: Vec<[u8; CREDENTIAL_ID_LEN]> = self
+    fn replace_older(&mut self, rp_id: &str, user_id: &[u8], keep: &[u8]) {
+        let older: Vec<Vec<u8>> = self
             .vault
             .credentials_for_rp(rp_id)
             .into_iter()
-            .filter(|r| r.discoverable && r.user_id == user_id && r.credential_id != *keep)
-            .map(|r| r.credential_id)
+            .filter(|r| r.discoverable && r.user_id == user_id && r.credential_id != keep)
+            .map(|r| r.credential_id.clone())
             .collect();
         for id in older {
             // Best effort: the new credential is already stored, and a leftover older one
@@ -306,7 +306,7 @@ impl<'a> Engine<'a> {
             display_name: record.user_display_name.clone().filter(|_| uv),
         });
         Ok(AssertionResponse {
-            credential_id: record.credential_id.to_vec(),
+            credential_id: record.credential_id.clone(),
             auth_data,
             signature,
             user_handle: record.user_id.clone(),
@@ -332,7 +332,7 @@ impl<'a> Engine<'a> {
         let (auth_data, signature) =
             sign_assertion(record, req, flags(false, false, vault.backup_state()), None)?;
         Ok(AssertionResponse {
-            credential_id: record.credential_id.to_vec(),
+            credential_id: record.credential_id.clone(),
             auth_data,
             signature,
             user_handle: record.user_id.clone(),
@@ -421,7 +421,7 @@ fn ask<'v>(
     let candidates: Vec<CandidateAccount> = shown
         .iter()
         .map(|r| CandidateAccount {
-            credential_id: r.credential_id.to_vec(),
+            credential_id: r.credential_id.clone(),
             user_name: r.user_name.clone(),
             user_display_name: r.user_display_name.clone(),
         })

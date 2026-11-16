@@ -24,6 +24,7 @@ use hirz_core::{
     CredProtect, GetAssertionRequest, GetExtensions, HmacSecretWrap, MakeCredentialRequest,
     MakeCredentialResponse, MakeExtensions, RpEntity, UserEntity, UvRequirement,
 };
+use hirz_proto::auth_data::MAX_CREDENTIAL_ID_LEN;
 use hirz_proto::cbor::{self, Limits, MapBuilder, Value};
 use hirz_proto::cose::{self, KeyAgreementKey};
 
@@ -158,7 +159,10 @@ fn client_data_hash(v: Option<&Value>) -> Res<[u8; 32]> {
     <[u8; 32]>::try_from(b).map_err(|_| Status::InvalidParameter)
 }
 
-/// PublicKeyCredentialDescriptor lists; descriptors of other types are skipped.
+/// PublicKeyCredentialDescriptor lists; descriptors of other types are skipped. Ids of any
+/// length up to the WebAuthn limit are kept: imported credentials keep the id their original
+/// authenticator chose, which need not be the 32 bytes hirz creates. Longer ids are refused
+/// rather than dropped, so a list never turns into an empty (discoverable) one.
 fn descriptor_ids(v: &Value) -> Res<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     for item in as_array(v)? {
@@ -166,6 +170,9 @@ fn descriptor_ids(v: &Value) -> Res<Vec<Vec<u8>>> {
         let ty = as_text(required(item.get_text("type"))?)?;
         let id = as_bytes(required(item.get_text("id"))?)?;
         if ty == PUBLIC_KEY {
+            if id.len() > MAX_CREDENTIAL_ID_LEN {
+                return Err(Status::InvalidParameter);
+            }
             out.push(id.to_vec());
         }
     }

@@ -40,7 +40,8 @@ Design rules:
 | 0x12 | local counter |
 
 - **AAD encoding**: `aad(label, parts) = UTF-8(label) || 0x00 || for each part: (u32 length || part)`.
-- **TLV body**: `version u8 || field*`, field = `tag u8 || length u16 || value`. Tags appear in
+- **TLV body**: `version u8 || field*`, field = `tag u8 || length u16 || value`. The version
+  byte versions each body on its own; the file prefix stays at format version 1. Tags appear in
   strictly increasing order, at most once. In credential records and generation info, unknown
   tags `>= 0x40` are skipped and unknown tags `< 0x40` make the body invalid. In events and
   local state every unknown tag is invalid.
@@ -191,16 +192,19 @@ Payloads, all TLV version 1:
 | Kind | Payload |
 |---|---|
 | 1 put credential | the credential record (5.3) |
-| 2 tombstone | 0x01 credential id [32] |
+| 2 tombstone | 0x01 credential id, 1 to 1023 bytes (TLV version 2; see below) |
 | 3 device added | 0x01 device id [16], 0x02 name (UTF-8), 0x03 X25519 public key [32], 0x04 added_at u64 |
 | 4 device removed | 0x01 device id [16], 0x02 removed_at u64 |
 | 5 backup confirmed | 0x01 confirmed_at u64 |
 
-### 5.3 Credential record (TLV version 1)
+Tombstone payloads are written as TLV version 2. Version 1 tombstones, whose credential id
+is exactly 32 bytes, are still read.
+
+### 5.3 Credential record (TLV version 2)
 
 | Tag | Field | Value |
 |---|---|---|
-| 0x01 | credential_id | [32] |
+| 0x01 | credential_id | 1 to 1023 bytes (WebAuthn limit) |
 | 0x02 | rp_id | UTF-8, 1 to 1024 bytes |
 | 0x03 | rp_name | UTF-8, optional |
 | 0x04 | user_id | 0 to 64 bytes |
@@ -214,6 +218,17 @@ Payloads, all TLV version 1:
 | 0x0c | discoverable | u8 0 or 1 |
 | 0x0d | backup_eligible | u8, must be 1 |
 
+hirz creates 32-byte credential ids. Passkeys imported from other providers keep the id their
+original authenticator chose, so the site still recognises them; it can be any length from 1
+to 1023 bytes.
+
+**Version 1** records are byte-identical to version 2 except for the version byte, and the
+credential_id field must be exactly 32 bytes long. Writers produce version 2 only; readers
+accept version 1 and version 2 and refuse a version 1 record whose id is not 32 bytes. A
+version 2 record with a 32-byte id differs from the version 1 encoding of the same record in
+the first byte only (`0x01` becomes `0x02`). Builds that read only version 1 skip version 2
+record files as malformed (`skipped` in the scan report) and must be upgraded; event and
+file layouts around the record are unchanged, so nothing else is affected.
 ## 6. Merge and writes
 
 ### 6.1 Counter (Lamport clock)
@@ -230,7 +245,9 @@ key `(origin counter, origin device, rank, path)` where rank is 1 for a tombston
 otherwise:
 
 - credential id: put or tombstone. A tombstone wins a tie on `(counter, device)`; a live
-  credential is one whose winner is a put.
+  credential is one whose winner is a put. Ids are compared as whole byte strings, length
+  included, so an id that is the prefix of another is a different entity, and lookups by id
+  are exact matches.
 - device id: device added (latest wins); device removed (a device stays removed).
 - backup confirmed: present or not.
 
@@ -301,7 +318,7 @@ prefix(0x06) || vault_id [16] || flags u8 (1 = passphrase) || salt [16]
              || m_cost u32 || t_cost u32 || p_cost u32 || AEAD(key, aad = all preceding bytes, body)
 key  = HKDF(salt, ikm = R_backup || Argon2id(passphrase, salt, m, t, p, 32) if flagged,
             info = aad("hirz backup v1", [vault_id]), 32)
-body = count u32 || count x (length u32 || credential record)
+body = count u32 || count x (length u32 || credential record)   (records of TLV version 1 or 2)
 ```
 
 Export uses Argon2id with m = 64 MiB, t = 3, p = 4 (RFC 9106 second recommendation). Import
@@ -370,7 +387,8 @@ the Syncthing share, revoke its app password, and so on); otherwise it can repea
   (directory names and file times), which device ids exist and which generation they hold
   slots in, the number of events each device wrote, event counters, file sizes and times.
 - It does not reveal relying party ids, user names, device names, credential ids or keys:
-  those are only inside AES-256-GCM ciphertext. File names contain no data derived from them.
+  those are only inside AES-256-GCM ciphertext. File names contain no data derived from them:
+  record names are a counter and random bytes, whatever the length of the credential id.
 - It is not a brute-force target: every key protecting it is random (256 bits). Only an
   optional backup export, kept outside the folder, involves a passphrase, and that export
   also requires the recovery key.

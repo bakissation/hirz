@@ -1014,3 +1014,74 @@ fn selection_is_presence_only() {
         Err(CoreError::Approval(ApprovalError::Unavailable))
     );
 }
+
+fn import_es256(vault: &mut Vault, id: &[u8], user: &str) -> PublicKey {
+    let (pkcs8, x, y) = hirz_crypto::es256::generate().unwrap();
+    vault
+        .put(hirz_vault::CredentialRecord {
+            credential_id: id.to_vec(),
+            rp_id: RP.to_owned(),
+            rp_name: None,
+            user_id: user.as_bytes().to_vec(),
+            user_name: Some(user.to_owned()),
+            user_display_name: None,
+            algorithm: COSE_ALG_ES256,
+            private_key_pkcs8: pkcs8,
+            created_at: 1,
+            cred_protect: None,
+            hmac_secret: None,
+            discoverable: true,
+            backup_eligible: true,
+        })
+        .unwrap();
+    PublicKey::Es256 { x, y }
+}
+
+#[test]
+fn imported_ids_of_other_lengths() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let short: Vec<u8> = (1..=16).collect();
+    let long = vec![0x77; 1023];
+    let short_key = import_es256(&mut vault, &short, "alice");
+    let long_key = import_es256(&mut vault, &long, "bob");
+
+    for (id, key) in [(&short, &short_key), (&long, &long_key)] {
+        let a = assert_with(&mut vault, &get_req(&[id]), up()).unwrap();
+        assert_eq!(&a.credential_id, id);
+        verify(key, &a);
+        assert!(parse(&a.auth_data).attested_credential.is_none());
+
+        let a = Engine::new(&mut vault, &Fake::default())
+            .get_assertion(&silent(&[id]), None, None)
+            .unwrap();
+        assert_eq!(&a.credential_id, id);
+        verify(key, &a);
+    }
+
+    // Prefixes and extensions of an imported id never match it.
+    let mut longer = short.clone();
+    longer.push(0);
+    let near: [&[u8]; 3] = [&short[..15], &longer, &long[..1022]];
+    for id in near {
+        assert_eq!(
+            assert_with(&mut vault, &get_req(&[id]), up()),
+            Err(CoreError::NoCredentials)
+        );
+    }
+
+    let fake = Fake::with(vec![Ok(pick(1, false))]);
+    let a = Engine::new(&mut vault, &fake)
+        .get_assertion(&get_req(&[]), None, None)
+        .unwrap();
+    let shown = fake.last().candidates;
+    assert_eq!(shown.len(), 2);
+    assert!(shown.contains(&short) && shown.contains(&long));
+    assert_eq!(a.credential_id, shown[1]);
+
+    let mut req = make_req("carol", &[-7]);
+    req.exclude_list = vec![vec![1; 16], short.clone()];
+    let fake = Fake::with(vec![Ok(up())]);
+    let r = Engine::new(&mut vault, &fake).make_credential(&req, None);
+    assert_eq!(r, Err(CoreError::CredentialExcluded));
+}

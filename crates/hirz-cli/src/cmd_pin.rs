@@ -2,12 +2,11 @@
 
 use crate::app::Ctx;
 use crate::args::PinAction;
-use crate::env::{STATE_DEVICE, VAULT_HEADER};
 use crate::error::{CliError, CliResult, Exit, phrase_problem};
 use crate::prompt::{self, confirm};
 use hirz_uv::pin::{MAX_FAILURES, MAX_PIN_BYTES, MIN_PIN_CODE_POINTS};
 use hirz_uv::{PinError, PinStore};
-use hirz_vault::{RecoveryPhrase, VaultError};
+use hirz_vault::{RecoveryPhrase, Vault, VaultError};
 
 fn store(ctx: &Ctx<'_>) -> PinStore {
     PinStore::with_params(ctx.env.state_dir(), ctx.kdf)
@@ -111,7 +110,7 @@ pub fn pin(ctx: &mut Ctx<'_>, action: PinAction) -> CliResult<Exit> {
                 "Resetting removes the PIN. Approvals then use your other methods until you set a\n\
                  new PIN with `hirz pin set`.",
             )?;
-            if ctx.env.state_dir().join(STATE_DEVICE).exists() {
+            if ctx.env.device_state_exists() {
                 prove_owner(ctx)?;
             } else if !confirm(ctx.prompt, "Remove the PIN?")? {
                 return Err(CliError::cancelled("Nothing was changed."));
@@ -126,13 +125,13 @@ pub fn pin(ctx: &mut Ctx<'_>, action: PinAction) -> CliResult<Exit> {
 /// Someone who forgot the PIN proves they own the vault with the recovery phrase.
 fn prove_owner(ctx: &mut Ctx<'_>) -> CliResult<()> {
     let dir = ctx.vault_dir()?;
-    if !dir.join(VAULT_HEADER).exists() {
+    if !Vault::exists(&dir) {
         return Err(CliError::not_set_up(format!(
             "The vault folder {} is missing, so hirz cannot check your recovery phrase.",
             dir.display()
         )));
     }
-    let (vault, _) = ctx.open_vault()?;
+    ctx.open_vault()?;
     ctx.say("To show that you own this vault, type its 24-word recovery phrase.")?;
     let typed = prompt::read_secret(ctx.prompt, "Recovery phrase: ")?;
     let phrase = match RecoveryPhrase::parse(&typed) {
@@ -140,12 +139,11 @@ fn prove_owner(ctx: &mut Ctx<'_>) -> CliResult<()> {
         Err(VaultError::Phrase(p)) => return Err(CliError::denied(phrase_problem(p))),
         Err(e) => return Err(e.into()),
     };
-    // export_backup checks the phrase against the vault before doing anything else.
-    match vault.export_backup(&phrase, None) {
-        Ok(_) => Ok(()),
-        Err(VaultError::WrongRecoveryKey) => Err(CliError::denied(
+    if Vault::check_recovery_phrase(&dir, &phrase)? {
+        Ok(())
+    } else {
+        Err(CliError::denied(
             "That recovery phrase does not belong to this vault. The PIN was not removed.",
-        )),
-        Err(e) => Err(e.into()),
+        ))
     }
 }

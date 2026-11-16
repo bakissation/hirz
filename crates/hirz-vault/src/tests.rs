@@ -41,7 +41,7 @@ impl Drop for TempDir {
 fn cred(seed: u8, rp: &str) -> CredentialRecord {
     let (pkcs8, _, _) = hirz_crypto::es256::generate().unwrap();
     CredentialRecord {
-        credential_id: [seed; 32],
+        credential_id: vec![seed; 32],
         rp_id: rp.to_string(),
         rp_name: Some("Example".to_string()),
         user_id: vec![seed, 1, 2, 3],
@@ -209,13 +209,194 @@ fn record_round_trip_and_validation() {
     trailing.push(0x01);
     assert!(CredentialRecord::decode(&trailing).is_err());
     let mut version = enc.to_vec();
-    version[0] = 2;
+    version[0] = 3;
     assert_eq!(
         CredentialRecord::decode(&version).unwrap_err(),
         VaultError::UnsupportedVersion
     );
     let dbg = format!("{r:?}");
     assert!(!dbg.contains(&hex(&r.private_key_pkcs8)));
+}
+
+#[test]
+fn record_credential_id_lengths() {
+    for len in [1usize, 16, 32, 64, 1023] {
+        let mut r = cred(4, "example.com");
+        r.credential_id = (0..len).map(|i| i as u8).collect();
+        let enc = r.encode().unwrap();
+        let len16 = (len as u16).to_be_bytes();
+        assert_eq!(&enc[..4], &[0x02, 0x01, len16[0], len16[1]], "len {len}");
+        assert_eq!(&enc[4..4 + len], r.credential_id.as_slice());
+        assert_eq!(CredentialRecord::decode(&enc).unwrap(), r);
+    }
+    for len in [0usize, 1024] {
+        let mut r = cred(4, "example.com");
+        r.credential_id = vec![1; len];
+        assert!(matches!(r.validate(), Err(VaultError::InvalidRecord(_))));
+        assert!(r.encode().is_err());
+    }
+    // A version 2 body carrying an out-of-range id is refused on read.
+    let mut r = cred(4, "example.com");
+    r.credential_id = vec![1; 1023];
+    let mut enc = r.encode().unwrap().to_vec();
+    enc[2..4].copy_from_slice(&1024u16.to_be_bytes());
+    enc.insert(4, 1);
+    assert_eq!(
+        CredentialRecord::decode(&enc).unwrap_err(),
+        VaultError::Corrupt("credential_id")
+    );
+}
+
+#[test]
+fn version_1_records_and_tombstones_still_read() {
+    use crate::codec::Writer;
+    use crate::record::{Event, EventKind};
+
+    // Version 1 bodies are byte-identical to version 2 apart from the version byte when the
+    // id has 32 bytes.
+    let r = cred(5, "example.com");
+    let mut v1 = r.encode().unwrap().to_vec();
+    v1[0] = 1;
+    assert_eq!(CredentialRecord::decode(&v1).unwrap(), r);
+
+    // Version 1 fixes the id at 32 bytes.
+    let mut short = cred(5, "example.com");
+    short.credential_id = vec![5; 16];
+    let mut v1_short = short.encode().unwrap().to_vec();
+    v1_short[0] = 1;
+    assert_eq!(
+        CredentialRecord::decode(&v1_short).unwrap_err(),
+        VaultError::Corrupt("credential_id")
+    );
+
+    let event_with = |payload: &[u8], kind: u8| {
+        let mut w = Writer::new(1);
+        w.u8_field(0x01, kind).unwrap();
+        w.field(0x02, &[7; 16]).unwrap();
+        w.u64_field(0x03, 9).unwrap();
+        w.field(0x04, payload).unwrap();
+        let mut body = w.finish();
+        crate::record::append_tag(&mut body, &[0; 32]);
+        body
+    };
+    let put = event_with(&v1, 1);
+    match Event::decode(&put).unwrap().0.kind {
+        EventKind::Put(got) => assert_eq!(*got, r),
+        other => panic!("{other:?}"),
+    }
+
+    let tomb_payload = |version: u8, id: &[u8]| {
+        let mut w = Writer::new(version);
+        w.field(0x01, id).unwrap();
+        w.finish()
+    };
+    let v1_tomb = event_with(&tomb_payload(1, &[5; 32]), 2);
+    assert_eq!(
+        Event::decode(&v1_tomb).unwrap().0.kind,
+        EventKind::Tombstone(vec![5; 32])
+    );
+    assert!(Event::decode(&event_with(&tomb_payload(1, &[5; 16]), 2)).is_err());
+    let v2_tomb = event_with(&tomb_payload(2, &[5; 16]), 2);
+    assert_eq!(
+        Event::decode(&v2_tomb).unwrap().0.kind,
+        EventKind::Tombstone(vec![5; 16])
+    );
+    assert!(Event::decode(&event_with(&tomb_payload(2, &[]), 2)).is_err());
+    assert!(Event::decode(&event_with(&tomb_payload(2, &[5; 1024]), 2)).is_err());
+    assert_eq!(
+        Event::decode(&event_with(&tomb_payload(3, &[5; 16]), 2)).unwrap_err(),
+        VaultError::UnsupportedVersion
+    );
+
+    // New tombstones are written as version 2.
+    let fresh = Event {
+        kind: EventKind::Tombstone(vec![5; 16]),
+        origin_author: [7; 16],
+        origin_lamport: 9,
+    };
+    let mut body = fresh.encode_body().unwrap();
+    crate::record::append_tag(&mut body, &[0; 32]);
+    assert_eq!(Event::decode(&body).unwrap().0, fresh);
+}
+
+#[test]
+fn imported_ids_of_other_lengths_merge_by_exact_id() {
+    let t = TempDir::new("varid");
+    let vdir = t.path("vault");
+    let (mut a, phrase) = Vault::create(&vdir, &t.path("a"), "a").unwrap();
+    let mut b = Vault::join_with_recovery(&vdir, &t.path("b"), &phrase, "b").unwrap();
+
+    let long_id: Vec<u8> = (0..32u8).collect();
+    let prefix_id = long_id[..16].to_vec();
+    let max_id = vec![0xab; 1023];
+    for (seed, id) in [(1, &long_id), (2, &prefix_id), (3, &max_id)] {
+        let mut r = cred(seed, "example.com");
+        r.credential_id = id.clone();
+        a.put(r).unwrap();
+    }
+    b.reload().unwrap();
+    assert_eq!(b.list_all().len(), 3);
+    assert_eq!(b.get(&long_id).unwrap().user_id[0], 1);
+    assert_eq!(b.get(&prefix_id).unwrap().user_id[0], 2);
+    assert_eq!(b.get(&max_id).unwrap().user_id[0], 3);
+    assert!(b.get(&long_id[..15]).is_none());
+    assert!(b.get(&long_id[..31]).is_none());
+    assert!(b.get(&[0xab; 1022]).is_none());
+    assert!(b.get(&[]).is_none());
+
+    assert!(b.delete(&prefix_id).unwrap());
+    assert!(!b.delete(&long_id[..8]).unwrap());
+    a.reload().unwrap();
+    assert!(a.get(&prefix_id).is_none());
+    assert!(a.get(&long_id).is_some());
+    assert_eq!(a.list_all().len(), 2);
+
+    // File names never carry credential ids.
+    for f in record_files(&vdir) {
+        let name = f.file_name().unwrap().to_str().unwrap().to_string();
+        assert!(!name.contains(&hex(&prefix_id)), "{name}");
+        assert!(!name.contains(&hex(&max_id[..8])), "{name}");
+    }
+
+    // A rotation re-writes every winner, including long ids and the tombstone.
+    let b_id = b.device_id();
+    a.remove_device(&b_id).unwrap();
+    let a2 = Vault::open(&vdir, &t.path("a")).unwrap();
+    assert_eq!(a2.list_all().len(), 2);
+    assert!(a2.get(&max_id).is_some());
+    assert!(a2.get(&prefix_id).is_none());
+}
+
+#[test]
+fn presence_helpers_and_recovery_check() {
+    let t = TempDir::new("helpers");
+    let vdir = t.path("vault");
+    let sdir = t.path("state");
+    assert!(!Vault::exists(&vdir));
+    assert!(!Vault::is_set_up(&sdir));
+    assert_eq!(
+        Vault::check_recovery_phrase(&vdir, &RecoveryPhrase::from_entropy([1; 32])).unwrap_err(),
+        VaultError::NotFound
+    );
+    let (mut a, phrase) = Vault::create(&vdir, &sdir, "a").unwrap();
+    assert!(Vault::exists(&vdir));
+    assert!(Vault::is_set_up(&sdir));
+    assert!(vdir.join(crate::HEADER_FILE).is_file());
+    assert!(sdir.join(crate::DEVICE_STATE_FILE).is_file());
+    assert!(!Vault::is_set_up(&vdir));
+    assert!(!Vault::exists(&sdir));
+
+    assert!(Vault::check_recovery_phrase(&vdir, &phrase).unwrap());
+    let wrong = RecoveryPhrase::from_entropy([9; 32]);
+    assert!(!Vault::check_recovery_phrase(&vdir, &wrong).unwrap());
+
+    // Still true after a rotation, and for a phrase of another vault false.
+    let b = Vault::join_with_recovery(&vdir, &t.path("b"), &phrase, "b").unwrap();
+    a.remove_device(&b.device_id()).unwrap();
+    assert!(Vault::check_recovery_phrase(&vdir, &phrase).unwrap());
+    let (_, other) = Vault::create(&t.path("other"), &t.path("o"), "o").unwrap();
+    assert!(!Vault::check_recovery_phrase(&vdir, &other).unwrap());
+    assert!(Vault::check_recovery_phrase(&t.path("other"), &other).unwrap());
 }
 
 // ---- vault lifecycle ----

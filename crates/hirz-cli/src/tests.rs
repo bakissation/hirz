@@ -250,7 +250,7 @@ fn record(rp: &str, user: &str, ed25519: bool, seed: u8) -> CredentialRecord {
         (hirz_crypto::es256::generate().unwrap().0, -7)
     };
     CredentialRecord {
-        credential_id: [seed; 32],
+        credential_id: vec![seed; 32],
         rp_id: rp.into(),
         rp_name: Some(format!("{rp} site")),
         user_id: vec![seed; 16],
@@ -279,7 +279,7 @@ fn put(m: &Machine, vault: &Path, records: Vec<CredentialRecord>) {
 fn records(m: &Machine, vault: &Path) -> Vec<CredentialRecord> {
     let v = Vault::open(vault, &m.state()).unwrap();
     let mut all: Vec<CredentialRecord> = v.list_all().into_iter().cloned().collect();
-    all.sort_by_key(|r| r.credential_id);
+    all.sort_by(|a, b| a.credential_id.cmp(&b.credential_id));
     all
 }
 
@@ -540,7 +540,7 @@ fn init_checks_the_phrase_and_refuses_to_overwrite() {
         3
     );
     let vault = m.default_vault();
-    assert!(vault.join("hirz-vault").is_file());
+    assert!(vault.join(hirz_vault::HEADER_FILE).is_file());
     assert_eq!(
         fs::read(m.state().join("vault-path")).unwrap(),
         vault.as_os_str().as_encoded_bytes()
@@ -581,7 +581,7 @@ fn init_checks_the_phrase_and_refuses_to_overwrite() {
     );
     assert_eq!(r.exit(), Exit::Failed);
     assert!(r.message().contains("not empty"));
-    assert!(!other.state().join("device").exists());
+    assert!(!other.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
 }
 
 #[test]
@@ -591,7 +591,7 @@ fn init_quiz_failure_is_reported() {
     assert_eq!(r.exit(), Exit::Cancelled);
     assert!(r.message().contains("not confirmed"));
     assert!(r.out.contains("Here is the phrase again"));
-    assert!(m.default_vault().join("hirz-vault").is_file());
+    assert!(m.default_vault().join(hirz_vault::HEADER_FILE).is_file());
 }
 
 #[test]
@@ -612,7 +612,7 @@ fn join_second_device_with_retries() {
         .to_string();
     let r = run(&b, &["join", "--vault", &vs], &[&other]);
     assert_eq!(r.exit(), Exit::Denied);
-    assert!(!b.state().join("device").exists());
+    assert!(!b.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
 
     let mut typo: Vec<&str> = phrase.split(' ').collect();
     typo[3] = "notaword";
@@ -714,6 +714,26 @@ fn list_and_delete() {
     let left = records(&m, &vault);
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].rp_id, "example.org");
+}
+
+#[test]
+fn delete_by_whole_id_when_it_prefixes_another() {
+    let m = Machine::new("delete-short");
+    init(&m);
+    let vault = m.default_vault();
+    let mut short = record("example.com", "alice", false, 10);
+    short.credential_id = vec![10; 16];
+    let long = record("example.com", "bob", false, 10);
+    put(&m, &vault, vec![short, long]);
+
+    let r = run(&m, &["delete", "0a0a"], &[]);
+    assert_eq!(r.exit(), Exit::Usage);
+    let whole = "0a".repeat(16);
+    let r = run(&m, &["delete", &whole], &["y"]);
+    assert!(r.ok().contains("Deleted"), "{}", r.out);
+    let left = records(&m, &vault);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].credential_id, vec![10u8; 32]);
 }
 
 // ---- export and import ----
@@ -835,16 +855,17 @@ fn import_from_another_provider() {
     assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
     let out = &r.out;
     assert!(out.contains("Export made by: Example Provider"));
-    assert!(out.contains("Imported 2 passkeys"));
+    assert!(out.contains("Imported 4 passkeys"));
     assert!(out.contains("1 item of other kinds"));
     assert!(out.contains("credBlob data"));
     assert!(out.contains("Skipped 3 passkeys"));
     assert!(out.contains("example.net (carol): it uses an RSA key"));
-    assert!(out.contains("19 bytes long"));
     assert!(out.contains("not a valid domain name"));
+    assert!(out.contains("example.org (gina): its credential id is empty"));
+    assert!(!out.contains("bytes long"));
 
     let recs = records(&m, &m.default_vault());
-    assert_eq!(recs.len(), 2);
+    assert_eq!(recs.len(), 4);
     let alice = &recs[0];
     assert_eq!(alice.rp_id, "example.com");
     assert_eq!(alice.algorithm, -7);
@@ -862,10 +883,63 @@ fn import_from_another_provider() {
     assert_eq!(bob.user_id, b"user-bob-0000002");
     assert_eq!(bob.user_display_name, None);
     assert!(bob.hmac_secret.is_none());
+    // Ids of other lengths than the 32 bytes hirz creates are kept as they are.
+    let frank = &recs[2];
+    assert_eq!(frank.credential_id, vec![4u8; 16]);
+    assert_eq!(frank.rp_id, "example.org");
+    assert_eq!(frank.algorithm, -7);
+    let dave = &recs[3];
+    assert_eq!(dave.credential_id, b"credentialIdExample");
+    assert_eq!(dave.rp_id, "acme.example");
+    {
+        let v = Vault::open(&m.default_vault(), &m.state()).unwrap();
+        assert!(v.get(&[4u8; 16]).is_some());
+        assert!(v.get(&[4u8; 15]).is_none());
+        assert!(v.get(&[4u8; 32]).is_none());
+    }
 
     let r = run(&m, &["import", "--cxf", fs_], &[]);
     assert_eq!(r.exit(), Exit::Partial);
-    assert!(r.out.contains("2 passkeys were already in hirz"));
+    assert!(r.out.contains("4 passkeys were already in hirz"));
+
+    // Export and re-import keep the short ids.
+    let out_file = m.tmp.path("short-ids.json");
+    let o = out_file.to_str().unwrap();
+    let r = run(&m, &["export", "--plain", "--cxf", o], &["yes", "y"]);
+    r.ok();
+    let c = Machine::new("fixture-c");
+    init(&c);
+    let r = run(&c, &["import", "--cxf", o], &[]);
+    assert!(r.ok().contains("Imported 4 passkeys"), "{}", r.out);
+    assert_eq!(
+        records(&m, &m.default_vault()),
+        records(&c, &c.default_vault())
+    );
+
+    // Ids over the WebAuthn limit of 1023 bytes are refused.
+    let mut long: Value = serde_json::from_str(FIXTURE).unwrap();
+    long["accounts"][0]["items"][1]["credentials"][0]["credentialId"] =
+        Value::from(hirz_proto::base64url::encode(&[7u8; 1024]));
+    let long_file = m.tmp.path("long.json");
+    fs::write(&long_file, serde_json::to_vec(&long).unwrap()).unwrap();
+    let r = run(&c, &["import", "--cxf", long_file.to_str().unwrap()], &[]);
+    assert!(
+        r.out.contains("(bob): the field credentialId is too long"),
+        "{}",
+        r.out
+    );
+    let mut max: Value = serde_json::from_str(FIXTURE).unwrap();
+    max["accounts"][0]["items"][1]["credentials"][0]["credentialId"] =
+        Value::from(hirz_proto::base64url::encode(&[7u8; 1023]));
+    fs::write(&long_file, serde_json::to_vec(&max).unwrap()).unwrap();
+    let r = run(&c, &["import", "--cxf", long_file.to_str().unwrap()], &[]);
+    assert!(r.out.contains("Imported 1 passkey"), "{}", r.out);
+    assert!(
+        Vault::open(&c.default_vault(), &c.state())
+            .unwrap()
+            .get(&[7u8; 1023])
+            .is_some()
+    );
 
     let mut tampered: Value = serde_json::from_str(FIXTURE).unwrap();
     let other_key = hirz_proto::base64url::encode(&hirz_crypto::es256::generate().unwrap().0);

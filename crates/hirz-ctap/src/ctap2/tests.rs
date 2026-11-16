@@ -1322,3 +1322,42 @@ fn cancellation_stops_a_blocked_engine() {
         assert!(start.elapsed() < Duration::from_secs(5));
     }
 }
+
+#[test]
+fn descriptor_ids_of_any_length_up_to_1023() {
+    let ids = [vec![1u8; 1], vec![2u8; 16], vec![3u8; 32], vec![4u8; 1023]];
+    let list = Value::Array(ids.iter().map(|id| descriptor(id)).collect());
+    let enc = cbor::encode(&get_params(|e| set(e, 3, list.clone()))).unwrap();
+    assert_eq!(parse_get_assertion(&enc).unwrap().allow_list, ids.to_vec());
+    let enc = cbor::encode(&make_params(|e| set(e, 5, list))).unwrap();
+    assert_eq!(
+        parse_make_credential(&enc).unwrap().exclude_list,
+        ids.to_vec()
+    );
+
+    let too_long = Value::Array(vec![descriptor(&[2; 16]), descriptor(&[5; 1024])]);
+    let enc = cbor::encode(&get_params(|e| set(e, 3, too_long.clone()))).unwrap();
+    assert_eq!(
+        parse_get_assertion(&enc).unwrap_err(),
+        Status::InvalidParameter
+    );
+    let enc = cbor::encode(&make_params(|e| set(e, 5, too_long))).unwrap();
+    assert_eq!(
+        parse_make_credential(&enc).unwrap_err(),
+        Status::InvalidParameter
+    );
+
+    // Descriptors of other types are skipped whatever their id.
+    let other = Value::Array(vec![
+        MapBuilder::new()
+            .text("id", [6u8; 1024].as_slice())
+            .text("type", "future-type")
+            .build(),
+        descriptor(&[2; 16]),
+    ]);
+    let enc = cbor::encode(&get_params(|e| set(e, 3, other))).unwrap();
+    assert_eq!(
+        parse_get_assertion(&enc).unwrap().allow_list,
+        vec![vec![2u8; 16]]
+    );
+}

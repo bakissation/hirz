@@ -428,6 +428,64 @@ mod tests {
         );
     }
 
+    fn import_es256(vault_dir: &Path, state_dir: &Path, id: &[u8]) -> cose::PublicKey {
+        let (pkcs8, x, y) = hirz_crypto::es256::generate().unwrap();
+        let mut vault = Vault::open(vault_dir, state_dir).unwrap();
+        vault
+            .put(hirz_vault::CredentialRecord {
+                credential_id: id.to_vec(),
+                rp_id: RP_ID.to_owned(),
+                rp_name: None,
+                user_id: b"alice".to_vec(),
+                user_name: Some("alice".to_owned()),
+                user_display_name: None,
+                algorithm: hirz_core::COSE_ALG_ES256,
+                private_key_pkcs8: pkcs8,
+                created_at: 1,
+                cred_protect: None,
+                hmac_secret: None,
+                discoverable: true,
+                backup_eligible: true,
+            })
+            .unwrap();
+        cose::PublicKey::Es256 { x, y }
+    }
+
+    fn get_assertion(handler: &Ctap2Handler<VaultAuthenticator<ApproveAll>>, p: &Value) -> Vec<u8> {
+        let mut request = vec![0x02];
+        request.extend(cbor::encode(p).unwrap());
+        handler.process(&request, &hid::RequestContext::new())
+    }
+
+    #[test]
+    fn imported_credential_with_a_16_byte_id_signs_over_ctap() {
+        let dir = ScratchDir::new("hirzd-test").unwrap();
+        let (vault_dir, state_dir) = (dir.path().join("vault"), dir.path().join("state"));
+        Vault::create(&vault_dir, &state_dir, "test").unwrap();
+        let id: Vec<u8> = (0x40..0x50).collect();
+        let key = import_es256(&vault_dir, &state_dir, &id);
+        let session = Session::new(settings_for(&vault_dir, &state_dir), ApproveAll);
+        let handler = Ctap2Handler::new(VaultAuthenticator::new(session, Notice::new(false)));
+
+        for (allow, up) in [
+            (Some(id.as_slice()), true),
+            (None, true),
+            (Some(&id), false),
+        ] {
+            let reply = get_assertion(&handler, &get_assertion_params(allow, up));
+            let (status, body) = reply.split_first().unwrap();
+            assert_eq!(*status, STATUS_OK, "allow {allow:?} up {up}");
+            let (flags, _, _) = check_assertion(body, &id, &key).unwrap();
+            assert_eq!(flags & FLAG_UP != 0, up);
+        }
+
+        // A 32-byte id that starts with the imported one is a different credential.
+        let mut longer = id.clone();
+        longer.extend_from_slice(&[0; 16]);
+        let reply = get_assertion(&handler, &get_assertion_params(Some(&longer), true));
+        assert_eq!(reply, vec![0x2e]);
+    }
+
     #[test]
     fn cancelled_requests_are_not_started() {
         let dir = ScratchDir::new("hirzd-test").unwrap();

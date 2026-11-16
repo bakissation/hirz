@@ -133,8 +133,11 @@ invisible characters before display. Private keys are never printed.
 ### `hirz delete ID-PREFIX [--yes]`, `hirz delete SITE ACCOUNT [--yes]`
 
 Deletes one passkey on all devices, after showing it and asking. ID-PREFIX is at least
-four hex digits of the credential id. SITE ACCOUNT matches the user name or display name
-exactly. When several passkeys match, they are listed and nothing is deleted. The site still
+four hex digits of the credential id. Imported passkeys keep their original credential id,
+which can be shorter or longer than the 32 bytes hirz creates; a whole id typed in full
+selects that passkey even when it is also the start of a longer id. SITE ACCOUNT matches the
+user name or display name exactly. When several passkeys match, they are listed and nothing
+is deleted. The site still
 lists the passkey in your account; hirz reminds you to remove it there.
 
 ### `hirz devices [--json]`
@@ -181,7 +184,8 @@ with mode 0600.
 Reads an encrypted hirz export (asks for the passphrase, three tries) or a plain CXF
 document from any provider, checks every passkey, and adds the valid ones. It never
 replaces a passkey that hirz already has: an identical one is reported as already present,
-a different one with the same credential id is skipped. Exit status 6 when at least one
+a different one with the same credential id is skipped. Credential ids of any length from 1
+to 1023 bytes (the WebAuthn limit) are kept as they are. Exit status 6 when at least one
 passkey was skipped; each one is listed with the reason.
 
 ### `hirz backup confirm [--yes]`

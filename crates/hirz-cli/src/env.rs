@@ -11,10 +11,6 @@ use std::path::{Path, PathBuf};
 
 /// Name of the file in the state directory that records where this device's vault is.
 pub const VAULT_POINTER: &str = "vault-path";
-/// Name of the vault header file (`docs/vault-format.md`, section 3).
-pub const VAULT_HEADER: &str = "hirz-vault";
-/// Name of the device state file (`docs/vault-format.md`, section 7).
-pub const STATE_DEVICE: &str = "device";
 pub const DEFAULT_BROKER_SOCKET: &str = "/run/hirz/uhid.sock";
 const MAX_POINTER_LEN: u64 = 4096;
 
@@ -106,7 +102,7 @@ impl Env {
     }
 
     pub fn device_state_exists(&self) -> bool {
-        self.state_dir().join(STATE_DEVICE).exists()
+        hirz_vault::Vault::is_set_up(self.state_dir())
     }
 
     pub fn record_vault_dir(&self, vault: &Path) -> CliResult<()> {

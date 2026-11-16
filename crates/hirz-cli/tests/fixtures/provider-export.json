@@ -95,6 +95,36 @@
           ]
         },
         {
+          "id": "aXRlbS02",
+          "title": "Sixteen byte id",
+          "credentials": [
+            {
+              "type": "passkey",
+              "credentialId": "BAQEBAQEBAQEBAQEBAQEBA",
+              "rpId": "example.org",
+              "username": "frank",
+              "userDisplayName": "Frank",
+              "userHandle": "dXNlci1mcmFuaw",
+              "key": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgARu_0sCt20EpgVxb4Puq3Ga5VVLpuTY75ngvZlyq3X6hRANCAASmdk1xLsK0oOlhxIPp0d1ZuS0sT9nf6BZtSelhqvLBW0fOL33l_bXgsr_STUHjCLn8l6gcRJwe7OQvbQubZ1dY"
+            }
+          ]
+        },
+        {
+          "id": "aXRlbS03",
+          "title": "Empty id",
+          "credentials": [
+            {
+              "type": "passkey",
+              "credentialId": "",
+              "rpId": "example.org",
+              "username": "gina",
+              "userDisplayName": "Gina",
+              "userHandle": "dXNlci1naW5h",
+              "key": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgARu_0sCt20EpgVxb4Puq3Ga5VVLpuTY75ngvZlyq3X6hRANCAASmdk1xLsK0oOlhxIPp0d1ZuS0sT9nf6BZtSelhqvLBW0fOL33l_bXgsr_STUHjCLn8l6gcRJwe7OQvbQubZ1dY"
+            }
+          ]
+        },
+        {
           "id": "aXRlbS01",
           "title": "Bad site",
           "credentials": [

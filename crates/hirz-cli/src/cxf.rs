@@ -7,7 +7,7 @@
 use hirz_core::{COSE_ALG_EDDSA, COSE_ALG_ES256};
 use hirz_crypto::{Zeroize, Zeroizing};
 use hirz_vault::{
-    CREDENTIAL_ID_LEN, CredentialRecord, HmacSecretPair, MAX_PKCS8_LEN, MAX_STRING_LEN,
+    CredentialRecord, HmacSecretPair, MAX_CREDENTIAL_ID_LEN, MAX_PKCS8_LEN, MAX_STRING_LEN,
     MAX_USER_ID_LEN,
 };
 use serde_json::{Map, Value, json};
@@ -17,8 +17,6 @@ pub const EXPORTER_NAME: &str = "hirz";
 /// Item extension carrying hirz fields that CXF has no place for.
 pub const HIRZ_EXTENSION: &str = "hirz.dev/passkey";
 pub const MAX_PASSKEYS: usize = 100_000;
-/// WebAuthn credential ids are at most 1023 bytes.
-const MAX_CREDENTIAL_ID: usize = 1023;
 
 fn b64(bytes: &[u8]) -> String {
     hirz_proto::base64url::encode(bytes)
@@ -256,17 +254,10 @@ fn passkey(
     item: &Map<String, Value>,
     now: u64,
 ) -> Result<(CredentialRecord, Vec<&'static str>), String> {
-    let credential_id = req_bytes(pk, "credentialId", MAX_CREDENTIAL_ID)?;
+    let credential_id = req_bytes(pk, "credentialId", MAX_CREDENTIAL_ID_LEN)?;
     if credential_id.is_empty() {
         return Err("its credential id is empty".into());
     }
-    let id: [u8; CREDENTIAL_ID_LEN] = credential_id.as_slice().try_into().map_err(|_| {
-        format!(
-            "its credential id is {} bytes long; this version of hirz can only store \
-             {CREDENTIAL_ID_LEN}-byte ids",
-            credential_id.len()
-        )
-    })?;
     let rp_id = req_str(pk, "rpId")?.to_ascii_lowercase();
     if !hirz_uv::config::valid_rp_id(&rp_id) {
         return Err("its site id is not a valid domain name".into());
@@ -326,7 +317,7 @@ fn passkey(
         .filter(|t| *t > 0 && *t <= now.saturating_add(86_400))
         .unwrap_or(now);
     let record = CredentialRecord {
-        credential_id: id,
+        credential_id: credential_id.to_vec(),
         rp_id,
         rp_name: extra.rp_name,
         user_id: user_id.to_vec(),
@@ -457,7 +448,7 @@ mod tests {
     fn export_then_parse() {
         let (key, _, _) = hirz_crypto::es256::generate().unwrap();
         let r = CredentialRecord {
-            credential_id: [9; 32],
+            credential_id: vec![9; 32],
             rp_id: "example.com".into(),
             rp_name: None,
             user_id: vec![],

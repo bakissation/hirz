@@ -2,7 +2,6 @@
 
 use crate::app::Ctx;
 use crate::args::DeleteTarget;
-use crate::env::VAULT_HEADER;
 use crate::error::{CliError, CliResult, Exit, phrase_problem};
 use crate::prompt::{self, confirm};
 use crate::ui::{self, clean, count, hex};
@@ -151,7 +150,7 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
     if ctx.env.device_state_exists() {
         return Err(already_set_up(ctx));
     }
-    if dir.join(VAULT_HEADER).exists() {
+    if Vault::exists(&dir) {
         return Err(CliError::failed(format!(
             "There is already a vault in {d}. To use it on this computer, run:\n  hirz join --vault {d}",
             d = dir.display()
@@ -233,7 +232,7 @@ pub fn join(ctx: &mut Ctx<'_>, name: Option<String>) -> CliResult<Exit> {
     if ctx.env.device_state_exists() {
         return Err(already_set_up(ctx));
     }
-    if !dir.join(VAULT_HEADER).exists() {
+    if !Vault::exists(&dir) {
         return Err(CliError::not_set_up(format!(
             "No vault found in {} yet. If your sync tool is still copying the folder, wait \
              until it has finished, then try again.",
@@ -306,13 +305,13 @@ fn sorted(mut v: Vec<&CredentialRecord>) -> Vec<&CredentialRecord> {
             a.rp_id.as_str(),
             account_of(a),
             a.created_at,
-            a.credential_id,
+            a.credential_id.as_slice(),
         )
             .cmp(&(
                 b.rp_id.as_str(),
                 account_of(b),
                 b.created_at,
-                b.credential_id,
+                b.credential_id.as_slice(),
             ))
     });
     v
@@ -404,11 +403,16 @@ pub fn delete(ctx: &mut Ctx<'_>, target: DeleteTarget, yes: bool) -> CliResult<E
                      account: hirz delete SITE ACCOUNT",
                 ));
             };
-            vault
+            let found: Vec<&CredentialRecord> = vault
                 .list_all()
                 .into_iter()
                 .filter(|r| hex(&r.credential_id).starts_with(&prefix))
-                .collect()
+                .collect();
+            // Imported ids vary in length, so a whole id can be the prefix of another.
+            match found.iter().find(|r| hex(&r.credential_id) == prefix) {
+                Some(exact) => vec![*exact],
+                None => found,
+            }
         }
         DeleteTarget::Account { site, account } => {
             let site = site.trim().to_ascii_lowercase();

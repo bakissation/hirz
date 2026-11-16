@@ -65,11 +65,19 @@ pub(crate) struct Fields<'a> {
 impl<'a> Fields<'a> {
     /// Checks the version byte and returns the field iterator.
     pub(crate) fn new(data: &'a [u8], version: u8) -> Result<Self, VaultError> {
+        Fields::new_versions(data, &[version]).map(|(f, _)| f)
+    }
+
+    /// Like `new`, for bodies whose readers accept several versions; returns the version.
+    pub(crate) fn new_versions(data: &'a [u8], accepted: &[u8]) -> Result<(Self, u8), VaultError> {
         match data.split_first() {
-            Some((v, rest)) if *v == version => Ok(Fields {
-                rest,
-                last_tag: None,
-            }),
+            Some((v, rest)) if accepted.contains(v) => Ok((
+                Fields {
+                    rest,
+                    last_tag: None,
+                },
+                *v,
+            )),
             Some(_) => Err(VaultError::UnsupportedVersion),
             None => Err(VaultError::Corrupt("empty body")),
         }

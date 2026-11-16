@@ -10,8 +10,7 @@ use crate::format::{
 };
 use crate::fsutil::{self, MAX_FILE_LEN, StateLock};
 use crate::record::{
-    CREDENTIAL_ID_LEN, CredentialRecord, DeviceAnnouncement, Event, EventKind, MAX_DEVICE_NAME_LEN,
-    append_tag,
+    CredentialRecord, DeviceAnnouncement, Event, EventKind, MAX_DEVICE_NAME_LEN, append_tag,
 };
 use crate::recovery::RecoveryPhrase;
 use hirz_crypto::Zeroizing;
@@ -164,7 +163,8 @@ fn base_key(k: &OrderKey) -> (u64, DeviceId, u8) {
 
 #[derive(Debug, Default)]
 struct View {
-    creds: BTreeMap<[u8; CREDENTIAL_ID_LEN], (OrderKey, Event)>,
+    /// Keyed by the full credential id, so lookups are exact matches of any length.
+    creds: BTreeMap<Vec<u8>, (OrderKey, Event)>,
     devices: BTreeMap<DeviceId, (OrderKey, Event)>,
     removals: BTreeMap<DeviceId, (OrderKey, Event)>,
     backup: Option<(OrderKey, Event)>,
@@ -180,7 +180,7 @@ fn keep_max(slot: &mut Option<(OrderKey, Event)>, key: OrderKey, event: &Event) 
     }
 }
 
-fn keep_max_in<K: Ord + Copy>(
+fn keep_max_in<K: Ord>(
     map: &mut BTreeMap<K, (OrderKey, Event)>,
     id: K,
     key: OrderKey,
@@ -199,8 +199,10 @@ impl View {
         self.events = self.events.saturating_add(1);
         self.max_lamport = self.max_lamport.max(file_lamport).max(event.origin_lamport);
         match &event.kind {
-            EventKind::Put(rec) => keep_max_in(&mut self.creds, rec.credential_id, key, event),
-            EventKind::Tombstone(id) => keep_max_in(&mut self.creds, *id, key, event),
+            EventKind::Put(rec) => {
+                keep_max_in(&mut self.creds, rec.credential_id.clone(), key, event)
+            }
+            EventKind::Tombstone(id) => keep_max_in(&mut self.creds, id.clone(), key, event),
             EventKind::DeviceAdded(d) => keep_max_in(&mut self.devices, d.device_id, key, event),
             EventKind::DeviceRemoved { device_id, .. } => {
                 keep_max_in(&mut self.removals, *device_id, key, event)
@@ -228,8 +230,7 @@ impl View {
     }
 
     fn record(&self, id: &[u8]) -> Option<&CredentialRecord> {
-        let id: [u8; CREDENTIAL_ID_LEN] = id.try_into().ok()?;
-        match self.creds.get(&id) {
+        match self.creds.get(id) {
             Some((
                 _,
                 Event {
@@ -722,6 +723,36 @@ enum Origin {
 }
 
 impl Vault {
+    /// True when `vault_dir` holds a vault header. Says nothing about whether it is valid.
+    pub fn exists(vault_dir: &Path) -> bool {
+        vault_dir.join(HEADER_NAME).exists()
+    }
+
+    /// True when `state_dir` holds the local state of a device (this machine joined a vault).
+    pub fn is_set_up(state_dir: &Path) -> bool {
+        state_dir.join(STATE_DEVICE).exists()
+    }
+
+    /// Checks that `phrase` is the recovery phrase of the vault in `vault_dir`, without local
+    /// device state and without reading any credential: it walks the key generations with
+    /// the recovery key, as joining does. Errors only when the header is missing or unreadable.
+    pub fn check_recovery_phrase(
+        vault_dir: &Path,
+        phrase: &RecoveryPhrase,
+    ) -> Result<bool, VaultError> {
+        let header = read_header(vault_dir)?;
+        let private = phrase.x25519_private()?;
+        let auth = phrase.auth_key()?;
+        let opener = Opener::Recovery {
+            private: &private,
+            auth: &auth,
+            public: phrase.x25519_public()?,
+        };
+        let mut report = ScanReport::default();
+        let resolved = resolve(vault_dir, &header.vault_id, &opener, &mut report)?;
+        Ok(resolved.keyed().next().is_some())
+    }
+
     /// Creates a new vault in `vault_dir` and registers this device with its local state in
     /// `state_dir`. Returns the recovery phrase, which must be shown to the user once.
     pub fn create(
@@ -732,7 +763,7 @@ impl Vault {
         if device_name.len() > MAX_DEVICE_NAME_LEN {
             return Err(VaultError::InvalidParameters);
         }
-        if vault_dir.join(HEADER_NAME).exists() || state_dir.join(STATE_DEVICE).exists() {
+        if Vault::exists(vault_dir) || Vault::is_set_up(state_dir) {
             return Err(VaultError::AlreadyExists);
         }
         fsutil::private_dir(vault_dir)?;
@@ -1396,7 +1427,11 @@ impl Vault {
 
     /// Deletes a credential. Returns false if it does not exist.
     pub fn delete(&mut self, credential_id: &[u8]) -> Result<bool, VaultError> {
-        let Some(id) = self.view.record(credential_id).map(|r| r.credential_id) else {
+        let Some(id) = self
+            .view
+            .record(credential_id)
+            .map(|r| r.credential_id.clone())
+        else {
             return Ok(false);
         };
         self.content_writable()?;
@@ -1485,7 +1520,7 @@ mod merge_tests {
     #[test]
     fn tombstone_wins_tie_and_order_is_total() {
         let rec = crate::record::CredentialRecord {
-            credential_id: [1; 32],
+            credential_id: vec![1; 32],
             rp_id: "example.com".into(),
             rp_name: None,
             user_id: vec![1],
@@ -1505,7 +1540,7 @@ mod merge_tests {
             origin_lamport: 7,
         };
         let tomb = Event {
-            kind: EventKind::Tombstone([1; 32]),
+            kind: EventKind::Tombstone(vec![1; 32]),
             origin_author: [5; 16],
             origin_lamport: 7,
         };

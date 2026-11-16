@@ -179,7 +179,7 @@ pub fn import(ctx: &mut Ctx<'_>, file: &Path) -> CliResult<Exit> {
             Candidate::Skipped { label, reason } => skipped.push((label, reason)),
             Candidate::Ready { record, dropped } => {
                 let label = cxf::label(&record.rp_id, record.user_name.as_deref());
-                if !seen.insert(record.credential_id) {
+                if !seen.insert(record.credential_id.clone()) {
                     skipped.push((label, "it appears twice in the file".into()));
                     continue;
                 }

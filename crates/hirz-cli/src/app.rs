@@ -1,7 +1,7 @@
 //! Dispatch, shared context and help texts.
 
 use crate::args::{Command, Invocation};
-use crate::env::{Env, STATE_DEVICE, System, VAULT_HEADER};
+use crate::env::{Env, System};
 use crate::error::{CliError, CliResult, Exit};
 use crate::prompt::Prompter;
 use hirz_crypto::kdf::Argon2Params;
@@ -50,10 +50,10 @@ impl Ctx<'_> {
 
     pub fn open_vault(&self) -> CliResult<(Vault, PathBuf)> {
         let dir = self.vault_dir()?;
-        if !self.env.state_dir().join(STATE_DEVICE).exists() {
+        if !self.env.device_state_exists() {
             return Err(not_set_up());
         }
-        if !dir.join(VAULT_HEADER).exists() {
+        if !Vault::exists(&dir) {
             return Err(CliError::not_set_up(format!(
                 "No vault found in {}. If this folder is synced, check that your sync tool is \
                  running and has copied it. Otherwise give the right folder with --vault DIR.",
