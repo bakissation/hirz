@@ -206,10 +206,18 @@ hirz devices
 hirz remove-device <the first characters of its id>
 ```
 
+After you answer yes, a hirz window shows the computer's name and id and asks for your
+system password, your fingerprint or your hirz PIN, as when you approve a new device.
+
 What this does:
 
 - hirz creates a new vault key and gives it only to the remaining computers. The removed
   computer cannot read passkeys that are added or changed from now on.
+- When the removed computer still runs hirz and its sync tool brings the change, it stops
+  using the vault: browsers no longer get passkeys from it, and `hirz list`, `hirz devices`
+  and `hirz status` say "This computer was removed from your hirz vault; its passkeys are
+  no longer used here." On that computer, `hirz forget-local` deletes its hirz keys (the
+  shared folder is left alone).
 
 What it cannot do:
 
@@ -217,6 +225,8 @@ What it cannot do:
   every passkey in the vault. hirz lists those sites. To be safe, replace each of those
   passkeys: sign in to the site, create a new passkey, then delete the old one at the site
   and with `hirz delete`.
+- Stopping on its own only works for a computer that runs an honest hirz. Someone who has
+  the computer, or copied its files, is not stopped by it.
 - hirz cannot take the folder away from it. Also stop sharing the vault folder with that
   computer: remove it from the Syncthing share, sign it out of Nextcloud or Dropbox (and
   revoke its app password), or revoke its access to the repository.

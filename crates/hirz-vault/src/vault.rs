@@ -78,6 +78,9 @@ pub struct ScanReport {
     /// A newer key generation exists that this device holds no key for (it was removed, or
     /// was not yet known when the vault key was rotated).
     pub locked_out: bool,
+    /// A key generation this device can authenticate lists this device as removed: another
+    /// device ran `remove-device` for it. An honest frontend stops using the vault then.
+    pub this_device_removed: bool,
     /// The highest event counter in the folder is lower than one this device saw before:
     /// files were withheld or rolled back.
     pub rollback_suspected: bool,
@@ -734,6 +737,25 @@ impl Vault {
         state_dir.join(STATE_DEVICE).exists()
     }
 
+    /// Deletes this device's local state (device secret, keyring, event counter) from
+    /// `state_dir`. The vault folder is never touched, and other files in `state_dir` stay.
+    /// Returns whether anything was deleted.
+    pub fn forget_local(state_dir: &Path) -> Result<bool, VaultError> {
+        if !state_dir.is_dir() {
+            return Ok(false);
+        }
+        let _lock = StateLock::acquire(state_dir)?;
+        let mut found = false;
+        for name in [STATE_KEYRING, STATE_DEVICE, STATE_COUNTER] {
+            let path = state_dir.join(name);
+            if path.exists() {
+                found = true;
+            }
+            fsutil::remove_file(&path)?;
+        }
+        Ok(found)
+    }
+
     /// Checks that `phrase` is the recovery phrase of the vault in `vault_dir`, without local
     /// device state and without reading any credential: it walks the key generations with
     /// the recovery key, as joining does. Errors only when the header is missing or unreadable.
@@ -1101,6 +1123,11 @@ impl Vault {
             }
         }
 
+        report.this_device_removed = resolved
+            .nodes
+            .values()
+            .any(|n| n.removed_cum.contains(&self.device.device_id))
+            || view.removed().contains(&self.device.device_id);
         report.credentials = view.records().count();
         report.events = view.events;
         self.current = current;

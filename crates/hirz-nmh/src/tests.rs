@@ -99,6 +99,15 @@ impl Harness {
         if with_vault {
             Vault::create(&vault_dir, &state_dir, "test").unwrap();
         }
+        Harness::start_in(dir, vault_dir, state_dir, approver)
+    }
+
+    fn start_in(
+        dir: TempDir,
+        vault_dir: PathBuf,
+        state_dir: PathBuf,
+        approver: TestApprover,
+    ) -> Harness {
         let session = Session::new(settings(&vault_dir, &state_dir), approver);
         let (stdin_r, stdin_w) = pipe().unwrap();
         let (stdout_r, mut stdout_w) = pipe().unwrap();
@@ -585,5 +594,48 @@ fn list_without_a_vault_is_empty() {
         )
         .unwrap()
     );
+    h.finish().unwrap();
+}
+
+#[test]
+fn a_removed_device_hands_everything_to_firefox() {
+    let dir = TempDir::new();
+    let vault_dir = dir.0.join("vault");
+    let a_state = dir.0.join("a");
+    let state_dir = dir.0.join("state");
+    let (mut a, phrase) = Vault::create(&vault_dir, &a_state, "a").unwrap();
+    let b = Vault::join_with_recovery(&vault_dir, &state_dir, &phrase, "b").unwrap();
+    a.reload().unwrap();
+    a.put(record(1, "example.com", 10, None, true)).unwrap();
+    let mut h = Harness::start_in(dir, vault_dir, state_dir, plain());
+
+    h.send(&list_msg(1, &[]));
+    assert_eq!(listed_ids(&h.recv()), [1]);
+
+    a.remove_device(&b.device_id()).unwrap();
+    h.send(&list_msg(2, &[]));
+    assert_eq!(listed_ids(&h.recv()), Vec::<u8>::new());
+    h.send(&list_msg(3, &[1]));
+    assert_eq!(listed_ids(&h.recv()), Vec::<u8>::new());
+    h.send(r#"{"v":1,"id":4,"type":"capabilities"}"#);
+    assert_eq!(
+        at(
+            &h.recv(),
+            &["capabilities", "userVerifyingPlatformAuthenticator"]
+        ),
+        Some(&Json::Bool(false))
+    );
+    for (id, msg) in [
+        (5, create_msg(5, &[1u8; 32])),
+        (6, get_msg(6, &[1u8; 32], Some(&[1u8; 16]))),
+        (7, get_msg(7, &[1u8; 32], None)),
+    ] {
+        h.send(&msg);
+        let r = h.recv();
+        assert_eq!(r.get("id").and_then(Json::as_u64), Some(id));
+        assert_eq!(r.get("error").and_then(Json::as_str), Some("NotHandled"));
+    }
+    a.reload().unwrap();
+    assert_eq!(a.list_all().len(), 1);
     h.finish().unwrap();
 }

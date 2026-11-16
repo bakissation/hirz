@@ -15,7 +15,7 @@ use hirz_ctap::Authenticator;
 use hirz_ctap::hid::RequestContext;
 
 use crate::log;
-use crate::session::{Session, VaultStatus};
+use crate::session::{REMOVED_NOTICE, Session, VaultStatus};
 
 const NOTICE_INTERVAL: Duration = Duration::from_secs(600);
 const NO_VAULT: &str = "no hirz vault on this device; run `hirz init` first";
@@ -25,6 +25,7 @@ const NO_VAULT: &str = "no hirz vault on this device; run `hirz init` first";
 pub struct Notice {
     desktop: bool,
     last: Option<Instant>,
+    removed_told: bool,
 }
 
 impl Notice {
@@ -33,6 +34,18 @@ impl Notice {
         Notice {
             desktop,
             last: None,
+            removed_told: false,
+        }
+    }
+
+    /// Tells the user once per run that this device was removed from the vault.
+    fn removed(&mut self) {
+        if core::mem::replace(&mut self.removed_told, true) {
+            return;
+        }
+        log(format_args!("{REMOVED_NOTICE}"));
+        if self.desktop {
+            notify_desktop(&format!("hirz: {REMOVED_NOTICE}."));
         }
     }
 
@@ -47,21 +60,18 @@ impl Notice {
         self.last = Some(now);
         log(format_args!("{NO_VAULT}"));
         if self.desktop {
-            notify_desktop();
+            notify_desktop("hirz: no passkey vault on this device yet. Run \"hirz init\" first.");
         }
     }
 }
 
 /// Best effort; zenity comes from a root-owned system directory like every hirz prompt.
-fn notify_desktop() {
+fn notify_desktop(text: &str) {
     let Some(zenity) = hirz_uv::runner::resolve_tool("zenity") else {
         return;
     };
     let child = std::process::Command::new(zenity)
-        .args([
-            "--notification",
-            "--text=hirz: no passkey vault on this device yet. Run \"hirz init\" first.",
-        ])
+        .args(["--notification".to_owned(), format!("--text={text}")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -92,7 +102,11 @@ impl<A: Approver> VaultAuthenticator<A> {
             VaultStatus::Ready => Ok(()),
             VaultStatus::Missing => {
                 self.notice.no_vault();
-                // OPERATION_DENIED: the platform tells the user the key refused.
+                // NOT_ALLOWED: the platform ends the ceremony and the user sees that the key refused.
+                Err(CoreError::Approval(ApprovalError::Unavailable))
+            }
+            VaultStatus::Removed => {
+                self.notice.removed();
                 Err(CoreError::Approval(ApprovalError::Unavailable))
             }
             VaultStatus::Broken(why) => {

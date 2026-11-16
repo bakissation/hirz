@@ -2,30 +2,37 @@
 //! result. Everything outside the process goes through [`CommandRunner`].
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use hirz_core::{
     Approval, ApprovalContext, ApprovalError, Approver, Ceremony, PairingApprovalContext,
+    RemovalApprovalContext,
 };
 use hirz_crypto::Secret;
 
 use crate::config::{self, Config, Paths, UvMethod};
 use crate::display::{self, Step};
-use crate::fprint::{self, VerifyOutcome};
+use crate::fprint::{self, Retry, VerifyOutcome};
 use crate::pin::{PinError, PinStore};
 use crate::polkit::{self, PkcheckOutcome};
 use crate::ratelimit::RateLimiter;
-use crate::runner::{CommandRunner, CommandSpec, EnvPolicy, RunResult, SystemRunner, Tool};
+use crate::runner::{CommandRunner, CommandSpec, EnvPolicy, Race, RunResult, SystemRunner, Tool};
 
 /// Extra time a zenity child gets past its own `--timeout` before hirz kills it.
 const DIALOG_GRACE: Duration = Duration::from_secs(2);
 const FPRINTD_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const FINGER_ATTEMPTS: u32 = 3;
+/// Scans the reader could not read (too short, off centre, ...) do not count as attempts,
+/// up to this many per request.
+const FINGER_RESCANS: u32 = 5;
 const PIN_PROMPTS: u32 = 5;
 /// Rate limit key for pairing prompts. Not a valid RP id, so it never shares a site's budget.
 const PAIRING_RATE_KEY: &str = "hirz pairing";
+const REMOVAL_RATE_KEY: &str = "hirz removal";
 const PAIRING_WORDS: usize = 4;
+const NO_FINGERS_HINT: &str = "No fingerprint is set up for your user. Set up your fingerprint in Settings > Users, or run fprintd-enroll.";
 const ZENITY_MISSING: &str =
     "zenity was not found in /usr/bin or /bin; install zenity to approve passkey requests";
 
@@ -142,14 +149,133 @@ fn shape(out: &[u8]) -> String {
         .collect()
 }
 
-fn outcome(r: &Result<(), ApprovalError>) -> &'static str {
+fn outcome(r: &Result<(), Fail>) -> &'static str {
     match r {
         Ok(()) => "approved",
-        Err(ApprovalError::Denied) => "refused or cancelled",
-        Err(ApprovalError::Timeout) => "timed out",
-        Err(ApprovalError::Unavailable) => "not available, trying the next method",
-        Err(ApprovalError::Locked) => "locked",
-        Err(ApprovalError::Internal(_)) => "error",
+        Err(Fail::Next { chosen: true, .. }) => "you chose the next method",
+        Err(Fail::Next { .. }) => "not available, trying the next method",
+        Err(Fail::Stop(ApprovalError::Denied)) => "refused or cancelled",
+        Err(Fail::Stop(ApprovalError::Timeout)) => "timed out",
+        Err(Fail::Stop(ApprovalError::Locked)) => "locked",
+        Err(Fail::Stop(_)) => "error",
+    }
+}
+
+/// Why a method did not approve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Fail {
+    /// Ends the request.
+    Stop(ApprovalError),
+    /// The next available method is tried. `otherwise` is the result when none is left,
+    /// `note` is shown in the next method's window, and `chosen` is set when the user asked
+    /// for the next method (so its context window is not shown again).
+    Next {
+        otherwise: ApprovalError,
+        note: Option<String>,
+        chosen: bool,
+    },
+}
+
+impl Fail {
+    fn next(otherwise: ApprovalError, note: Option<String>) -> Fail {
+        Fail::Next {
+            otherwise,
+            note,
+            chosen: false,
+        }
+    }
+}
+
+impl From<ApprovalError> for Fail {
+    fn from(e: ApprovalError) -> Fail {
+        match e {
+            ApprovalError::Unavailable | ApprovalError::Locked => Fail::next(e, None),
+            other => Fail::Stop(other),
+        }
+    }
+}
+
+/// Runs `perform` for each method `next` yields until one approves. The error when none is
+/// left is the last meaningful reason (a refusal or a lock) rather than "unavailable".
+fn run_methods<M: Copy>(
+    mut next: impl FnMut() -> Option<M>,
+    mut perform: impl FnMut(M, Option<&str>, bool) -> Result<(), Fail>,
+) -> Result<M, ApprovalError> {
+    let mut method = next().ok_or(ApprovalError::Unavailable)?;
+    let mut note: Option<String> = None;
+    let mut chosen = false;
+    let mut last = ApprovalError::Unavailable;
+    loop {
+        match perform(method, note.as_deref(), chosen) {
+            Ok(()) => return Ok(method),
+            Err(Fail::Stop(e)) => return Err(e),
+            Err(Fail::Next {
+                otherwise,
+                note: n,
+                chosen: c,
+            }) => {
+                if otherwise != ApprovalError::Unavailable {
+                    last = otherwise;
+                }
+                note = n;
+                chosen = c;
+            }
+        }
+        method = match next() {
+            Some(m) => m,
+            None => return Err(last),
+        };
+    }
+}
+
+/// A device change the user confirms with user verification.
+#[derive(Clone, Copy)]
+enum DeviceChange<'a> {
+    Pair(&'a PairingApprovalContext<'a>),
+    Remove(&'a RemovalApprovalContext<'a>),
+}
+
+impl DeviceChange<'_> {
+    fn rate_key(self) -> &'static str {
+        match self {
+            DeviceChange::Pair(_) => PAIRING_RATE_KEY,
+            DeviceChange::Remove(_) => REMOVAL_RATE_KEY,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            DeviceChange::Pair(_) => display::PAIRING_TITLE,
+            DeviceChange::Remove(_) => display::REMOVAL_TITLE,
+        }
+    }
+
+    fn context(self) -> String {
+        match self {
+            DeviceChange::Pair(c) => display::pairing_context(c),
+            DeviceChange::Remove(c) => display::removal_context(c),
+        }
+    }
+
+    fn question(self, now: u64, step: Step, notice: Option<&str>, rem: Duration) -> Vec<String> {
+        match self {
+            DeviceChange::Pair(c) => display::pairing_question_args(c, now, step, notice, rem),
+            DeviceChange::Remove(c) => display::removal_question_args(c, step, notice, rem),
+        }
+    }
+
+    fn pin(self, notice: Option<&str>, rem: Duration) -> Vec<String> {
+        match self {
+            DeviceChange::Pair(c) => display::pairing_pin_args(c, notice, rem),
+            DeviceChange::Remove(c) => display::removal_pin_args(c, notice, rem),
+        }
+    }
+
+    fn what(self) -> &'static str {
+        match self {
+            DeviceChange::Pair(_) => "pairing approval",
+            DeviceChange::Remove(_) => "device removal",
+        }
     }
 }
 
@@ -195,6 +321,7 @@ pub struct HirzApprover<R: CommandRunner = SystemRunner> {
     pins: PinStore,
     limiter: Mutex<RateLimiter>,
     busy: Mutex<()>,
+    no_fingers_hinted: AtomicBool,
 }
 
 impl HirzApprover<SystemRunner> {
@@ -213,6 +340,7 @@ impl<R: CommandRunner> HirzApprover<R> {
             pins: PinStore::new(paths.state_dir.clone()),
             limiter: Mutex::new(RateLimiter::new()),
             busy: Mutex::new(()),
+            no_fingers_hinted: AtomicBool::new(false),
         }
     }
 
@@ -257,11 +385,18 @@ impl<R: CommandRunner> HirzApprover<R> {
             .collect())
     }
 
+    /// The hint about enrolling a finger, the first time it applies.
+    fn no_fingers_hint(&self) -> Option<String> {
+        if self.no_fingers_hinted.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        diag(NO_FINGERS_HINT);
+        Some(NO_FINGERS_HINT.to_owned())
+    }
+
     fn uv_available(&self, m: UvMethod, deadline: &Deadline) -> bool {
         match m {
-            UvMethod::Polkit => {
-                self.runner.tool_available(Tool::Pkcheck) && self.runner.polkit_action_installed()
-            }
+            UvMethod::Polkit => self.polkit_ready(),
             UvMethod::Fingerprint => {
                 if !self.runner.tool_available(Tool::FprintdVerify) {
                     return false;
@@ -277,7 +412,11 @@ impl<R: CommandRunner> HirzApprover<R> {
                     timeout: remaining.min(FPRINTD_LIST_TIMEOUT),
                 }) {
                     RunResult::Exited { code, stdout, .. } => {
-                        fprint::has_enrolled_fingers(code, &stdout)
+                        let enrolled = fprint::has_enrolled_fingers(code, &stdout);
+                        if !enrolled && fprint::says_no_fingers(&stdout) {
+                            let _ = self.no_fingers_hint();
+                        }
+                        enrolled
                     }
                     _ => false,
                 }
@@ -286,16 +425,31 @@ impl<R: CommandRunner> HirzApprover<R> {
         }
     }
 
-    fn next_available(
-        &self,
-        queue: &mut impl Iterator<Item = Method>,
-        ctx: &ApprovalContext<'_>,
-        deadline: &Deadline,
-    ) -> Option<Method> {
-        queue.find(|m| match m {
-            Method::ClickToAllow => !ctx.uv_required,
-            Method::Uv(u) => self.uv_available(*u, deadline),
+    fn polkit_ready(&self) -> bool {
+        self.runner.tool_available(Tool::Pkcheck) && self.runner.polkit_action_installed()
+    }
+
+    /// The method a "use ... instead" button would switch to: the first of `rest` that is
+    /// usable without running anything. Fingerprint never follows itself.
+    fn fallback_after(&self, rest: &[UvMethod]) -> Option<UvMethod> {
+        rest.iter().copied().find(|m| match m {
+            UvMethod::Polkit => self.polkit_ready(),
+            UvMethod::Pin => self.pins.is_set(),
+            UvMethod::Fingerprint => false,
         })
+    }
+
+    /// Adds the hirz window icon, when one is installed, right after the dialog type.
+    fn zenity_args(&self, mut args: Vec<String>) -> Vec<String> {
+        if let Some(icon) = self
+            .runner
+            .window_icon()
+            .and_then(|p| p.to_str().map(str::to_owned))
+        {
+            let at = usize::from(!args.is_empty());
+            args.insert(at, format!("--window-icon={icon}"));
+        }
+        args
     }
 
     fn dialog(
@@ -306,7 +460,7 @@ impl<R: CommandRunner> HirzApprover<R> {
         let remaining = deadline.remaining()?;
         map_dialog(self.runner.run(&CommandSpec {
             tool: Tool::Zenity,
-            args: build(remaining),
+            args: self.zenity_args(build(remaining)),
             env: EnvPolicy::Desktop,
             timeout: remaining.saturating_add(DIALOG_GRACE),
         }))
@@ -317,7 +471,6 @@ impl<R: CommandRunner> HirzApprover<R> {
     fn select(
         &self,
         ctx: &ApprovalContext<'_>,
-        step: Step,
         deadline: &Deadline,
     ) -> Result<(Option<usize>, bool), ApprovalError> {
         match (ctx.ceremony, ctx.candidates.len()) {
@@ -325,9 +478,8 @@ impl<R: CommandRunner> HirzApprover<R> {
             (Ceremony::Get, 0) => Err(ApprovalError::Internal("no candidate accounts".into())),
             (Ceremony::Get, 1) => Ok((Some(0), false)),
             (Ceremony::Get, n) => {
-                let out = self.dialog(deadline, |rem| {
-                    display::list_args(ctx, ctx.candidates, step, rem)
-                })?;
+                let out =
+                    self.dialog(deadline, |rem| display::list_args(ctx, ctx.candidates, rem))?;
                 let idx = display::parse_list_selection(&out, n).ok_or_else(|| {
                     diag(&format!(
                         "account list returned an unreadable selection ({} bytes, shape {:?})",
@@ -346,108 +498,194 @@ impl<R: CommandRunner> HirzApprover<R> {
         ctx: &ApprovalContext<'_>,
         selected: Option<usize>,
         step: Step,
+        note: Option<&str>,
         shown: &mut Option<Step>,
         deadline: &Deadline,
     ) -> Result<(), ApprovalError> {
-        if *shown == Some(step) {
+        if *shown == Some(step) && note.is_none() {
             return Ok(());
         }
         self.dialog(deadline, |rem| {
-            display::question_args(ctx, selected, step, rem)
+            display::question_args(ctx, selected, step, note, rem)
         })?;
         *shown = Some(step);
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn perform(
         &self,
         method: Method,
         ctx: &ApprovalContext<'_>,
         selected: Option<usize>,
+        fallback: Option<UvMethod>,
+        note: Option<&str>,
+        chosen: bool,
         shown: &mut Option<Step>,
         deadline: &Deadline,
-    ) -> Result<(), ApprovalError> {
-        match method {
+    ) -> Result<(), Fail> {
+        let r = match method {
             Method::ClickToAllow => {
                 if ctx.uv_required {
-                    return Err(ApprovalError::Unavailable);
+                    return Err(ApprovalError::Unavailable.into());
                 }
-                self.ensure_context(ctx, selected, Step::ClickToAllow, shown, deadline)
+                return Ok(self.ensure_context(
+                    ctx,
+                    selected,
+                    Step::ClickToAllow,
+                    note,
+                    shown,
+                    deadline,
+                )?);
             }
             Method::Uv(UvMethod::Polkit) => {
-                self.ensure_context(ctx, selected, method.step(), shown, deadline)?;
+                if chosen && shown.is_some() {
+                    *shown = Some(method.step());
+                }
+                self.ensure_context(ctx, selected, method.step(), note, shown, deadline)?;
                 diag("asking for your password (polkit)");
-                let r = self.run_polkit(deadline);
-                diag(&format!("polkit: {}", outcome(&r)));
-                r
+                self.run_polkit(deadline)
             }
             Method::Uv(UvMethod::Fingerprint) => {
-                self.ensure_context(ctx, selected, method.step(), shown, deadline)?;
-                diag("waiting for your fingerprint");
-                let r = self.run_fingerprint(deadline);
+                *shown = Some(method.step());
+                let r = self.run_fingerprint(deadline, fallback, note, |notice, fb, rem| {
+                    display::finger_args(
+                        &display::title(ctx),
+                        &display::context_text(ctx, selected),
+                        notice,
+                        fb,
+                        rem,
+                    )
+                });
                 diag(&format!("fingerprint: {}", outcome(&r)));
-                r
+                return r;
             }
             Method::Uv(UvMethod::Pin) => {
-                let r = self.run_pin(deadline, |notice, rem| {
-                    display::pin_args(ctx, selected, notice, rem)
-                });
                 *shown = Some(method.step());
-                r
+                self.run_pin(deadline, note, |notice, rem| {
+                    display::pin_args(ctx, selected, notice, rem)
+                })
             }
-        }
+        };
+        diag(&format!("{:?}: {}", method, outcome(&r)));
+        r
     }
 
-    fn run_polkit(&self, deadline: &Deadline) -> Result<(), ApprovalError> {
+    fn run_polkit(&self, deadline: &Deadline) -> Result<(), Fail> {
         let id = self
             .runner
             .process_identity()
             .ok_or_else(|| ApprovalError::Internal("cannot read the process identity".into()))?;
-        map_pkcheck(self.runner.run(&CommandSpec {
+        Ok(map_pkcheck(self.runner.run(&CommandSpec {
             tool: Tool::Pkcheck,
             args: polkit::pkcheck_args(&id),
             env: EnvPolicy::System,
             timeout: deadline.remaining()?,
-        }))
+        }))?)
     }
 
-    fn run_fingerprint(&self, deadline: &Deadline) -> Result<(), ApprovalError> {
-        for _ in 0..FINGER_ATTEMPTS {
-            let r = self.runner.run(&CommandSpec {
+    /// The fingerprint window ended before `fprintd-verify`.
+    fn finger_window_closed(r: RunResult, fallback: Option<UvMethod>) -> Fail {
+        match map_dialog(r) {
+            Ok(_) if fallback.is_some() => Fail::Next {
+                otherwise: ApprovalError::Unavailable,
+                note: None,
+                chosen: true,
+            },
+            // Without a next method the window's only button is Cancel.
+            Ok(_) => Fail::Stop(ApprovalError::Denied),
+            Err(e) => e.into(),
+        }
+    }
+
+    /// Runs `fprintd-verify` while a window shows the context and "Touch the fingerprint
+    /// reader". Cancel stops the request; the "use ... instead" button, too many misses or a
+    /// reader error move on to the next method.
+    fn run_fingerprint(
+        &self,
+        deadline: &Deadline,
+        fallback: Option<UvMethod>,
+        note: Option<&str>,
+        window: impl Fn(Option<&str>, Option<UvMethod>, Duration) -> Vec<String>,
+    ) -> Result<(), Fail> {
+        let mut misses = 0u32;
+        let mut rescans = 0u32;
+        let mut notice: Option<String> = note.map(str::to_owned);
+        loop {
+            let remaining = deadline.remaining()?;
+            let verify = CommandSpec {
                 tool: Tool::FprintdVerify,
                 args: Vec::new(),
                 env: EnvPolicy::System,
-                timeout: deadline.remaining()?,
-            });
-            match r {
-                RunResult::Exited { code, stdout, .. } => {
-                    match fprint::classify_verify(code, &stdout) {
-                        VerifyOutcome::Match => return Ok(()),
-                        VerifyOutcome::NoMatch => {}
-                        VerifyOutcome::Unavailable => {
-                            diag(
-                                "fingerprint verification unavailable (no reader, no enrolled finger or device error)",
-                            );
-                            return Err(ApprovalError::Unavailable);
-                        }
-                    }
+                timeout: remaining,
+            };
+            let shown = CommandSpec {
+                tool: Tool::Zenity,
+                args: self.zenity_args(window(notice.as_deref(), fallback, remaining)),
+                env: EnvPolicy::Desktop,
+                timeout: remaining.saturating_add(DIALOG_GRACE),
+            };
+            diag("waiting for your fingerprint");
+            let (code, stdout) = match self.runner.run_with_dialog(&verify, &shown) {
+                Race::Dialog(r) => return Err(Self::finger_window_closed(r, fallback)),
+                Race::Main(RunResult::Exited { code, stdout, .. }) => (code, stdout),
+                Race::Main(RunResult::TimedOut) => return Err(Fail::Stop(ApprovalError::Timeout)),
+                Race::Main(RunResult::NotFound) => return Err(ApprovalError::Unavailable.into()),
+                Race::Main(RunResult::Failed(m)) => {
+                    return Err(Fail::Stop(ApprovalError::Internal(format!(
+                        "fprintd-verify: {m}"
+                    ))));
                 }
-                RunResult::TimedOut => return Err(ApprovalError::Timeout),
-                RunResult::NotFound => return Err(ApprovalError::Unavailable),
-                RunResult::Failed(m) => {
-                    return Err(ApprovalError::Internal(format!("fprintd-verify: {m}")));
+            };
+            match fprint::classify_verify(code, &stdout) {
+                VerifyOutcome::Match => return Ok(()),
+                VerifyOutcome::Retry(Retry::NoMatch) => {
+                    misses = misses.saturating_add(1);
+                    let left = FINGER_ATTEMPTS.saturating_sub(misses);
+                    if left == 0 {
+                        return Err(Fail::next(
+                            ApprovalError::Denied,
+                            Some("Your fingerprint was not recognised.".to_owned()),
+                        ));
+                    }
+                    notice = Some(format!("Not recognised. Try again ({left} left)."));
+                }
+                VerifyOutcome::Retry(r) => {
+                    rescans = rescans.saturating_add(1);
+                    if rescans > FINGER_RESCANS {
+                        return Err(Fail::next(
+                            ApprovalError::Denied,
+                            Some("The fingerprint reader could not read your finger.".to_owned()),
+                        ));
+                    }
+                    notice = Some(format!("{} Try again.", r.message()));
+                }
+                VerifyOutcome::NoFingers => {
+                    return Err(Fail::next(
+                        ApprovalError::Unavailable,
+                        self.no_fingers_hint(),
+                    ));
+                }
+                VerifyOutcome::ReaderError | VerifyOutcome::Unavailable => {
+                    diag(
+                        "fingerprint verification unavailable (no reader, no enrolled finger or device error)",
+                    );
+                    return Err(Fail::next(
+                        ApprovalError::Unavailable,
+                        Some("The fingerprint reader is not working right now.".to_owned()),
+                    ));
                 }
             }
         }
-        Err(ApprovalError::Denied)
     }
 
     fn run_pin(
         &self,
         deadline: &Deadline,
+        first_notice: Option<&str>,
         build: impl Fn(Option<&str>, Duration) -> Vec<String>,
-    ) -> Result<(), ApprovalError> {
-        let mut notice: Option<String> = None;
+    ) -> Result<(), Fail> {
+        let mut notice: Option<String> = first_notice.map(str::to_owned);
         for _ in 0..PIN_PROMPTS {
             let out = self.dialog(deadline, |rem| build(notice.as_deref(), rem))?;
             match self.pins.verify(display::strip_entry_newline(&out)) {
@@ -456,7 +694,7 @@ impl<R: CommandRunner> HirzApprover<R> {
                     diag(
                         "the hirz PIN is locked after too many wrong attempts; reset it with the hirz CLI",
                     );
-                    return Err(ApprovalError::Locked);
+                    return Err(ApprovalError::Locked.into());
                 }
                 Err(PinError::Wrong { remaining }) => {
                     notice = Some(format!(
@@ -468,21 +706,25 @@ impl<R: CommandRunner> HirzApprover<R> {
                         "A hirz PIN has at least 4 characters and at most 63 bytes.".to_owned(),
                     );
                 }
-                Err(PinError::NotSet) => return Err(ApprovalError::Unavailable),
+                Err(PinError::NotSet) => return Err(ApprovalError::Unavailable.into()),
                 Err(PinError::Corrupt) => {
-                    return Err(ApprovalError::Internal(
+                    return Err(Fail::Stop(ApprovalError::Internal(
                         "the PIN verifier file is damaged".into(),
-                    ));
+                    )));
                 }
                 Err(PinError::Io(kind)) => {
-                    return Err(ApprovalError::Internal(format!("PIN verifier: {kind}")));
+                    return Err(Fail::Stop(ApprovalError::Internal(format!(
+                        "PIN verifier: {kind}"
+                    ))));
                 }
                 Err(PinError::Crypto | PinError::AlreadySet) => {
-                    return Err(ApprovalError::Internal("PIN check failed".into()));
+                    return Err(Fail::Stop(ApprovalError::Internal(
+                        "PIN check failed".into(),
+                    )));
                 }
             }
         }
-        Err(ApprovalError::Denied)
+        Err(Fail::Stop(ApprovalError::Denied))
     }
 
     fn take_busy(&self) -> Result<std::sync::MutexGuard<'_, ()>, ApprovalError> {
@@ -500,50 +742,85 @@ impl<R: CommandRunner> HirzApprover<R> {
         }
     }
 
-    fn next_uv(
-        &self,
-        queue: &mut impl Iterator<Item = UvMethod>,
-        deadline: &Deadline,
-    ) -> Option<UvMethod> {
-        queue.find(|m| self.uv_available(*m, deadline))
-    }
-
-    /// One UV method for pairing. The question with the words is shown before the method runs,
-    /// and again when the fingerprint reader is next, so the hint matches what to do.
-    fn perform_pairing(
+    /// One UV method for a device change. The question with the device (and for pairing the
+    /// words) is shown once, before the first method runs, and again before the password
+    /// when an earlier method left a note.
+    #[allow(clippy::too_many_arguments)]
+    fn perform_device(
         &self,
         method: UvMethod,
-        ctx: &PairingApprovalContext<'_>,
+        change: DeviceChange<'_>,
         now: u64,
-        shown: &mut Option<Step>,
+        fallback: Option<UvMethod>,
+        note: Option<&str>,
+        chosen: bool,
+        shown: &mut bool,
         deadline: &Deadline,
-    ) -> Result<(), ApprovalError> {
+    ) -> Result<(), Fail> {
         let step = Step::Uv(method);
-        let reshow = match method {
-            UvMethod::Fingerprint => *shown != Some(step),
-            UvMethod::Polkit | UvMethod::Pin => shown.is_none(),
-        };
-        if reshow {
-            self.dialog(deadline, |rem| {
-                display::pairing_question_args(ctx, now, step, rem)
-            })?;
-            *shown = Some(step);
+        let question = !*shown || (method == UvMethod::Polkit && note.is_some() && !chosen);
+        if question {
+            self.dialog(deadline, |rem| change.question(now, step, note, rem))?;
+            *shown = true;
         }
+        let note = if question { None } else { note };
         let r = match method {
             UvMethod::Polkit => {
                 diag("asking for your password (polkit)");
                 self.run_polkit(deadline)
             }
             UvMethod::Fingerprint => {
-                diag("waiting for your fingerprint");
-                self.run_fingerprint(deadline)
+                let context = change.context();
+                self.run_fingerprint(deadline, fallback, note, |notice, fb, rem| {
+                    display::finger_args(change.title(), &context, notice, fb, rem)
+                })
             }
-            UvMethod::Pin => self.run_pin(deadline, |notice, rem| {
-                display::pairing_pin_args(ctx, notice, rem)
-            }),
+            UvMethod::Pin => self.run_pin(deadline, note, |notice, rem| change.pin(notice, rem)),
         };
-        diag(&format!("pairing approval: {}", outcome(&r)));
+        diag(&format!("{}: {}", change.what(), outcome(&r)));
         r
+    }
+
+    /// Only the configured UV methods are tried; click-to-allow never confirms a device
+    /// change, whatever the config says. Nothing is shown when no UV method is available.
+    fn confirm_device(&self, change: DeviceChange<'_>) -> Result<Approval, ApprovalError> {
+        let _busy = self.take_busy()?;
+        let config = self.config()?;
+        if !self.rate_allowed(change.rate_key(), config.prompts_per_minute) {
+            diag("too many device prompts; try again in a minute");
+            return Err(ApprovalError::Denied);
+        }
+        if !self.runner.tool_available(Tool::Zenity) {
+            diag(ZENITY_MISSING);
+            return Err(ApprovalError::Unavailable);
+        }
+        let deadline = Deadline::start(config.timeout);
+        let now = unix_now();
+        let methods = config.methods;
+        let mut pos = 0usize;
+        let mut shown = false;
+        run_methods(
+            || {
+                while let Some(m) = methods.get(pos).copied() {
+                    pos = pos.saturating_add(1);
+                    if self.uv_available(m, &deadline) {
+                        return Some((m, pos));
+                    }
+                }
+                None
+            },
+            |(m, after), note, chosen| {
+                let fallback = self.fallback_after(methods.get(after..).unwrap_or(&[]));
+                self.perform_device(
+                    m, change, now, fallback, note, chosen, &mut shown, &deadline,
+                )
+            },
+        )?;
+        Ok(Approval {
+            user_present: true,
+            user_verified: true,
+            selected: None,
+        })
     }
 }
 
@@ -567,32 +844,58 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
             return Err(ApprovalError::Unavailable);
         }
         let deadline = Deadline::start(config.timeout);
-        let mut queue = plan_methods(&config, ctx)?.into_iter();
-        let mut method = self
-            .next_available(&mut queue, ctx, &deadline)
+        let plan = plan_methods(&config, ctx)?;
+        let available = |m: &Method| match m {
+            Method::ClickToAllow => !ctx.uv_required,
+            Method::Uv(u) => self.uv_available(*u, &deadline),
+        };
+        let first = plan
+            .iter()
+            .position(available)
             .ok_or(ApprovalError::Unavailable)?;
-        let (selected, list_shown) = self.select(ctx, method.step(), &deadline)?;
-        let mut shown = list_shown.then_some(method.step());
-        let mut locked = false;
-        loop {
-            match self.perform(method, ctx, selected, &mut shown, &deadline) {
-                Ok(()) => {
-                    return Ok(Approval {
-                        user_present: true,
-                        user_verified: matches!(method, Method::Uv(_)),
-                        selected,
-                    });
+        let (selected, list_shown) = self.select(ctx, &deadline)?;
+        // The list showed the site, so the first method needs no second context window.
+        let mut shown = if list_shown {
+            plan.get(first).map(|m| m.step())
+        } else {
+            None
+        };
+        let mut pos = first.saturating_add(1);
+        let mut first_pending = true;
+        let method = run_methods(
+            || {
+                if core::mem::take(&mut first_pending) {
+                    return plan.get(first).map(|m| (*m, pos));
                 }
-                Err(ApprovalError::Unavailable) => {}
-                Err(ApprovalError::Locked) => locked = true,
-                Err(e) => return Err(e),
-            }
-            method = match self.next_available(&mut queue, ctx, &deadline) {
-                Some(m) => m,
-                None if locked => return Err(ApprovalError::Locked),
-                None => return Err(ApprovalError::Unavailable),
-            };
-        }
+                while let Some(m) = plan.get(pos).copied() {
+                    pos = pos.saturating_add(1);
+                    if available(&m) {
+                        return Some((m, pos));
+                    }
+                }
+                None
+            },
+            |(m, after), note, chosen| {
+                let rest: Vec<UvMethod> = plan
+                    .get(after..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|x| match x {
+                        Method::Uv(u) => Some(*u),
+                        Method::ClickToAllow => None,
+                    })
+                    .collect();
+                let fallback = self.fallback_after(&rest);
+                self.perform(
+                    m, ctx, selected, fallback, note, chosen, &mut shown, &deadline,
+                )
+            },
+        )?;
+        Ok(Approval {
+            user_present: true,
+            user_verified: matches!(method.0, Method::Uv(_)),
+            selected,
+        })
     }
 
     fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
@@ -611,51 +914,17 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
         })
     }
 
-    /// Only the configured UV methods are tried; click-to-allow is never a way to approve a
-    /// device, whatever the config says. Nothing is shown when no UV method is available.
     fn confirm_pairing(&self, ctx: &PairingApprovalContext<'_>) -> Result<Approval, ApprovalError> {
         if ctx.words.len() != PAIRING_WORDS || ctx.words.iter().any(|w| w.is_empty()) {
             return Err(ApprovalError::Internal(
                 "pairing approval needs four words".into(),
             ));
         }
-        let _busy = self.take_busy()?;
-        let config = self.config()?;
-        if !self.rate_allowed(PAIRING_RATE_KEY, config.prompts_per_minute) {
-            diag("too many pairing prompts; try again in a minute");
-            return Err(ApprovalError::Denied);
-        }
-        if !self.runner.tool_available(Tool::Zenity) {
-            diag(ZENITY_MISSING);
-            return Err(ApprovalError::Unavailable);
-        }
-        let deadline = Deadline::start(config.timeout);
-        let now = unix_now();
-        let mut queue = config.methods.iter().copied();
-        let mut method = self
-            .next_uv(&mut queue, &deadline)
-            .ok_or(ApprovalError::Unavailable)?;
-        let mut shown = None;
-        let mut locked = false;
-        loop {
-            match self.perform_pairing(method, ctx, now, &mut shown, &deadline) {
-                Ok(()) => {
-                    return Ok(Approval {
-                        user_present: true,
-                        user_verified: true,
-                        selected: None,
-                    });
-                }
-                Err(ApprovalError::Unavailable) => {}
-                Err(ApprovalError::Locked) => locked = true,
-                Err(e) => return Err(e),
-            }
-            method = match self.next_uv(&mut queue, &deadline) {
-                Some(m) => m,
-                None if locked => return Err(ApprovalError::Locked),
-                None => return Err(ApprovalError::Unavailable),
-            };
-        }
+        self.confirm_device(DeviceChange::Pair(ctx))
+    }
+
+    fn confirm_removal(&self, ctx: &RemovalApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        self.confirm_device(DeviceChange::Remove(ctx))
     }
 }
 
@@ -678,6 +947,7 @@ mod tests {
     struct Fake {
         tools: Vec<Tool>,
         polkit_installed: bool,
+        icon: Option<PathBuf>,
         script: Mutex<VecDeque<(Tool, RunResult)>>,
         calls: Mutex<Vec<CommandSpec>>,
     }
@@ -687,6 +957,7 @@ mod tests {
             Fake {
                 tools: tools.to_vec(),
                 polkit_installed: true,
+                icon: None,
                 script: Mutex::new(script.into()),
                 calls: Mutex::new(Vec::new()),
             }
@@ -710,6 +981,29 @@ mod tests {
                 .unwrap_or_else(|| panic!("unexpected call {spec:?}"));
             assert_eq!(tool, spec.tool, "{spec:?}");
             r
+        }
+        /// One script entry decides the race: the main tool's result, or zenity's.
+        fn run_with_dialog(&self, main: &CommandSpec, dialog: &CommandSpec) -> Race {
+            {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(main.clone());
+                calls.push(dialog.clone());
+            }
+            let (tool, r) = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| panic!("unexpected race {main:?} / {dialog:?}"));
+            if tool == main.tool {
+                Race::Main(r)
+            } else {
+                assert_eq!(tool, dialog.tool, "{dialog:?}");
+                Race::Dialog(r)
+            }
+        }
+        fn window_icon(&self) -> Option<PathBuf> {
+            self.icon.clone()
         }
         fn tool_available(&self, tool: Tool) -> bool {
             self.tools.contains(&tool)
@@ -955,10 +1249,13 @@ mod tests {
                 Method::ClickToAllow,
                 &get(&c, true),
                 Some(0),
+                None,
+                None,
+                false,
                 &mut shown,
                 &deadline
             ),
-            Err(ApprovalError::Unavailable)
+            Err(Fail::next(ApprovalError::Unavailable, None))
         );
     }
 
@@ -1077,7 +1374,6 @@ mod tests {
                     (Tool::Zenity, exit(0, "")),
                     (Tool::Pkcheck, exit(127, "")),
                     (Tool::FprintdList, exit(0, ENROLLED)),
-                    (Tool::Zenity, exit(0, "")),
                     (Tool::FprintdVerify, exit(0, MATCH)),
                 ],
             ),
@@ -1088,11 +1384,14 @@ mod tests {
         assert!(r.user_verified);
         let cl = calls(&a);
         assert_eq!(cl[2].args, ["alice"]);
+        assert_eq!(cl[3].tool, Tool::FprintdVerify);
+        assert_eq!(cl[4].tool, Tool::Zenity);
+        assert_eq!(cl[4].args[0], "--info", "no method left to switch to");
         assert!(
-            cl[3]
+            cl[4]
                 .args
                 .iter()
-                .any(|x| x.contains("touch the fingerprint reader"))
+                .any(|x| x.contains("Touch the fingerprint reader.") && x.contains("example.com"))
         );
     }
 
@@ -1218,8 +1517,11 @@ mod tests {
                 ALL,
                 vec![
                     (Tool::FprintdList, exit(0, ENROLLED)),
-                    (Tool::Zenity, exit(0, "")),
                     (Tool::FprintdVerify, exit(1, NO_MATCH)),
+                    (
+                        Tool::FprintdVerify,
+                        exit(1, "Verify result: verify-swipe-too-short (done)\n"),
+                    ),
                     (Tool::FprintdVerify, exit(0, MATCH)),
                 ],
             ),
@@ -1227,16 +1529,28 @@ mod tests {
             &d,
         );
         assert!(a.approve(&get(&c, true)).unwrap().user_verified);
+        let windows: Vec<String> = calls(&a)
+            .iter()
+            .filter(|c| c.tool == Tool::Zenity)
+            .map(|c| {
+                c.args
+                    .iter()
+                    .find(|x| x.starts_with("--text="))
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        assert_eq!(windows.len(), 3);
+        assert!(windows[0].ends_with("\nTouch the fingerprint reader."));
+        assert!(windows[1].contains("Not recognised. Try again (2 left).\nTouch"));
+        assert!(windows[2].contains("The swipe was too short. Try again.\nTouch"));
     }
 
     #[test]
     fn fingerprint_three_misses_is_denied() {
         let d = TempDir::new("finger-miss");
         let c = one();
-        let mut script = vec![
-            (Tool::FprintdList, exit(0, ENROLLED)),
-            (Tool::Zenity, exit(0, "")),
-        ];
+        let mut script = vec![(Tool::FprintdList, exit(0, ENROLLED))];
         script.extend((0..3).map(|_| (Tool::FprintdVerify, exit(1, NO_MATCH))));
         let a = approver(Fake::new(ALL, script), cfg(&[UvMethod::Fingerprint]), &d);
         assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
@@ -1251,7 +1565,6 @@ mod tests {
                 ALL,
                 vec![
                     (Tool::FprintdList, exit(0, ENROLLED)),
-                    (Tool::Zenity, exit(0, "")),
                     (
                         Tool::FprintdVerify,
                         exit(0, "Verify result: verify-match (not done)\n"),
@@ -1273,7 +1586,6 @@ mod tests {
                 ALL,
                 vec![
                     (Tool::FprintdList, exit(0, ENROLLED)),
-                    (Tool::Zenity, exit(0, "")),
                     (Tool::FprintdVerify, RunResult::TimedOut),
                 ],
             ),
@@ -1568,7 +1880,6 @@ mod tests {
                     (Tool::Zenity, exit(0, "")),
                     (Tool::Pkcheck, exit(2, "")),
                     (Tool::FprintdList, exit(0, ENROLLED)),
-                    (Tool::Zenity, exit(0, "")),
                     (Tool::FprintdVerify, exit(0, MATCH)),
                 ],
             ),
@@ -1577,11 +1888,14 @@ mod tests {
         );
         assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
         let cl = calls(&a);
+        assert_eq!(cl.len(), 5);
         assert!(
-            cl[3]
+            cl[4]
                 .args
                 .iter()
-                .any(|x| x.contains("touch the fingerprint reader") && x.contains("MAPLE"))
+                .any(|x| x.contains("Touch the fingerprint reader.")
+                    && x.contains("Approve the new device: desk")
+                    && x.contains("MAPLE"))
         );
     }
 
@@ -1716,5 +2030,347 @@ mod tests {
                 .iter()
                 .any(|x| x.contains("Wrong PIN.") && x.contains("Approve the new device: desk"))
         );
+    }
+
+    fn texts(a: &HirzApprover<Fake>) -> Vec<String> {
+        calls(a)
+            .iter()
+            .filter(|c| c.tool == Tool::Zenity)
+            .map(|c| {
+                c.args
+                    .iter()
+                    .find_map(|x| x.strip_prefix("--text="))
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fingerprint_window_cancel_is_denied() {
+        let d = TempDir::new("finger-cancel");
+        let c = one();
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (Tool::Zenity, exit(1, "")),
+                ],
+            ),
+            cfg(&[UvMethod::Fingerprint, UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
+        let cl = calls(&a);
+        assert_eq!(cl.len(), 3);
+        assert_eq!(cl[1].tool, Tool::FprintdVerify);
+        assert_eq!(cl[1].env, EnvPolicy::System);
+        assert_eq!(cl[2].args[0], "--question");
+        assert!(cl[2].args.contains(&"--no-markup".to_owned()));
+        assert!(
+            cl[2]
+                .args
+                .contains(&"--ok-label=Use password instead".to_owned())
+        );
+        assert!(cl[2].args.iter().all(|x| x.starts_with("--")));
+    }
+
+    #[test]
+    fn fingerprint_use_password_instead_goes_straight_to_polkit() {
+        let d = TempDir::new("finger-choose");
+        let c = one();
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (Tool::FprintdVerify, exit(1, NO_MATCH)),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                ],
+            ),
+            cfg(&[UvMethod::Fingerprint, UvMethod::Polkit]),
+            &d,
+        );
+        assert!(a.approve(&get(&c, true)).unwrap().user_verified);
+        let tools: Vec<Tool> = calls(&a).iter().map(|c| c.tool).collect();
+        assert_eq!(
+            tools,
+            [
+                Tool::FprintdList,
+                Tool::FprintdVerify,
+                Tool::Zenity,
+                Tool::FprintdVerify,
+                Tool::Zenity,
+                Tool::Pkcheck
+            ]
+        );
+    }
+
+    #[test]
+    fn fingerprint_misses_fall_back_with_a_note() {
+        let d = TempDir::new("finger-fallback");
+        let c = one();
+        let mut script = vec![(Tool::FprintdList, exit(0, ENROLLED))];
+        script.extend((0..3).map(|_| (Tool::FprintdVerify, exit(1, NO_MATCH))));
+        script.push((Tool::Zenity, exit(0, "")));
+        script.push((Tool::Pkcheck, exit(0, "")));
+        let a = approver(
+            Fake::new(ALL, script),
+            cfg(&[UvMethod::Fingerprint, UvMethod::Polkit]),
+            &d,
+        );
+        assert!(a.approve(&get(&c, true)).unwrap().user_verified);
+        let t = texts(&a);
+        assert_eq!(t.len(), 4);
+        assert!(t[2].contains("Not recognised. Try again (1 left)."));
+        assert!(t[3].contains(
+            "Your fingerprint was not recognised.\nNext, your system will ask for your password."
+        ));
+    }
+
+    #[test]
+    fn reader_error_falls_back_and_missing_fingers_hint_once() {
+        let d = TempDir::new("finger-error");
+        let c = one();
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (
+                        Tool::FprintdVerify,
+                        exit(1, "Verify result: verify-disconnected (done)\n"),
+                    ),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (
+                        Tool::FprintdVerify,
+                        exit(
+                            1,
+                            "VerifyStart failed: net.reactivated.Fprint.Error.NoEnrolledPrints\n",
+                        ),
+                    ),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (
+                        Tool::FprintdVerify,
+                        exit(
+                            1,
+                            "VerifyStart failed: net.reactivated.Fprint.Error.NoEnrolledPrints\n",
+                        ),
+                    ),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(0, "")),
+                ],
+            ),
+            cfg(&[UvMethod::Fingerprint, UvMethod::Polkit]),
+            &d,
+        );
+        for _ in 0..3 {
+            assert!(a.approve(&get(&c, true)).unwrap().user_verified);
+        }
+        let t = texts(&a);
+        assert_eq!(t.len(), 6);
+        assert!(t[1].contains("The fingerprint reader is not working right now."));
+        assert!(t[3].contains("Settings > Users, or run fprintd-enroll"));
+        assert!(!t[5].contains("fprintd-enroll"), "the hint is shown once");
+    }
+
+    #[test]
+    fn listing_no_fingers_sets_the_hint() {
+        let d = TempDir::new("finger-list-none");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(
+                    Tool::FprintdList,
+                    exit(0, "User alice has no fingers enrolled for Acme Reader.\n"),
+                )],
+            ),
+            cfg(&[UvMethod::Fingerprint]),
+            &d,
+        );
+        assert_eq!(a.available_uv_methods().unwrap(), []);
+        assert!(a.no_fingers_hinted.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn window_icon_from_the_runner() {
+        const ICON: &str = "/usr/share/icons/hicolor/scalable/apps/hirz.svg";
+        let d = TempDir::new("icon");
+        let c = one();
+        let mut fake = Fake::new(
+            ALL,
+            vec![
+                (Tool::FprintdList, exit(0, ENROLLED)),
+                (Tool::FprintdVerify, exit(1, NO_MATCH)),
+                (Tool::Zenity, exit(0, "")),
+                (Tool::Pkcheck, exit(0, "")),
+            ],
+        );
+        fake.icon = Some(PathBuf::from(ICON));
+        let a = approver(fake, cfg(&[UvMethod::Fingerprint, UvMethod::Polkit]), &d);
+        a.approve(&get(&c, true)).unwrap();
+        let zenity: Vec<CommandSpec> = calls(&a)
+            .into_iter()
+            .filter(|c| c.tool == Tool::Zenity)
+            .collect();
+        assert_eq!(zenity.len(), 2);
+        for z in &zenity {
+            assert_eq!(z.args[1], format!("--window-icon={ICON}"));
+        }
+        let d = TempDir::new("no-icon");
+        let a = approver(
+            Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        let _ = a.approve(&get(&c, true));
+        assert!(
+            !calls(&a)[0]
+                .args
+                .iter()
+                .any(|x| x.starts_with("--window-icon"))
+        );
+    }
+
+    fn removal() -> RemovalApprovalContext<'static> {
+        RemovalApprovalContext {
+            device_name: "old-laptop",
+            device_id_short: "0a1b2c3d4e5f",
+        }
+    }
+
+    #[test]
+    fn removal_shows_device_then_polkit() {
+        let d = TempDir::new("rm-polkit");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+            ),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_removal(&removal()), Ok(VERIFIED));
+        let cl = calls(&a);
+        assert_eq!(cl.len(), 2);
+        assert_eq!(cl[0].args[0], "--question");
+        assert!(cl[0].args.contains(&"--default-cancel".to_owned()));
+        assert!(cl[0].args.contains(&"--ok-label=Remove".to_owned()));
+        let t = texts(&a);
+        assert!(t[0].contains("Device name: old-laptop") && t[0].contains("0a1b2c3d4e5f"));
+        assert_eq!(cl[1].tool, Tool::Pkcheck);
+    }
+
+    #[test]
+    fn removal_cancel_refusal_and_no_click() {
+        let d = TempDir::new("rm-cancel");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(1, "")),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(1, "")),
+                ],
+            ),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_removal(&removal()), Err(ApprovalError::Denied));
+        assert_eq!(calls(&a).len(), 1);
+        assert_eq!(a.confirm_removal(&removal()), Err(ApprovalError::Denied));
+        assert_eq!(calls(&a).len(), 3);
+
+        for methods in [&[][..], &[UvMethod::Pin][..]] {
+            let d = TempDir::new("rm-click");
+            let mut config = cfg(methods);
+            config.click_to_allow = vec!["example.com".into(), "old-laptop".into()];
+            let a = approver(Fake::new(ALL, vec![]), config, &d);
+            assert_eq!(
+                a.confirm_removal(&removal()),
+                Err(ApprovalError::Unavailable)
+            );
+            assert!(calls(&a).is_empty());
+        }
+    }
+
+    #[test]
+    fn removal_fingerprint_window_and_pin_lock() {
+        let d = TempDir::new("rm-finger");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::FprintdVerify, exit(0, MATCH)),
+                ],
+            ),
+            cfg(&[UvMethod::Fingerprint]),
+            &d,
+        );
+        assert_eq!(a.confirm_removal(&removal()), Ok(VERIFIED));
+        let t = texts(&a);
+        assert!(t[0].ends_with("After you continue, touch the fingerprint reader."));
+        assert!(t[1].starts_with("Remove the device: old-laptop (id 0a1b2c3d4e5f)"));
+
+        let d = TempDir::new("rm-pin-locked");
+        write_verifier(&d, MAX_FAILURES);
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "1234\n")),
+                ],
+            ),
+            cfg(&[UvMethod::Pin]),
+            &d,
+        );
+        assert_eq!(a.confirm_removal(&removal()), Err(ApprovalError::Locked));
+        let t = texts(&a);
+        assert!(t[0].ends_with("Next, enter your hirz PIN."));
+        assert!(t[1].starts_with("Remove the device: old-laptop"));
+    }
+
+    #[test]
+    fn removal_and_pairing_have_separate_limits() {
+        let d = TempDir::new("rm-rate");
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.prompts_per_minute = 1;
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(1, "")), (Tool::Zenity, exit(1, ""))],
+            ),
+            config,
+            &d,
+        );
+        assert_eq!(a.confirm_pairing(&pairing()), Err(ApprovalError::Denied));
+        assert_eq!(a.confirm_removal(&removal()), Err(ApprovalError::Denied));
+        assert_eq!(a.confirm_removal(&removal()), Err(ApprovalError::Denied));
+        assert_eq!(calls(&a).len(), 2);
+    }
+
+    #[test]
+    fn list_hint_is_neutral() {
+        let d = TempDir::new("list-hint");
+        let c = two();
+        let a = approver(
+            Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]),
+            cfg(&[UvMethod::Pin]),
+            &d,
+        );
+        write_verifier(&d, 0);
+        assert_eq!(a.approve(&get(&c, true)), Err(ApprovalError::Denied));
+        let t = texts(&a);
+        assert!(t[0].ends_with("Choose an account, then confirm it is you."));
+        assert!(!t[0].contains("PIN"));
     }
 }

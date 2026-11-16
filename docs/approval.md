@@ -21,13 +21,19 @@ page cannot draw, hide or click it.
   of the dialog. On the Firefox extension path, the origin of the requesting page is shown
   too ("Requested by").
 - The account: the one being created, or the one being used to sign in. When several
-  accounts exist for the site, a list asks you to choose first.
+  accounts exist for the site, a list asks you to choose first ("Choose an account, then
+  confirm it is you."; the method that follows depends on what is available).
 - The name the site gives itself, labelled as such. Sites choose this name freely, so it is
   never shown in place of the site id.
 
 Names come from the site and are treated as hostile. hirz passes `--no-markup` to zenity,
 removes control characters, bidirectional overrides and invisible characters, collapses
 whitespace, replaces `< > & \` with look-alike characters, and shortens long values.
+
+When the hirz icon is installed (`/usr/share/icons/hicolor/scalable/apps/hirz.svg`, or the
+same path under `/usr/local`), hirz passes it with `--window-icon`. The path comes from that
+fixed list, never from the environment. zenity 4 accepts the option with a deprecation
+warning and shows the icon in the dialog; older versions use it as the window icon.
 
 If a prompt is not answered within the ceremony timeout (120 seconds by default), hirz
 closes it and the request fails with a timeout. Cancel or closing the window refuses the
@@ -92,14 +98,28 @@ method is used.
 
 hirz uses the fprintd command line tools, not a D-Bus library. To decide whether the method
 is available it runs `fprintd-list <your user>` and looks for an enrolled finger. To verify,
-after you confirm the site in hirz's dialog, it runs `fprintd-verify` with the ceremony
-timeout and kills it when the time is up.
+it runs `fprintd-verify` with the ceremony timeout and, while it runs, shows a window with
+the site and account (or the device, when approving or removing one) and "Touch the
+fingerprint reader." The window has a Cancel button and, when another method is configured
+and usable, a "Use password instead" (or "Use PIN instead") button. Cancel stops
+`fprintd-verify` and refuses the request; the other button stops it and goes straight to
+that method without counting as a failure. A match closes the window.
 
 A verification counts only when all of the following hold: `fprintd-verify` exited by itself
 with status 0, its output is valid UTF-8, and the only final result line is
 `Verify result: verify-match (done)`. Partial output, a killed process or any other result
-never counts as a match. A non-matching finger may be retried up to 3 times within one
-request; device errors and missing enrolment make the method unavailable.
+never counts as a match.
+
+When the finger is not recognised the window comes back with "Not recognised. Try again
+(N left)."; after 3 misses in one request hirz moves on to the next configured method with a
+short note ("Your fingerprint was not recognised."), or refuses when there is none. Scans
+the reader could not use (`verify-retry-scan`, `verify-swipe-too-short`,
+`verify-finger-not-centered`, `verify-remove-and-retry`) show a short hint and do not count
+as misses, up to 5 per request. A reader error (`verify-unknown-error`,
+`verify-disconnected` or unexpected output) also moves on to the next method with a note.
+When no finger is enrolled (`fprintd-list` says so, or `fprintd-verify` reports
+`NoEnrolledPrints`), fingerprint is unavailable and hirz says once: "Set up your fingerprint
+in Settings > Users, or run fprintd-enroll." (in the next window and on standard error).
 
 **Weakness.** fprintd's own policy lets any program in your active session start a
 fingerprint check without authentication. A fingerprint approval therefore proves that a
@@ -143,6 +163,16 @@ Click-to-allow is off by default and is enabled per site in the config file. It 
 (the method is unavailable) whenever the site requires user verification, so such sites fall
 back to a verifying method or fail.
 
+## Removing a device
+
+`hirz remove-device` also always requires user verification. After the yes/no question in
+the terminal (which `--yes` skips), hirz shows a zenity question with the device's name
+(sanitized like site names) and the start of its id, Remove and Cancel, with the focus on
+Cancel. Then the configured verifying methods run in order, as for pairing; the PIN and
+fingerprint windows repeat the device. Click-to-allow never counts, and when no verifying
+method is available no window is shown and the CLI explains how to set one up. Removal
+prompts are counted under their own key for the prompt limit.
+
 ## Approving a new device
 
 `hirz devices approve` lets a new device join the vault and gives it every passkey, so it
@@ -150,10 +180,11 @@ always requires user verification. After the typed confirmation in the terminal,
 a zenity question with the name of the new device (from the request, so it is sanitized
 like site names), how long ago it asked and the four verification words in capitals, and
 asks: "Do these 4 words match the ones on the new device? Only approve a device you are
-setting up yourself right now." The focus starts on Cancel.
+setting up yourself right now." The focus starts on Cancel. How long ago it asked uses the
+same words as the terminal ("less than a minute ago", "1 minute ago", "N minutes ago").
 
 Then the configured verifying methods run in order: system password, fingerprint or hirz
-PIN (the PIN is asked in a second window that repeats the device name and words). Pairing is
+PIN (the PIN and fingerprint windows repeat the device name and words). Pairing is
 approved only when one of them succeeds. Click-to-allow is never used for pairing, whatever
 the `click_to_allow` list holds, and when no verifying method is available no window is shown
 and the CLI explains how to set a PIN or install the polkit action. Cancel or a failed check
@@ -217,3 +248,8 @@ these are the facts the scripts encode:
   printed with `--print-column=1`; hirz reads the first `|`-separated field.
 - Every value that comes from a site is passed with `--no-markup` and as `--option=value`,
   never as a separate argument that could be read as an option.
+- `--progress` does not accept `--no-markup`, so the fingerprint window is a `--question`
+  (or `--info` when there is no other method) whose OK button is "Use password instead"
+  (or Cancel), not a progress bar.
+- `--window-icon` prints a deprecation warning on standard error and is treated as `--icon`.
+  It is accepted by every dialog type hirz uses.

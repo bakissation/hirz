@@ -12,7 +12,10 @@ use crate::args::{self, Command, DeleteTarget, Invocation, PinAction};
 use crate::env::{Env, System};
 use crate::error::{CliError, Exit};
 use crate::prompt::Prompter;
-use hirz_core::{Approval, ApprovalContext, ApprovalError, Approver, PairingApprovalContext};
+use hirz_core::{
+    Approval, ApprovalContext, ApprovalError, Approver, PairingApprovalContext,
+    RemovalApprovalContext,
+};
 use hirz_crypto::Zeroizing;
 use hirz_crypto::kdf::Argon2Params;
 use hirz_uv::UvMethod;
@@ -104,6 +107,7 @@ impl System for FakeSys {
         Box::new(FakeApprover {
             result: Ok(VERIFIED),
             seen: None,
+            removals: None,
         })
     }
 }
@@ -121,6 +125,8 @@ type SeenPairing = (String, Vec<String>, u64);
 struct FakeApprover<'a> {
     result: Result<Approval, ApprovalError>,
     seen: Option<&'a RefCell<Vec<SeenPairing>>>,
+    /// Device name and id shown by removal confirmations.
+    removals: Option<&'a RefCell<Vec<(String, String)>>>,
 }
 
 impl Approver for FakeApprover<'_> {
@@ -134,6 +140,13 @@ impl Approver for FakeApprover<'_> {
                 ctx.words.iter().map(|w| w.to_string()).collect(),
                 ctx.requested_at,
             ));
+        }
+        self.result.clone()
+    }
+    fn confirm_removal(&self, ctx: &RemovalApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        if let Some(seen) = self.removals {
+            seen.borrow_mut()
+                .push((ctx.device_name.to_string(), ctx.device_id_short.to_string()));
         }
         self.result.clone()
     }
@@ -1142,9 +1155,195 @@ fn remove_device_reports_exposed_sites() {
     let r = run(&a, &["remove-device", &b_id[..8]], &["y"]);
     assert_eq!(r.exit(), Exit::Failed);
 
-    // The removed device can still open the folder but cannot read new generations.
+    // The removed device can still open the folder but cannot read new generations, and it
+    // stops using the vault.
     let st = run(&b, &["status"], &[]);
     assert_ne!(st.exit(), Exit::Ok);
+    assert!(st.out.contains(crate::app::REMOVED), "{}", st.out);
+    let st = run(&b, &["status", "--json"], &[]);
+    let v: Value = serde_json::from_str(&st.out).unwrap();
+    assert_eq!(v["vault"]["this_device_removed"], true);
+    for args in [
+        &["list"][..],
+        &["list", "--json"],
+        &["devices"],
+        &["devices", "approve"],
+    ] {
+        let r = run(&b, args, &[]);
+        assert_eq!(r.exit(), Exit::Failed, "{args:?}");
+        assert!(
+            r.message().starts_with(crate::app::REMOVED),
+            "{}",
+            r.message()
+        );
+        assert!(r.message().contains("hirz forget-local"));
+        assert!(r.out.is_empty());
+    }
+
+    // forget-local deletes only this computer's keys.
+    let vault_files = tree(&vault);
+    let r = run(&b, &["forget-local"], &["n"]);
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(b.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    let r = run(&b, &["forget-local"], &["y"]);
+    assert!(r.ok().contains(crate::app::REMOVED));
+    assert!(!b.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    assert!(!b.state().join(crate::env::VAULT_POINTER).exists());
+    assert_eq!(tree(&vault), vault_files);
+    assert_eq!(run(&b, &["list"], &[]).exit(), Exit::NotSetUp);
+    assert!(
+        run(&b, &["forget-local"], &[])
+            .ok()
+            .contains("nothing to forget")
+    );
+    assert_eq!(records(&a, &vault).len(), 3);
+}
+
+/// Every file under `dir` with its size, sorted.
+fn tree(dir: &Path) -> Vec<(PathBuf, u64)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let len = fs::metadata(&p).unwrap().len();
+                out.push((p, len));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn run_sys(m: &Machine, sys: &dyn System, args: &[&str], answers: &[&str]) -> Run {
+    run_opts(
+        m,
+        args,
+        answers,
+        Opts {
+            sys,
+            program: "hirz",
+            terminal: false,
+            wrong_words: false,
+        },
+    )
+}
+
+#[test]
+fn remove_device_requires_user_verification() {
+    let a = Machine::new("rmuv-a");
+    let phrase = init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let b = Machine::new("rmuv-b");
+    run(
+        &b,
+        &["join", "--vault", &vs, "--name", "old-laptop"],
+        &[&phrase],
+    )
+    .ok();
+    let b_id = crate::ui::hex(&Vault::open(&vault, &b.state()).unwrap().device_id());
+    let active = || {
+        Vault::open(&vault, &a.state())
+            .unwrap()
+            .devices()
+            .iter()
+            .filter(|d| !d.removed)
+            .count()
+    };
+
+    // No method at all: refused before any question.
+    let none = UvSys::new(&[], Ok(VERIFIED));
+    let r = run_sys(&a, &none, &["remove-device", &b_id[..8]], &["y"]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("hirz pin set"), "{}", r.message());
+    assert!(
+        r.message()
+            .contains(&format!("hirz remove-device {}", &b_id[..12]))
+    );
+    assert!(r.prompts.is_empty());
+    assert!(none.removals.borrow().is_empty());
+
+    // Answering no in the terminal never opens the window.
+    let uv = UvSys::new(&[UvMethod::Polkit], Ok(VERIFIED));
+    let r = run_sys(&a, &uv, &["remove-device", &b_id[..8]], &["n"]);
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(uv.removals.borrow().is_empty());
+
+    for (result, exit, needle) in [
+        (Err(ApprovalError::Denied), Exit::Cancelled, "cancelled"),
+        (
+            Err(ApprovalError::Timeout),
+            Exit::Failed,
+            "not answered in time",
+        ),
+        (Err(ApprovalError::Locked), Exit::Failed, "hirz pin reset"),
+        (
+            Err(ApprovalError::Unavailable),
+            Exit::Failed,
+            "hirz pin set",
+        ),
+        (
+            Ok(Approval {
+                user_present: true,
+                user_verified: false,
+                selected: None,
+            }),
+            Exit::Failed,
+            "could not verify",
+        ),
+    ] {
+        // --yes skips only the terminal question, never the verification.
+        let uv = UvSys::new(&[UvMethod::Pin], result);
+        let r = run_sys(&a, &uv, &["remove-device", &b_id[..8], "--yes"], &[]);
+        assert_eq!(r.exit(), exit, "{}", r.message());
+        assert!(r.message().contains(needle), "{}", r.message());
+        assert!(r.message().contains("Nothing was removed."));
+        assert!(r.out.contains("Confirm in the hirz window"));
+        assert!(r.prompts.is_empty());
+        assert_eq!(
+            uv.removals.borrow().as_slice(),
+            [("old-laptop".to_string(), b_id[..12].to_string())]
+        );
+        assert_eq!(active(), 2);
+    }
+
+    let ok = UvSys::new(&[UvMethod::Fingerprint], Ok(VERIFIED));
+    let r = run_sys(&a, &ok, &["remove-device", &b_id[..8]], &["y"]);
+    assert!(r.ok().contains("Removed \"old-laptop\""));
+    assert_eq!(ok.removals.borrow().len(), 1);
+    assert_eq!(active(), 1);
+}
+
+#[test]
+fn forget_local_on_an_active_device_needs_the_word() {
+    let m = Machine::new("forget-active");
+    init(&m);
+    let r = run(&m, &["forget-local"], &["y"]);
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(r.out.contains("still uses the vault"));
+    assert!(m.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    run(&m, &["forget-local"], &["forget"]).ok();
+    assert!(!m.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    assert!(Vault::exists(&m.default_vault()));
+    assert_eq!(
+        args::parse(&os(&["forget-local", "x"])).unwrap_err().exit,
+        Exit::Usage
+    );
+}
+
+#[test]
+fn visibility_notes() {
+    use crate::prompt::{NOTE_NOT_TERMINAL, NOTE_TERMINAL, visibility_note};
+    assert_eq!(visibility_note(true, true), None);
+    assert_eq!(visibility_note(true, false), None);
+    assert_eq!(visibility_note(false, true), Some(NOTE_TERMINAL));
+    assert_eq!(visibility_note(false, false), Some(NOTE_NOT_TERMINAL));
+    let docs = include_str!("../../../docs/cli.md");
+    assert!(docs.contains(NOTE_TERMINAL) && docs.contains(NOTE_NOT_TERMINAL));
 }
 
 #[test]
@@ -1421,7 +1620,14 @@ fn init_warns_and_clears_the_phrase_on_a_terminal() {
     let clear = "\x1b[2J\x1b[3J\x1b[H";
     let after = &out[out.find(clear).expect("screen cleared") + clear.len()..];
     let words = phrase_words(out);
-    assert!(words.iter().all(|w| !after.contains(&format!(" {w} "))));
+    // Phrase words are common English words that may occur in later text, so look for the
+    // numbered layout of the phrase rather than for single words.
+    assert!(
+        words
+            .iter()
+            .enumerate()
+            .all(|(i, w)| !after.contains(&format!("{:>2}. {w}", i + 1)))
+    );
     assert!(after.contains("Correct. Keep the paper safe."));
     assert!(after.contains("./bin/hirz setup firefox"));
     assert!(after.contains("./bin/hirz devices approve"));
@@ -1568,6 +1774,7 @@ fn pairing_adds_a_device_without_the_phrase() {
     assert!(out.contains("Warning: an approval appeared"));
     assert_eq!(words_line(out), words_line(&a_out));
     assert!(a_out.contains("\"desk\""));
+    assert!(a_out.contains("asked to join this vault less than a minute ago"));
     assert!(a_out.contains("Approved \"desk\""));
     assert!(out.contains("Approved. This computer (\"desk\")"));
     assert!(out.contains("1 passkey here"));
@@ -1662,6 +1869,7 @@ struct UvSys {
     methods: Vec<UvMethod>,
     result: Result<Approval, ApprovalError>,
     seen: RefCell<Vec<SeenPairing>>,
+    removals: RefCell<Vec<(String, String)>>,
 }
 
 impl UvSys {
@@ -1670,6 +1878,7 @@ impl UvSys {
             methods: methods.to_vec(),
             result,
             seen: RefCell::new(Vec::new()),
+            removals: RefCell::new(Vec::new()),
         }
     }
 }
@@ -1688,6 +1897,7 @@ impl System for UvSys {
         Box::new(FakeApprover {
             result: self.result.clone(),
             seen: Some(&self.seen),
+            removals: Some(&self.removals),
         })
     }
 }

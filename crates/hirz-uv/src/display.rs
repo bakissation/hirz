@@ -8,7 +8,10 @@
 
 use std::time::Duration;
 
-use hirz_core::{ApprovalContext, CandidateAccount, Ceremony, PairingApprovalContext, UserEntity};
+use hirz_core::{
+    ApprovalContext, CandidateAccount, Ceremony, PairingApprovalContext, RemovalApprovalContext,
+    UserEntity,
+};
 
 use crate::config::UvMethod;
 
@@ -127,12 +130,38 @@ pub enum Step {
     Uv(UvMethod),
 }
 
+/// What happens after the question is answered.
 fn step_hint(step: Step) -> &'static str {
     match step {
         Step::ClickToAllow => "Allow only if you started this on the site above.",
         Step::Uv(UvMethod::Polkit) => "Next, your system will ask for your password.",
         Step::Uv(UvMethod::Fingerprint) => "After you continue, touch the fingerprint reader.",
-        Step::Uv(UvMethod::Pin) => "Enter your hirz PIN to continue.",
+        Step::Uv(UvMethod::Pin) => "Next, enter your hirz PIN.",
+    }
+}
+
+/// Last line of every hirz PIN entry.
+const PIN_ENTRY_HINT: &str = "Enter your hirz PIN to continue.";
+/// Last line of the fingerprint window, shown while the reader waits.
+pub const FINGER_HINT: &str = "Touch the fingerprint reader.";
+/// Account list: the same for every method, since what follows depends on what is available.
+pub const LIST_HINT: &str = "Choose an account, then confirm it is you.";
+
+/// How long ago something was asked, the same words in the terminal and in windows.
+pub fn asked_ago(requested_at: u64, now: u64) -> String {
+    match now.saturating_sub(requested_at) / 60 {
+        0 => "less than a minute ago".to_owned(),
+        1 => "1 minute ago".to_owned(),
+        n => format!("{n} minutes ago"),
+    }
+}
+
+/// Label of the fingerprint window's button that switches to the next method.
+pub fn fallback_label(next: UvMethod) -> &'static str {
+    match next {
+        UvMethod::Polkit => "Use password instead",
+        UvMethod::Pin => "Use PIN instead",
+        UvMethod::Fingerprint => "Use fingerprint instead",
     }
 }
 
@@ -199,7 +228,19 @@ pub fn prompt_text(
     if let Some(n) = notice {
         lines.push(n.to_owned());
     }
-    lines.push(step_hint(step).to_owned());
+    lines.push(match step {
+        Step::Uv(UvMethod::Pin) => PIN_ENTRY_HINT.to_owned(),
+        other => step_hint(other).to_owned(),
+    });
+    lines.join("\n")
+}
+
+/// Site and account, for the fingerprint window.
+pub fn context_text(ctx: &ApprovalContext<'_>, selected: Option<usize>) -> String {
+    let mut lines = header(ctx);
+    if let Some(a) = account_line(ctx, selected) {
+        lines.push(a);
+    }
     lines.join("\n")
 }
 
@@ -216,6 +257,7 @@ pub fn question_args(
     ctx: &ApprovalContext<'_>,
     selected: Option<usize>,
     step: Step,
+    notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
     let ok = match step {
@@ -226,7 +268,7 @@ pub fn question_args(
         "--question".to_owned(),
         "--no-markup".to_owned(),
         format!("--title={}", title(ctx)),
-        format!("--text={}", prompt_text(ctx, selected, step, None)),
+        format!("--text={}", prompt_text(ctx, selected, step, notice)),
         format!("--ok-label={ok}"),
         "--cancel-label=Cancel".to_owned(),
         "--width=460".to_owned(),
@@ -281,13 +323,11 @@ pub fn pin_args(
 pub fn list_args(
     ctx: &ApprovalContext<'_>,
     candidates: &[CandidateAccount],
-    step: Step,
     remaining: Duration,
 ) -> Vec<String> {
     let mut text = header(ctx);
     text.push(String::new());
-    text.push("Choose an account.".to_owned());
-    text.push(step_hint(step).to_owned());
+    text.push(LIST_HINT.to_owned());
     let mut args = vec![
         "--list".to_owned(),
         "--no-markup".to_owned(),
@@ -321,14 +361,6 @@ fn pairing_device(ctx: &PairingApprovalContext<'_>) -> String {
     or_placeholder(sanitize(ctx.device_name, MAX_FIELD_CHARS), "unnamed device")
 }
 
-fn asked_ago(requested_at: u64, now: u64) -> String {
-    match now.saturating_sub(requested_at) / 60 {
-        0 => "Asked less than a minute ago".to_owned(),
-        1 => "Asked 1 minute ago".to_owned(),
-        n => format!("Asked {n} minutes ago"),
-    }
-}
-
 /// The four words in capitals with wide gaps: `--no-markup` rules out a larger font, so the
 /// words get their own line and stand out by case and spacing instead.
 pub fn pairing_words_line(words: &[&str]) -> String {
@@ -340,11 +372,16 @@ pub fn pairing_words_line(words: &[&str]) -> String {
 }
 
 /// Body of the pairing question: device name, age of the request, the words and the step.
-pub fn pairing_text(ctx: &PairingApprovalContext<'_>, now: u64, step: Step) -> String {
-    [
+pub fn pairing_text(
+    ctx: &PairingApprovalContext<'_>,
+    now: u64,
+    step: Step,
+    notice: Option<&str>,
+) -> String {
+    let mut lines = vec![
         "A new device asks to join your hirz vault.".to_owned(),
         format!("Device name: {}", pairing_device(ctx)),
-        asked_ago(ctx.requested_at, now),
+        format!("Asked {}", asked_ago(ctx.requested_at, now)),
         String::new(),
         pairing_words_line(ctx.words),
         String::new(),
@@ -353,9 +390,12 @@ pub fn pairing_text(ctx: &PairingApprovalContext<'_>, now: u64, step: Step) -> S
             .to_owned(),
         "Approving gives it every passkey in the vault.".to_owned(),
         String::new(),
-        step_hint(step).to_owned(),
-    ]
-    .join("\n")
+    ];
+    if let Some(n) = notice {
+        lines.push(n.to_owned());
+    }
+    lines.push(step_hint(step).to_owned());
+    lines.join("\n")
 }
 
 /// Pairing question. Focus is on Cancel so a stray Enter does not approve.
@@ -363,13 +403,14 @@ pub fn pairing_question_args(
     ctx: &PairingApprovalContext<'_>,
     now: u64,
     step: Step,
+    notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
     vec![
         "--question".to_owned(),
         "--no-markup".to_owned(),
         format!("--title={PAIRING_TITLE}"),
-        format!("--text={}", pairing_text(ctx, now, step)),
+        format!("--text={}", pairing_text(ctx, now, step, notice)),
         "--ok-label=They match".to_owned(),
         "--cancel-label=Cancel".to_owned(),
         "--width=520".to_owned(),
@@ -384,26 +425,144 @@ pub fn pairing_pin_args(
     notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
-    let mut lines = vec![
-        format!("Approve the new device: {}", pairing_device(ctx)),
-        pairing_words_line(ctx.words),
-        String::new(),
-    ];
+    device_pin_args(PAIRING_TITLE, &pairing_context(ctx), notice, remaining)
+}
+
+/// The device and its words, repeated in the PIN and fingerprint windows of a pairing.
+pub fn pairing_context(ctx: &PairingApprovalContext<'_>) -> String {
+    format!(
+        "Approve the new device: {}\n{}",
+        pairing_device(ctx),
+        pairing_words_line(ctx.words)
+    )
+}
+
+fn device_pin_args(
+    title: &str,
+    context: &str,
+    notice: Option<&str>,
+    remaining: Duration,
+) -> Vec<String> {
+    let mut lines = vec![context.to_owned(), String::new()];
     if let Some(n) = notice {
         lines.push(n.to_owned());
     }
-    lines.push(step_hint(Step::Uv(UvMethod::Pin)).to_owned());
+    lines.push(PIN_ENTRY_HINT.to_owned());
     vec![
         "--entry".to_owned(),
         "--hide-text".to_owned(),
         "--no-markup".to_owned(),
-        format!("--title={PAIRING_TITLE}"),
+        format!("--title={title}"),
         format!("--text={}", lines.join("\n")),
         "--ok-label=Verify".to_owned(),
         "--cancel-label=Cancel".to_owned(),
         "--width=460".to_owned(),
         zenity_timeout(remaining),
     ]
+}
+
+pub const REMOVAL_TITLE: &str = "hirz: remove a device";
+const DEVICE_ID_CHARS: usize = 32;
+
+fn removal_device(ctx: &RemovalApprovalContext<'_>) -> String {
+    or_placeholder(sanitize(ctx.device_name, MAX_FIELD_CHARS), "unnamed device")
+}
+
+fn removal_id(ctx: &RemovalApprovalContext<'_>) -> String {
+    or_placeholder(sanitize(ctx.device_id_short, DEVICE_ID_CHARS), "unknown")
+}
+
+/// The device being removed, repeated in the PIN and fingerprint windows.
+pub fn removal_context(ctx: &RemovalApprovalContext<'_>) -> String {
+    format!(
+        "Remove the device: {} (id {})",
+        removal_device(ctx),
+        removal_id(ctx)
+    )
+}
+
+/// Body of the removal question: which device, what removal does, and the step.
+pub fn removal_text(ctx: &RemovalApprovalContext<'_>, step: Step, notice: Option<&str>) -> String {
+    let mut lines = vec![
+        "Remove this device from your hirz vault?".to_owned(),
+        format!("Device name: {}", removal_device(ctx)),
+        format!("Device id: {}", removal_id(ctx)),
+        String::new(),
+        "It will no longer be able to read passkeys added or changed from now on. Only remove \
+         a device if you asked hirz to remove it yourself right now."
+            .to_owned(),
+        String::new(),
+    ];
+    if let Some(n) = notice {
+        lines.push(n.to_owned());
+    }
+    lines.push(step_hint(step).to_owned());
+    lines.join("\n")
+}
+
+/// Removal question. Focus is on Cancel so a stray Enter does not remove.
+pub fn removal_question_args(
+    ctx: &RemovalApprovalContext<'_>,
+    step: Step,
+    notice: Option<&str>,
+    remaining: Duration,
+) -> Vec<String> {
+    vec![
+        "--question".to_owned(),
+        "--no-markup".to_owned(),
+        format!("--title={REMOVAL_TITLE}"),
+        format!("--text={}", removal_text(ctx, step, notice)),
+        "--ok-label=Remove".to_owned(),
+        "--cancel-label=Cancel".to_owned(),
+        "--width=520".to_owned(),
+        zenity_timeout(remaining),
+        "--default-cancel".to_owned(),
+    ]
+}
+
+/// Hidden-text entry for the hirz PIN when removing a device.
+pub fn removal_pin_args(
+    ctx: &RemovalApprovalContext<'_>,
+    notice: Option<&str>,
+    remaining: Duration,
+) -> Vec<String> {
+    device_pin_args(REMOVAL_TITLE, &removal_context(ctx), notice, remaining)
+}
+
+/// The window shown while `fprintd-verify` waits for a finger. `context` is hirz-written or
+/// already sanitized. With a next method it is a question whose OK button switches to that
+/// method; without one an information window whose only button cancels.
+pub fn finger_args(
+    title: &str,
+    context: &str,
+    notice: Option<&str>,
+    fallback: Option<UvMethod>,
+    remaining: Duration,
+) -> Vec<String> {
+    let mut lines = vec![context.to_owned(), String::new()];
+    if let Some(n) = notice {
+        lines.push(n.to_owned());
+    }
+    lines.push(FINGER_HINT.to_owned());
+    let mut args = vec![
+        match fallback {
+            Some(_) => "--question".to_owned(),
+            None => "--info".to_owned(),
+        },
+        "--no-markup".to_owned(),
+        format!("--title={title}"),
+        format!("--text={}", lines.join("\n")),
+    ];
+    match fallback {
+        Some(next) => {
+            args.push(format!("--ok-label={}", fallback_label(next)));
+            args.push("--cancel-label=Cancel".to_owned());
+        }
+        None => args.push("--ok-label=Cancel".to_owned()),
+    }
+    args.push("--width=460".to_owned());
+    args.push(zenity_timeout(remaining));
+    args
 }
 
 /// zenity prints the hidden row number. Anything other than one number in range is rejected.
@@ -544,6 +703,7 @@ mod tests {
             &ctx,
             Some(0),
             Step::ClickToAllow,
+            None,
             Duration::from_millis(119_500),
         );
         assert_eq!(a[0], "--question");
@@ -555,10 +715,14 @@ mod tests {
         let a = question_args(
             &ctx,
             Some(0),
-            Step::Uv(UvMethod::Fingerprint),
+            Step::Uv(UvMethod::Polkit),
+            Some("Fingerprint not recognised."),
             Duration::from_millis(10),
         );
         assert!(!a.contains(&"--default-cancel".to_owned()));
+        assert!(a.iter().any(|x| x.contains(
+            "Fingerprint not recognised.\nNext, your system will ask for your password."
+        )));
         assert!(a.contains(&"--timeout=1".to_owned()));
         assert!(a.iter().all(|x| x.starts_with("--")));
     }
@@ -567,8 +731,11 @@ mod tests {
     fn list_rows_never_start_with_a_dash() {
         let c = cands();
         let ctx = get_ctx(&c, None);
-        let a = list_args(&ctx, &c, Step::Uv(UvMethod::Pin), Duration::from_secs(30));
+        let a = list_args(&ctx, &c, Duration::from_secs(30));
         assert!(!a.contains(&"--".to_owned()));
+        let text = a.iter().find_map(|x| x.strip_prefix("--text=")).unwrap();
+        assert!(text.ends_with("\nChoose an account, then confirm it is you."));
+        assert!(!text.contains("PIN") && !text.contains("password"));
         let first_row = a.iter().position(|x| x == "1").unwrap();
         assert!(a[..first_row].iter().all(|x| x.starts_with("--")));
         assert_eq!(
@@ -632,6 +799,7 @@ mod tests {
             &ctx,
             1_000 + 125,
             Step::Uv(UvMethod::Polkit),
+            None,
             Duration::from_secs(60),
         );
         assert_eq!(a[0], "--question");
@@ -659,15 +827,91 @@ mod tests {
     fn pairing_texts_edge_cases() {
         let words = ["a", "b", "c", "d"];
         let ctx = pairing_ctx("\u{200B}", &words);
-        let t = pairing_text(&ctx, 0, Step::Uv(UvMethod::Pin));
+        let t = pairing_text(&ctx, 0, Step::Uv(UvMethod::Pin), None);
         assert!(t.contains("Device name: unnamed device"));
         assert!(t.contains("Asked less than a minute ago"));
-        assert!(pairing_text(&ctx, 1_060, Step::Uv(UvMethod::Pin)).contains("Asked 1 minute ago"));
+        assert!(t.ends_with("Next, enter your hirz PIN."));
+        assert!(
+            pairing_text(&ctx, 1_060, Step::Uv(UvMethod::Pin), None).contains("Asked 1 minute ago")
+        );
+        assert!(
+            pairing_text(&ctx, 1_000, Step::Uv(UvMethod::Pin), Some("note"))
+                .contains("\nnote\nNext, enter")
+        );
         let a = pairing_pin_args(&ctx, Some("Wrong PIN."), Duration::from_secs(5));
         assert_eq!(&a[..3], ["--entry", "--hide-text", "--no-markup"]);
         let text = a.iter().find_map(|x| x.strip_prefix("--text=")).unwrap();
         assert!(text.contains("A    B    C    D"));
         assert!(text.contains("Wrong PIN.\nEnter your hirz PIN"));
+    }
+
+    #[test]
+    fn asked_wording() {
+        assert_eq!(asked_ago(100, 159), "less than a minute ago");
+        assert_eq!(asked_ago(100, 160), "1 minute ago");
+        assert_eq!(asked_ago(100, 100 + 14 * 60 + 59), "14 minutes ago");
+        assert_eq!(asked_ago(200, 100), "less than a minute ago");
+    }
+
+    #[test]
+    fn removal_question_and_pin() {
+        let ctx = RemovalApprovalContext {
+            device_name: "old <laptop>\u{202E}",
+            device_id_short: "0a1b2c3d4e5f",
+        };
+        let a = removal_question_args(
+            &ctx,
+            Step::Uv(UvMethod::Fingerprint),
+            None,
+            Duration::from_secs(30),
+        );
+        assert_eq!(a[0], "--question");
+        assert!(a.contains(&"--no-markup".to_owned()));
+        assert!(a.contains(&"--default-cancel".to_owned()));
+        assert!(a.contains(&"--ok-label=Remove".to_owned()));
+        assert!(a.contains(&format!("--title={REMOVAL_TITLE}")));
+        assert!(a.iter().all(|x| x.starts_with("--")));
+        let text = a.iter().find_map(|x| x.strip_prefix("--text=")).unwrap();
+        assert!(text.contains("Device name: old \u{FF1C}laptop\u{FF1E}\n"));
+        assert!(text.contains("Device id: 0a1b2c3d4e5f"));
+        assert!(text.ends_with("touch the fingerprint reader."));
+        let p = removal_pin_args(&ctx, Some("Wrong PIN."), Duration::from_secs(5));
+        assert_eq!(&p[..3], ["--entry", "--hide-text", "--no-markup"]);
+        let text = p.iter().find_map(|x| x.strip_prefix("--text=")).unwrap();
+        assert!(
+            text.starts_with("Remove the device: old \u{FF1C}laptop\u{FF1E} (id 0a1b2c3d4e5f)")
+        );
+        assert!(text.ends_with("Wrong PIN.\nEnter your hirz PIN to continue."));
+    }
+
+    #[test]
+    fn finger_window() {
+        let c = cands();
+        let ctx = get_ctx(&c, None);
+        let context = context_text(&ctx, Some(0));
+        let a = finger_args(
+            &title(&ctx),
+            &context,
+            Some("Not recognised. Try again (2 left)."),
+            Some(UvMethod::Polkit),
+            Duration::from_secs(9),
+        );
+        assert_eq!(a[0], "--question");
+        assert!(a.contains(&"--no-markup".to_owned()));
+        assert!(a.contains(&"--ok-label=Use password instead".to_owned()));
+        assert!(a.contains(&"--cancel-label=Cancel".to_owned()));
+        assert!(a.iter().all(|x| x.starts_with("--")));
+        let text = a.iter().find_map(|x| x.strip_prefix("--text=")).unwrap();
+        assert!(text.contains("Account: Alice (alice@example.com)"));
+        assert!(
+            text.ends_with("Not recognised. Try again (2 left).\nTouch the fingerprint reader.")
+        );
+        let a = finger_args("t", "c", None, Some(UvMethod::Pin), Duration::from_secs(9));
+        assert!(a.contains(&"--ok-label=Use PIN instead".to_owned()));
+        let a = finger_args("t", "c", None, None, Duration::from_secs(9));
+        assert_eq!(a[0], "--info");
+        assert!(a.contains(&"--ok-label=Cancel".to_owned()));
+        assert!(!a.iter().any(|x| x.starts_with("--cancel-label")));
     }
 
     #[test]

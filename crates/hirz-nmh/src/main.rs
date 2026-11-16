@@ -260,6 +260,7 @@ fn abort_reply(id: u64) -> Json {
 struct Host<A> {
     session: Session<A>,
     pending: Arc<Mutex<Pending>>,
+    removed_told: bool,
 }
 
 impl<A: Approver + UvProbe> Host<A> {
@@ -269,6 +270,13 @@ impl<A: Approver + UvProbe> Host<A> {
             VaultStatus::Missing => false,
             VaultStatus::Broken(why) => {
                 diag(format_args!("cannot open the vault: {why}"));
+                false
+            }
+            // Ceremonies go to Firefox and lists stay empty, as without a vault.
+            VaultStatus::Removed => {
+                if !core::mem::replace(&mut self.removed_told, true) {
+                    diag(format_args!("{}", session::REMOVED_NOTICE));
+                }
                 false
             }
         }
@@ -303,7 +311,10 @@ impl<A: Approver + UvProbe> Host<A> {
             return abort_reply(id);
         }
         if !self.vault_ready() {
-            return error_reply(Some(id), &Error::NotHandled("no hirz vault on this device"));
+            return error_reply(
+                Some(id),
+                &Error::NotHandled("no usable hirz vault on this device"),
+            );
         }
         self.handle(msg, false, Some(id))
     }
@@ -339,7 +350,11 @@ where
     std::thread::Builder::new()
         .name("stdin".into())
         .spawn(move || reader(input, tx, reader_pending, debug))?;
-    let mut host = Host { session, pending };
+    let mut host = Host {
+        session,
+        pending,
+        removed_told: false,
+    };
     for inbound in rx {
         let reply = match inbound {
             Inbound::Message(Ok(msg)) => host.answer(&msg),

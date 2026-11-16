@@ -4,13 +4,46 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyOutcome {
     Match,
-    NoMatch,
-    /// No reader, no enrolled finger, permission denied, device error or output that does not
-    /// follow the expected shape.
+    /// The finger was not recognised or not read well; another try may work.
+    Retry(Retry),
+    /// No finger is enrolled for this user.
+    NoFingers,
+    /// The reader reported an error or went away.
+    ReaderError,
+    /// Output that does not follow the expected shape, or any other failure.
     Unavailable,
 }
 
+/// Why a scan did not match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    NoMatch,
+    RetryScan,
+    SwipeTooShort,
+    NotCentered,
+    RemoveAndRetry,
+}
+
+impl Retry {
+    /// A short sentence for the fingerprint window.
+    pub fn message(self) -> &'static str {
+        match self {
+            Retry::NoMatch => "Not recognised.",
+            Retry::RetryScan => "The reader could not read your finger.",
+            Retry::SwipeTooShort => "The swipe was too short.",
+            Retry::NotCentered => "Your finger was not centred on the reader.",
+            Retry::RemoveAndRetry => "Lift your finger, then touch the reader again.",
+        }
+    }
+}
+
 const RESULT_PREFIX: &str = "Verify result: ";
+/// fprintd reports a user without enrolled fingers with these texts (CLI message, D-Bus error).
+const NO_FINGERS_MARKERS: [&str; 3] = [
+    "No fingers enrolled",
+    "no fingers enrolled",
+    "net.reactivated.Fprint.Error.NoEnrolledPrints",
+];
 
 /// Classifies a finished `fprintd-verify` run. A match needs all of: exit status 0, valid
 /// UTF-8 output, exactly one final (`done`) result line, and that line being the last result
@@ -25,9 +58,25 @@ pub fn classify_verify(code: Option<i32>, stdout: &[u8]) -> VerifyOutcome {
         .filter_map(parse_result)
         .collect();
     let done_count = results.iter().filter(|(_, done)| *done).count();
+    if let Some(("verify-match", true)) = results.last()
+        && code == Some(0)
+        && done_count == 1
+    {
+        return VerifyOutcome::Match;
+    }
+    if NO_FINGERS_MARKERS.iter().any(|m| text.contains(m)) {
+        return VerifyOutcome::NoFingers;
+    }
+    if done_count > 1 {
+        return VerifyOutcome::Unavailable;
+    }
     match results.last() {
-        Some(("verify-match", true)) if code == Some(0) && done_count == 1 => VerifyOutcome::Match,
-        Some(("verify-no-match", true)) if done_count == 1 => VerifyOutcome::NoMatch,
+        Some(("verify-no-match", true)) => VerifyOutcome::Retry(Retry::NoMatch),
+        Some(("verify-retry-scan", _)) => VerifyOutcome::Retry(Retry::RetryScan),
+        Some(("verify-swipe-too-short", _)) => VerifyOutcome::Retry(Retry::SwipeTooShort),
+        Some(("verify-finger-not-centered", _)) => VerifyOutcome::Retry(Retry::NotCentered),
+        Some(("verify-remove-and-retry", _)) => VerifyOutcome::Retry(Retry::RemoveAndRetry),
+        Some(("verify-unknown-error" | "verify-disconnected", _)) => VerifyOutcome::ReaderError,
         _ => VerifyOutcome::Unavailable,
     }
 }
@@ -38,6 +87,11 @@ fn parse_result(rest: &str) -> Option<(&str, bool)> {
     } else {
         rest.strip_suffix(" (not done)").map(|r| (r, false))
     }
+}
+
+/// True when `fprintd-list` says in so many words that the user has no enrolled finger.
+pub fn says_no_fingers(stdout: &[u8]) -> bool {
+    core::str::from_utf8(stdout).is_ok_and(|t| NO_FINGERS_MARKERS.iter().any(|m| t.contains(m)))
 }
 
 /// True when `fprintd-list <user>` succeeded and lists at least one finger
@@ -80,8 +134,9 @@ mod tests {
     #[test]
     fn no_match() {
         let out = b"Verify started!\nVerify result: verify-no-match (done)\n";
-        assert_eq!(classify_verify(Some(1), out), VerifyOutcome::NoMatch);
-        assert_eq!(classify_verify(Some(0), out), VerifyOutcome::NoMatch);
+        let miss = VerifyOutcome::Retry(Retry::NoMatch);
+        assert_eq!(classify_verify(Some(1), out), miss);
+        assert_eq!(classify_verify(Some(0), out), miss);
     }
 
     #[test]
@@ -121,12 +176,51 @@ mod tests {
             VerifyOutcome::Unavailable
         );
         let other = b"Verify result: verify-disconnected (done)\n";
-        assert_eq!(classify_verify(Some(1), other), VerifyOutcome::Unavailable);
+        assert_eq!(classify_verify(Some(1), other), VerifyOutcome::ReaderError);
         let no_fingers = b"Using device /net/reactivated/Fprint/Device/0\nNo fingers enrolled for this device.\n";
         assert_eq!(
             classify_verify(Some(1), no_fingers),
+            VerifyOutcome::NoFingers
+        );
+        let dbus = b"VerifyStart failed: GDBus.Error:net.reactivated.Fprint.Error.NoEnrolledPrints: No fingerprints enrolled\n";
+        assert_eq!(classify_verify(Some(1), dbus), VerifyOutcome::NoFingers);
+        let two_misses =
+            b"Verify result: verify-no-match (done)\nVerify result: verify-no-match (done)\n";
+        assert_eq!(
+            classify_verify(Some(1), two_misses),
             VerifyOutcome::Unavailable
         );
+    }
+
+    #[test]
+    fn scan_problems_are_retries() {
+        for (line, want) in [
+            ("verify-retry-scan", Retry::RetryScan),
+            ("verify-swipe-too-short", Retry::SwipeTooShort),
+            ("verify-finger-not-centered", Retry::NotCentered),
+            ("verify-remove-and-retry", Retry::RemoveAndRetry),
+        ] {
+            for done in ["done", "not done"] {
+                let out = format!("Verify started!\nVerify result: {line} ({done})\n");
+                assert_eq!(
+                    classify_verify(Some(1), out.as_bytes()),
+                    VerifyOutcome::Retry(want)
+                );
+            }
+            assert!(want.message().ends_with('.'));
+        }
+        let err = b"Verify result: verify-unknown-error (done)\n";
+        assert_eq!(classify_verify(Some(1), err), VerifyOutcome::ReaderError);
+        assert_eq!(Retry::NoMatch.message(), "Not recognised.");
+    }
+
+    #[test]
+    fn no_fingers_in_list_output() {
+        assert!(says_no_fingers(
+            b"User alice has no fingers enrolled for Acme Reader.\n"
+        ));
+        assert!(!says_no_fingers(b" - #0: right-index-finger\n"));
+        assert!(!says_no_fingers(b"\xff"));
     }
 
     #[test]

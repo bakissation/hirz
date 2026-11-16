@@ -166,6 +166,16 @@ pub struct PairingApprovalContext<'a> {
     pub requested_at: u64,
 }
 
+/// The user removes another device from the vault (`hirz remove-device`). Shown to the user
+/// before a UV method runs.
+#[derive(Debug)]
+pub struct RemovalApprovalContext<'a> {
+    /// The device's name from the vault: untrusted.
+    pub device_name: &'a str,
+    /// The start of the device id in hex, as `hirz devices` shows it.
+    pub device_id_short: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalError {
     /// The user cancelled or closed the prompt.
@@ -206,6 +216,16 @@ pub trait Approver {
     fn confirm_pairing(
         &self,
         _ctx: &PairingApprovalContext<'_>,
+    ) -> Result<Approval, ApprovalError> {
+        Err(ApprovalError::Unavailable)
+    }
+
+    /// Device removal: the user confirms which device is removed and then passes a user
+    /// verification method. Click-to-allow never counts, so callers act only on
+    /// `user_verified`. The default refuses, so an approver without such a method fails closed.
+    fn confirm_removal(
+        &self,
+        _ctx: &RemovalApprovalContext<'_>,
     ) -> Result<Approval, ApprovalError> {
         Err(ApprovalError::Unavailable)
     }
@@ -256,6 +276,18 @@ mod tests {
         };
         assert_eq!(
             ApproveOnly.confirm_pairing(&ctx),
+            Err(ApprovalError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn removal_fails_closed_by_default() {
+        let ctx = RemovalApprovalContext {
+            device_name: "desk",
+            device_id_short: "0a1b2c3d4e5f",
+        };
+        assert_eq!(
+            ApproveOnly.confirm_removal(&ctx),
             Err(ApprovalError::Unavailable)
         );
     }

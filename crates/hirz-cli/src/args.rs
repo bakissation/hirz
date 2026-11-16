@@ -60,6 +60,7 @@ pub enum Command {
         prefix: String,
         yes: bool,
     },
+    ForgetLocal,
     Pin(PinAction),
     Export {
         file: PathBuf,
@@ -361,6 +362,11 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
             raw.finish("remove-device")?;
             let prefix = rest.first().cloned().unwrap_or_default();
             Command::RemoveDevice { prefix, yes }
+        }
+        "forget-local" => {
+            expect_args(rest, 0, "forget-local")?;
+            raw.finish("forget-local")?;
+            Command::ForgetLocal
         }
         "pin" => {
             expect_args(rest, 1, "pin")?;

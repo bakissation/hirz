@@ -6,7 +6,8 @@ use crate::cmd_vault::{already_set_up, join_target};
 use crate::error::{CliError, CliResult, Exit};
 use crate::prompt::{self, confirm_word};
 use crate::ui::{self, clean, count, hex};
-use hirz_core::{ApprovalError, PairingApprovalContext};
+use hirz_core::{Approval, ApprovalError, PairingApprovalContext};
+use hirz_uv::display::asked_ago;
 use hirz_vault::{PairingPoll, PairingRequest, PendingJoin, Vault, VaultError};
 use std::path::Path;
 use std::time::Duration;
@@ -145,7 +146,7 @@ fn request_rows(ctx: &Ctx<'_>, reqs: &[PairingRequest]) -> Vec<Vec<String>> {
             vec![
                 i.saturating_add(1).to_string(),
                 clean(&r.name, NAME_CHARS),
-                format!("{} ago", minutes(now.saturating_sub(r.created_at))),
+                asked_ago(r.created_at, now),
                 short(&r.request_id),
             ]
         })
@@ -207,17 +208,74 @@ fn choose(
     }
 }
 
-fn no_uv(program: &str) -> CliError {
+/// A device change that needs user verification, and what stays as it was when it fails.
+pub(crate) struct Change<'a> {
+    /// "Approving a device", "Removing a device".
+    pub action: &'a str,
+    /// The command to run again once a method is set up.
+    pub retry: String,
+    /// Said after every failure, for example "Nothing was removed."
+    pub unchanged: String,
+}
+
+fn no_uv(program: &str, change: &Change<'_>) -> CliError {
     CliError::failed(format!(
-        "Approving a device needs your system password, your fingerprint or a hirz PIN, and none \
-         of them can be used on this computer right now (a click is not enough). Nothing was \
-         approved; the request is still waiting.\n\
+        "{} needs your system password, your fingerprint or a hirz PIN, and none of them can be \
+         used on this computer right now (a click is not enough). {}\n\
          Set a hirz PIN:\n  {program} pin set\n\
          or install the polkit action for the system password (see docs/approval.md):\n  \
          sudo install -o root -g root -m 0644 packaging/polkit/dev.hirz.authenticate.policy \
          /usr/share/polkit-1/actions/\n\
-         The approval window also needs zenity. Then run `{program} devices approve` again."
+         The approval window also needs zenity. Then run `{}` again.",
+        change.action, change.unchanged, change.retry
     ))
+}
+
+/// Maps the hirz-uv window's answer. Only a passed user verification counts.
+pub(crate) fn check_verdict(
+    ctx: &Ctx<'_>,
+    verdict: Result<Approval, ApprovalError>,
+    change: &Change<'_>,
+) -> CliResult {
+    let unchanged = &change.unchanged;
+    match verdict {
+        Ok(a) if a.user_verified => Ok(()),
+        Ok(_) => Err(CliError::failed(format!(
+            "hirz could not verify that it is you. {unchanged}"
+        ))),
+        Err(ApprovalError::Unavailable) => Err(no_uv(&ctx.program, change)),
+        Err(ApprovalError::Denied) => Err(CliError::cancelled(format!(
+            "The window was cancelled or the check failed. {unchanged}"
+        ))),
+        Err(ApprovalError::Timeout) => Err(CliError::failed(format!(
+            "The window was not answered in time. {unchanged}"
+        ))),
+        Err(ApprovalError::Locked) => Err(CliError::failed(format!(
+            "Your hirz PIN is locked after too many wrong attempts. Reset it with \
+             `{} pin reset`, or use your system password. {unchanged}",
+            ctx.program
+        ))),
+        Err(ApprovalError::Internal(m)) => Err(CliError::failed(format!(
+            "The approval window failed ({m}). {unchanged}"
+        ))),
+    }
+}
+
+fn pairing_change(ctx: &Ctx<'_>, req: Option<&PairingRequest>) -> Change<'static> {
+    let unchanged = match req {
+        Some(r) => format!(
+            "Nothing was approved. The request is still waiting: run `{0} devices approve` \
+             again, or remove it with `{0} devices deny {1}`.",
+            ctx.program,
+            short(&r.request_id)
+        ),
+        None => "Nothing was approved; the request is still waiting.".to_string(),
+    };
+    Change {
+        action: "Approving a device",
+        retry: format!("{} devices approve", ctx.program),
+        unchanged,
+    }
 }
 
 /// The second, verified confirmation in a window drawn by hirz-uv. Only a passed user
@@ -235,59 +293,33 @@ fn verify_user(ctx: &mut Ctx<'_>, req: &PairingRequest, words: &str) -> CliResul
     };
     let sys = ctx.sys;
     let verdict = sys.pairing_approver(ctx.env).confirm_pairing(&pairing);
-    let still_waiting = format!(
-        "The request is still waiting: run `{0} devices approve` again, or remove it with \
-         `{0} devices deny {1}`.",
-        ctx.program,
-        short(&req.request_id)
-    );
-    match verdict {
-        Ok(a) if a.user_verified => Ok(()),
-        Ok(_) => Err(CliError::failed(format!(
-            "hirz could not verify that it is you, so nothing was approved. {still_waiting}"
-        ))),
-        Err(ApprovalError::Unavailable) => Err(no_uv(&ctx.program)),
-        Err(ApprovalError::Denied) => Err(CliError::cancelled(format!(
-            "Not approved: the window was cancelled or the check failed. {still_waiting}"
-        ))),
-        Err(ApprovalError::Timeout) => Err(CliError::failed(format!(
-            "Not approved: the window was not answered in time. {still_waiting}"
-        ))),
-        Err(ApprovalError::Locked) => Err(CliError::failed(format!(
-            "Not approved: your hirz PIN is locked after too many wrong attempts. Reset it with \
-             `{} pin reset`, or use your system password. {still_waiting}",
-            ctx.program
-        ))),
-        Err(ApprovalError::Internal(m)) => Err(CliError::failed(format!(
-            "Not approved: the approval window failed ({m}). {still_waiting}"
-        ))),
-    }
+    check_verdict(ctx, verdict, &pairing_change(ctx, Some(req)))
 }
 
-/// Refuses before the words are compared when no verification method can work at all.
-fn ensure_uv_possible(ctx: &Ctx<'_>) -> CliResult {
+/// Refuses before anything is asked when no verification method can work at all.
+pub(crate) fn ensure_uv_possible(ctx: &Ctx<'_>, change: &Change<'_>) -> CliResult {
     let none = matches!(ctx.sys.uv_methods(ctx.env), Ok(m) if m.is_empty());
     if none || !ctx.sys.zenity() {
-        return Err(no_uv(&ctx.program));
+        return Err(no_uv(&ctx.program, change));
     }
     Ok(())
 }
 
 pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
-    let (mut vault, _) = ctx.open_vault()?;
+    let (mut vault, _) = ctx.open_active_vault()?;
     let reqs = vault.pairing_requests()?;
     if reqs.is_empty() {
         return Err(no_requests());
     }
-    ensure_uv_possible(ctx)?;
+    ensure_uv_possible(ctx, &pairing_change(ctx, None))?;
     let req = choose(ctx, reqs, prefix.as_deref())?;
     let name = clean(&req.name, NAME_CHARS);
     let now = ctx.sys.now();
     ctx.say(&format!(
-        "A new device called \"{name}\" asked to join this vault {} ago (request {}).\n\
+        "A new device called \"{name}\" asked to join this vault {} (request {}).\n\
          Approving gives it every passkey in the vault.\n\n\
          Compare the words below with the words on the new device's screen:",
-        minutes(now.saturating_sub(req.created_at)),
+        asked_ago(req.created_at, now),
         short(&req.request_id)
     ))?;
     let words = vault.pairing_words(&req)?;
@@ -335,7 +367,7 @@ pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
 }
 
 pub fn deny(ctx: &mut Ctx<'_>, prefix: &str) -> CliResult<Exit> {
-    let (mut vault, _) = ctx.open_vault()?;
+    let (mut vault, _) = ctx.open_active_vault()?;
     let reqs = by_prefix(vault.pairing_requests()?, prefix)?;
     let req = match reqs.as_slice() {
         [] => {

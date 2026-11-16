@@ -502,4 +502,39 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn removed_device_stops_serving() {
+        let dir = ScratchDir::new("hirzd-test").unwrap();
+        let vault_dir = dir.path().join("vault");
+        let (a_state, b_state) = (dir.path().join("a"), dir.path().join("b"));
+        let (mut a, phrase) = Vault::create(&vault_dir, &a_state, "a").unwrap();
+        let b = Vault::join_with_recovery(&vault_dir, &b_state, &phrase, "b").unwrap();
+        let id: Vec<u8> = (0x40..0x50).collect();
+        let key = import_es256(&vault_dir, &a_state, &id);
+        let session = Session::new(settings_for(&vault_dir, &b_state), ApproveAll);
+        let handler = Ctap2Handler::new(VaultAuthenticator::new(session, Notice::new(false)));
+
+        let reply = get_assertion(&handler, &get_assertion_params(Some(&id), true));
+        let (status, body) = reply.split_first().unwrap();
+        assert_eq!(*status, STATUS_OK);
+        check_assertion(body, &id, &key).unwrap();
+
+        a.reload().unwrap();
+        a.remove_device(&b.device_id()).unwrap();
+        for up in [true, false] {
+            let reply = get_assertion(&handler, &get_assertion_params(Some(&id), up));
+            assert_eq!(reply, vec![STATUS_NOT_ALLOWED]);
+        }
+        let mut request = vec![0x01];
+        request.extend(cbor::encode(&make_credential_params()).unwrap());
+        assert_eq!(
+            handler.process(&request, &hid::RequestContext::new()),
+            vec![STATUS_NOT_ALLOWED]
+        );
+        assert_eq!(
+            Vault::open(&vault_dir, &a_state).unwrap().list_all().len(),
+            1
+        );
+    }
 }

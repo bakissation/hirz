@@ -27,6 +27,7 @@ struct VaultInfo {
     skipped: Vec<(String, &'static str)>,
     ignored_files: usize,
     locked_out: bool,
+    removed: bool,
     rotation_conflict: bool,
     rollback_suspected: bool,
     maintenance_error: Option<String>,
@@ -87,6 +88,7 @@ fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
                         .collect(),
                     ignored_files: r.ignored_files,
                     locked_out: r.locked_out,
+                    removed: r.this_device_removed,
                     rotation_conflict: r.rotation_conflict,
                     rollback_suspected: r.rollback_suspected,
                     maintenance_error: r.maintenance_error.as_ref().map(|e| e.to_string()),
@@ -164,6 +166,7 @@ fn to_json(r: &Report) -> Value {
             "devices_removed": v.devices_removed,
             "backed_up": v.backed_up,
             "key_generation": v.generation,
+            "this_device_removed": v.removed,
             "sync": {
                 "skipped_files": v.skipped.iter().map(|(p, why)| json!({"path": p, "reason": why})).collect::<Vec<_>>(),
                 "ignored_files": v.ignored_files,
@@ -257,7 +260,15 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
             )?;
         }
         let mut sync_ok = true;
-        if v.locked_out {
+        if v.removed {
+            sync_ok = false;
+            ctx.say(&format!(
+                "Sync:           {}\n                \
+                 Delete its keys with `{} forget-local`, or join again if that was a mistake.",
+                crate::app::REMOVED,
+                ctx.program
+            ))?;
+        } else if v.locked_out {
             sync_ok = false;
             ctx.say(
                 "Sync:           this device was removed from the vault (or missed a key change)\n                \
@@ -412,7 +423,7 @@ pub fn status(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
     }
     match &report.vault {
         None => return Ok(Exit::Failed),
-        Some(v) if v.locked_out || v.rotation_conflict => return Ok(Exit::Failed),
+        Some(v) if v.removed || v.locked_out || v.rotation_conflict => return Ok(Exit::Failed),
         Some(_) => {}
     }
     Ok(Exit::Ok)

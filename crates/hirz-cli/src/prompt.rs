@@ -149,6 +149,20 @@ impl Drop for EchoOff {
     }
 }
 
+pub const NOTE_TERMINAL: &str =
+    "Note: this terminal cannot hide what you type, so it will be visible.";
+pub const NOTE_NOT_TERMINAL: &str =
+    "Note: standard input is not a terminal, so hirz cannot hide this input.";
+
+/// The note printed once before a secret is read without hiding it.
+pub fn visibility_note(echo_off: bool, stdin_is_terminal: bool) -> Option<&'static str> {
+    match (echo_off, stdin_is_terminal) {
+        (true, _) => None,
+        (false, true) => Some(NOTE_TERMINAL),
+        (false, false) => Some(NOTE_NOT_TERMINAL),
+    }
+}
+
 impl Prompter for TerminalPrompter {
     fn line(&mut self, prompt: &str) -> io::Result<Option<String>> {
         show(prompt);
@@ -157,8 +171,11 @@ impl Prompter for TerminalPrompter {
 
     fn secret(&mut self, prompt: &str) -> io::Result<Option<Zeroizing<String>>> {
         let echo = EchoOff::start();
-        if echo.is_none() && !self.warned_visible && io::stdin().is_terminal() {
-            show("Note: this terminal cannot hide what you type, so it will be visible.\n");
+        if !self.warned_visible
+            && let Some(note) = visibility_note(echo.is_some(), io::stdin().is_terminal())
+        {
+            show(note);
+            show("\n");
             self.warned_visible = true;
         }
         show(prompt);

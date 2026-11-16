@@ -695,8 +695,17 @@ fn rotation_locks_out_removed_device() {
     assert_eq!(b.list_all().len(), 4);
     assert!(b.devices().iter().any(|d| d.id == c_id && d.removed));
 
+    assert!(!a.report().this_device_removed);
+    assert!(!b.report().this_device_removed);
     let report = c.reload().unwrap().clone();
     assert!(report.locked_out);
+    assert!(report.this_device_removed);
+    assert!(
+        Vault::open(&vdir, &t.path("c"))
+            .unwrap()
+            .report()
+            .this_device_removed
+    );
     assert!(c.get(&[4; 32]).is_none());
     assert!(matches!(
         c.put(cred(5, "example.com")),
@@ -734,6 +743,22 @@ fn rotation_locks_out_removed_device() {
     let d = Vault::join_with_recovery(&vdir, &t.path("d"), &phrase, "d").unwrap();
     assert_eq!(d.report().generation, 2);
     assert_eq!(d.list_all().len(), 4);
+    assert!(!d.report().this_device_removed);
+
+    // The removed device forgets its local state; the vault folder stays as it was.
+    let before = record_files(&vdir).len();
+    fs::write(t.path("c").join("unrelated"), b"x").unwrap();
+    assert!(Vault::forget_local(&t.path("c")).unwrap());
+    assert!(!Vault::is_set_up(&t.path("c")));
+    assert!(t.path("c").join("unrelated").exists());
+    assert!(!t.path("c").join(format::STATE_KEYRING).exists());
+    assert!(!Vault::forget_local(&t.path("c")).unwrap());
+    assert!(!Vault::forget_local(&t.path("missing")).unwrap());
+    assert_eq!(record_files(&vdir).len(), before);
+    assert_eq!(
+        Vault::open(&vdir, &t.path("a")).unwrap().list_all().len(),
+        4
+    );
 }
 
 #[test]

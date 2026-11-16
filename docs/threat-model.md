@@ -43,6 +43,11 @@ does not.
 - **Remote revocation.** Removing a lost device rotates the vault key, so the lost device
   cannot read passkeys created afterwards. Passkeys the lost device already decrypted stay
   usable by whoever holds it: hirz lists the affected sites so you can replace those passkeys.
+  A removed device that runs hirz and syncs the change stops serving passkeys and says so,
+  and `hirz forget-local` deletes its keys. That only makes an honest device stop: a thief
+  who copied the device secret, the key ring and the vault folder (or who runs a modified
+  hirz) is not stopped by it and keeps every passkey the device could read before the
+  removal. Replacing those passkeys at each site is the only remedy.
 - **Sites that refuse software authenticators.** Some relying parties require hardware
   attestation or allow only certain authenticators. hirz uses `none` attestation and will be
   refused there.

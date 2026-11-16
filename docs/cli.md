@@ -49,9 +49,16 @@ The recovery phrase, PINs and passphrases are read without showing them on scree
 standard library has no terminal API and hirz allows `unsafe` code only in `hirz-sys`, so
 hirz turns off echo by running `stty -echo` (and restores the saved settings with
 `stty <saved>` afterwards). `stty` is only taken from root-owned system directories
-(`/usr/bin`, `/bin`, ...), never from `PATH`. When standard input is not a terminal, or
-`stty` is not available, the input is read normally and hirz prints a note that it will be
-visible. If hirz is killed while echo is off, type `reset` and press Enter.
+(`/usr/bin`, `/bin`, ...), never from `PATH`. When the input cannot be hidden, hirz reads it
+normally and prints one note on standard error before the first secret:
+
+- standard input is a terminal but `stty` is not available:
+  "Note: this terminal cannot hide what you type, so it will be visible."
+- standard input is not a terminal (a pipe or a file, for example `hirz pin set` in a
+  script):
+  "Note: standard input is not a terminal, so hirz cannot hide this input."
+
+If hirz is killed while echo is off, type `reset` and press Enter.
 
 ## Commands
 
@@ -101,8 +108,9 @@ Shows:
 - whether your passkeys count as backed up (the WebAuthn BS flag: set once the vault has
   a second device or a confirmed backup);
 - sync health: files that could not be read (usually a sync still in progress, otherwise
-  damaged files), a removed device, a key rotation conflict, files that seem rolled back,
-  and maintenance writes that failed;
+  damaged files), whether another device removed this one (or this one missed a key
+  change), a key rotation conflict, files that seem rolled back, and maintenance writes
+  that failed;
 - the approval methods that work now (from `hirz-uv`), whether `zenity` is installed,
   whether the polkit action is installed and whether a hirz PIN is set;
 - the Firefox native messaging manifests found in the per-user, `$XDG_CONFIG_HOME` and
@@ -121,6 +129,7 @@ vault cannot be read or this device was removed from it.
   "vault": {
     "device_name": "...", "device_id": "<hex>", "passkeys": 3,
     "devices_active": 2, "devices_removed": 0, "backed_up": true, "key_generation": 1,
+    "this_device_removed": false,
     "sync": { "skipped_files": [{"path": "...", "reason": "..."}], "ignored_files": 0,
               "locked_out": false, "rotation_conflict": false,
               "rollback_suspected": false, "maintenance_error": null }
@@ -136,6 +145,15 @@ vault cannot be read or this device was removed from it.
 ```
 
 Manifest `state` is `ok`, `missing`, `program_missing` or `invalid`.
+
+### When another device removed this one
+
+When the vault says that this computer was removed (another device ran `hirz
+remove-device` for it), `hirz list`, `hirz delete`, `hirz devices`, `hirz devices approve`,
+`hirz devices deny`, `hirz remove-device` and `hirz backup confirm` print "This computer
+was removed from your hirz vault; its passkeys are no longer used here." with what to do
+next, and exit with status 1. `hirz status` reports it too. hirzd and hirz-nmh stop using
+the vault at the same time. Run `hirz forget-local` to delete this computer's keys.
 
 ### `hirz list [--site SITE] [--json]`
 
@@ -168,7 +186,8 @@ The text output also says when devices are waiting for approval.
 ### `hirz devices approve [REQUEST]`
 
 Lists the devices waiting to join (requests made with `join --request` that have not
-expired) and, for the chosen one, shows its name, how long ago it asked and the four
+expired) and, for the chosen one, shows its name, how long ago it asked (in the same words
+as the hirz window: "less than a minute ago", "1 minute ago", "N minutes ago") and the four
 verification words computed on this device. With one request it is chosen directly; with
 several hirz lists them, warns that unexpected ones may be planted, and asks for a number.
 REQUEST, at least four hex digits of the request id, picks one directly.
@@ -204,6 +223,28 @@ changed afterwards, that it keeps whatever it already read, and that you should 
 sharing the folder with it in your sync tool. It then lists every site with a passkey in
 the vault, since the removed device could have copied all of them, and advises replacing
 those passkeys. This computer cannot remove itself.
+
+After the yes/no question, hirz requires user verification, as for approving a device: a
+hirz window shows the device name and id (Cancel has the focus), and then the first
+available method of your approval config asks for your system password, your fingerprint
+or your hirz PIN. Click-to-allow never counts. `--yes` skips only the yes/no question in the
+terminal, never the window. Nothing is removed when the window is cancelled or the check
+fails (exit status 4), or the window times out or the PIN is locked (exit status 1). When no
+verifying method is available, hirz refuses before asking anything (exit status 1) and
+explains how to set a PIN or install the polkit action.
+
+### `hirz forget-local`
+
+Deletes this computer's hirz keys from the state directory: the device secret, the key ring
+and the event counter, and the recorded vault location. The vault folder is never touched,
+nor are other devices or the hirz PIN. Use it on a computer that another device removed, or
+to stop using hirz here. When the vault says this computer was removed, hirz asks a yes/no
+question; otherwise it warns that this computer will lose access until it joins again and
+you must type `forget`. Anything else changes nothing (exit status 4). Without keys there is
+nothing to do (exit status 0).
+
+This only makes an honest computer stop. Someone who copied the files before (see
+[threat-model.md](threat-model.md)) keeps what they copied.
 
 ### `hirz pin set | change | reset | status`
 

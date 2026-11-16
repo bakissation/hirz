@@ -2,8 +2,9 @@
 
 use crate::app::Ctx;
 use crate::args::DeleteTarget;
+use crate::cmd_pair::{Change, check_verdict, ensure_uv_possible};
 use crate::error::{CliError, CliResult, Exit, phrase_problem};
-use crate::prompt::{self, confirm};
+use crate::prompt::{self, confirm, confirm_word};
 use crate::ui::{self, clean, count, hex};
 use hirz_vault::{CredentialRecord, DeviceInfo, RecoveryPhrase, Vault, VaultError};
 use serde_json::{Value, json};
@@ -368,7 +369,7 @@ fn passkey_rows(records: &[&CredentialRecord]) -> Vec<Vec<String>> {
 }
 
 pub fn list(ctx: &mut Ctx<'_>, site: Option<String>, json_out: bool) -> CliResult<Exit> {
-    let (vault, _) = ctx.open_vault()?;
+    let (vault, _) = ctx.open_active_vault()?;
     let site = site.map(|s| s.trim().to_ascii_lowercase());
     let records = sorted(
         vault
@@ -417,7 +418,7 @@ pub fn list(ctx: &mut Ctx<'_>, site: Option<String>, json_out: bool) -> CliResul
 }
 
 pub fn delete(ctx: &mut Ctx<'_>, target: DeleteTarget, yes: bool) -> CliResult<Exit> {
-    let (mut vault, _) = ctx.open_vault()?;
+    let (mut vault, _) = ctx.open_active_vault()?;
     let matches: Vec<&CredentialRecord> = match &target {
         DeleteTarget::IdPrefix(p) => {
             let Some(prefix) = ui::hex_prefix(p) else {
@@ -516,7 +517,7 @@ fn sorted_devices(vault: &Vault) -> Vec<DeviceInfo> {
 }
 
 pub fn devices(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
-    let (mut vault, _) = ctx.open_vault()?;
+    let (mut vault, _) = ctx.open_active_vault()?;
     let devs = sorted_devices(&vault);
     if json_out {
         let items: Vec<Value> = devs
@@ -568,7 +569,7 @@ pub fn sites(records: &[&CredentialRecord]) -> Vec<(String, usize)> {
 }
 
 pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Exit> {
-    let (mut vault, _) = ctx.open_vault()?;
+    let (mut vault, _) = ctx.open_active_vault()?;
     let Some(prefix) = ui::hex_prefix(prefix) else {
         return Err(CliError::usage(
             "Give at least 4 characters of the device id shown by `hirz devices`.",
@@ -601,6 +602,13 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
         ));
     }
     let name = clean(&device.name, MAX_NAME_CHARS);
+    let id_short = short_id(&device.id);
+    let change = Change {
+        action: "Removing a device",
+        retry: format!("{} remove-device {id_short}", ctx.program),
+        unchanged: "Nothing was removed.".to_string(),
+    };
+    ensure_uv_possible(ctx, &change)?;
     let exposed = sites(&vault.list_all());
     ctx.say(&format!(
         "Removing \"{name}\" (id {}):\n\
@@ -630,6 +638,17 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
     if !yes && !confirm(ctx.prompt, &format!("Remove \"{name}\" now?"))? {
         return Err(CliError::cancelled("Nothing was changed."));
     }
+    ctx.say(
+        "Confirm in the hirz window: it shows the device, then asks for your system password,\n\
+         your fingerprint or your hirz PIN.",
+    )?;
+    let removal = hirz_core::RemovalApprovalContext {
+        device_name: &device.name,
+        device_id_short: &id_short,
+    };
+    let sys = ctx.sys;
+    let verdict = sys.pairing_approver(ctx.env).confirm_removal(&removal);
+    check_verdict(ctx, verdict, &change)?;
     vault.remove_device(&device.id)?;
     ctx.say(&format!(
         "Removed \"{name}\". The vault key has been changed."
@@ -644,8 +663,61 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
     Ok(Exit::Ok)
 }
 
+/// Deletes this device's keys from the state folder. The vault folder is never touched.
+pub fn forget_local(ctx: &mut Ctx<'_>) -> CliResult<Exit> {
+    let state = ctx.env.state_dir().to_path_buf();
+    if !ctx.env.device_state_exists() {
+        ctx.say("hirz has no keys for a vault on this computer, so there is nothing to forget.")?;
+        return Ok(Exit::Ok);
+    }
+    let removed = ctx
+        .vault_dir()
+        .ok()
+        .filter(|d| Vault::exists(d))
+        .and_then(|d| Vault::open(&d, &state).ok())
+        .is_some_and(|v| v.report().this_device_removed);
+    ctx.say(&format!(
+        "This deletes this computer's hirz keys from {}.\n\
+         The vault folder and the other devices are not changed, and your hirz PIN is kept.",
+        state.display()
+    ))?;
+    let go = if removed {
+        ctx.say(crate::app::REMOVED)?;
+        confirm(ctx.prompt, "Delete this computer's hirz keys?")?
+    } else {
+        ctx.say(&format!(
+            "This computer still uses the vault. Afterwards it cannot use your passkeys until\n\
+             it joins again (`{} join --vault DIR --request`, approved on another device, or\n\
+             with the recovery phrase). If it is the only device, make sure you have the\n\
+             recovery phrase first.",
+            ctx.program
+        ))?;
+        confirm_word(ctx.prompt, "Forget the keys on this computer?", "forget")?
+    };
+    if !go {
+        return Err(CliError::cancelled("Nothing was deleted."));
+    }
+    Vault::forget_local(&state)?;
+    match std::fs::remove_file(state.join(crate::env::VAULT_POINTER)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CliError::io(
+                "Could not remove the recorded vault location",
+                &e,
+            ));
+        }
+    }
+    ctx.say(&format!(
+        "Done. This computer no longer has hirz keys. To use hirz here again, run\n\
+         `{} join --vault DIR --request` (or `{} init` for a new vault).",
+        ctx.program, ctx.program
+    ))?;
+    Ok(Exit::Ok)
+}
+
 pub fn backup_confirm(ctx: &mut Ctx<'_>, yes: bool) -> CliResult<Exit> {
-    let (mut vault, _) = ctx.open_vault()?;
+    let (mut vault, _) = ctx.open_active_vault()?;
     if vault.backup_state() {
         ctx.say("Your passkeys already count as backed up.")?;
         return Ok(Exit::Ok);

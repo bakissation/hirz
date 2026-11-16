@@ -67,6 +67,26 @@ impl Ctx<'_> {
         let vault = Vault::open(&dir, self.env.state_dir())?;
         Ok((vault, dir))
     }
+
+    /// Like [`Ctx::open_vault`], but refuses when another device removed this one.
+    pub fn open_active_vault(&self) -> CliResult<(Vault, PathBuf)> {
+        let (vault, dir) = self.open_vault()?;
+        if vault.report().this_device_removed {
+            return Err(removed(&self.program));
+        }
+        Ok((vault, dir))
+    }
+}
+
+pub const REMOVED: &str =
+    "This computer was removed from your hirz vault; its passkeys are no longer used here.";
+
+pub fn removed(program: &str) -> CliError {
+    CliError::failed(format!(
+        "{REMOVED}\nTo delete this computer's hirz keys, run `{program} forget-local`. If the \
+         removal was a mistake, run that and then join again with `{program} join --vault DIR \
+         --request`."
+    ))
 }
 
 pub fn not_set_up() -> CliError {
@@ -97,6 +117,7 @@ pub fn run(inv: Invocation, ctx: &mut Ctx<'_>) -> CliResult<Exit> {
         Command::DevicesApprove { request } => crate::cmd_pair::approve(ctx, request),
         Command::DevicesDeny { request } => crate::cmd_pair::deny(ctx, &request),
         Command::RemoveDevice { prefix, yes } => crate::cmd_vault::remove_device(ctx, &prefix, yes),
+        Command::ForgetLocal => crate::cmd_vault::forget_local(ctx),
         Command::BackupConfirm { yes } => crate::cmd_vault::backup_confirm(ctx, yes),
         Command::Pin(action) => crate::cmd_pin::pin(ctx, action),
         Command::Export { file, plain } => crate::cmd_cxf::export(ctx, &file, plain),
@@ -129,6 +150,7 @@ Devices and backups:
   devices approve      Let a new device join (compare four words first)
   devices deny ID      Refuse a device that asked to join
   remove-device ID     Stop a lost or old device from reading new passkeys
+  forget-local         Delete this computer's hirz keys (after it was removed)
   backup confirm       Tell hirz that your passkeys are backed up
   export --cxf FILE    Save all passkeys to a file (encrypted by default)
   import --cxf FILE    Add passkeys from an export file
@@ -224,9 +246,19 @@ Usage: hirz remove-device ID-PREFIX [--yes]
 
 Removes a device from the vault and changes the vault key, so the device cannot read
 passkeys added or changed from now on. It keeps whatever it could already read: hirz
-lists the sites whose passkeys you should replace.
+lists the sites whose passkeys you should replace. You confirm in a hirz window with
+your password, fingerprint or hirz PIN.
 
-  --yes    Do not ask for confirmation
+  --yes    Do not ask the yes/no question in the terminal (the window still asks)
+";
+
+const HELP_FORGET: &str = "\
+Usage: hirz forget-local
+
+Deletes this computer's hirz keys (its device key, key ring and counter) from the state
+folder, after you confirm. Use it on a computer that was removed from the vault, or to
+stop using hirz here. The vault folder is never touched, and the hirz PIN is kept.
+Join again later with `hirz join`.
 ";
 
 const HELP_PIN: &str = "\
@@ -291,6 +323,7 @@ pub fn help(topic: Option<&str>) -> CliResult<&'static str> {
         Some("delete") => HELP_DELETE,
         Some("devices") => HELP_DEVICES,
         Some("remove-device") => HELP_REMOVE,
+        Some("forget-local") => HELP_FORGET,
         Some("pin") => HELP_PIN,
         Some("export") => HELP_EXPORT,
         Some("import") => HELP_IMPORT,

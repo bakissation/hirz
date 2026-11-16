@@ -136,7 +136,13 @@ pub enum VaultStatus {
     Missing,
     /// A vault exists but cannot be opened; the text says why.
     Broken(String),
+    /// Another device removed this one from the vault. Its passkeys are no longer used here.
+    Removed,
 }
+
+/// Logged and shown once when a frontend finds that this device was removed.
+pub const REMOVED_NOTICE: &str =
+    "This computer was removed from your hirz vault; its passkeys are no longer used here";
 
 /// An opened vault (kept between requests, reloaded by the engine for every ceremony) and
 /// the approver.
@@ -168,16 +174,26 @@ impl<A: Approver> Session<A> {
         &self.approver
     }
 
-    /// Opens the vault unless it is already open.
+    /// Opens the vault, or re-reads it when it is already open, and checks that this device
+    /// still belongs to it. A removed device keeps no vault open, so nothing is served from
+    /// it; joining again later is picked up by the next call.
     pub fn ensure_vault(&mut self) -> VaultStatus {
-        if self.vault.is_some() {
-            return VaultStatus::Ready;
+        if let Some(vault) = self.vault.as_mut() {
+            match vault.reload() {
+                Ok(r) if r.this_device_removed => {
+                    self.vault = None;
+                    return VaultStatus::Removed;
+                }
+                Ok(_) => return VaultStatus::Ready,
+                Err(_) => self.vault = None,
+            }
         }
         let loc = match self.settings.location() {
             Ok(l) => l,
             Err(e) => return VaultStatus::Broken(e),
         };
         match Vault::open(&loc.vault_dir, &loc.state_dir) {
+            Ok(v) if v.report().this_device_removed => VaultStatus::Removed,
             Ok(v) => {
                 self.vault = Some(v);
                 VaultStatus::Ready

@@ -4,7 +4,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -87,9 +87,23 @@ impl core::fmt::Debug for RunResult {
     }
 }
 
+/// Which of two processes run side by side ended first; the other one was killed.
+#[derive(Debug)]
+pub enum Race {
+    Main(RunResult),
+    Dialog(RunResult),
+}
+
 /// Everything the approval flow needs from the operating system.
 pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> RunResult;
+    /// Runs `main` (for example `fprintd-verify`) while `dialog` is shown, and returns as soon
+    /// as either ends, after killing the other.
+    fn run_with_dialog(&self, main: &CommandSpec, dialog: &CommandSpec) -> Race;
+    /// An icon for hirz's windows, from a fixed list of system paths.
+    fn window_icon(&self) -> Option<PathBuf> {
+        None
+    }
     /// True when the program exists in a trusted system directory.
     fn tool_available(&self, tool: Tool) -> bool;
     /// True when the hirz polkit action file is installed.
@@ -108,6 +122,12 @@ pub const TRUSTED_DIRS: &[&str] = &[
     "/usr/sbin",
     "/usr/local/bin",
     "/run/current-system/sw/bin",
+];
+
+/// Where packages install the hirz icon. Never taken from the environment.
+pub const WINDOW_ICONS: &[&str] = &[
+    "/usr/share/icons/hicolor/scalable/apps/hirz.svg",
+    "/usr/local/share/icons/hicolor/scalable/apps/hirz.svg",
 ];
 
 const CHILD_PATH: &str = "/usr/bin:/bin";
@@ -147,10 +167,16 @@ pub fn resolve_tool(name: &str) -> Option<PathBuf> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRunner;
 
-impl CommandRunner for SystemRunner {
-    fn run(&self, spec: &CommandSpec) -> RunResult {
+struct Running {
+    child: Child,
+    out: mpsc::Receiver<Option<Secret>>,
+    err: mpsc::Receiver<Option<Secret>>,
+}
+
+impl Running {
+    fn start(spec: &CommandSpec) -> Result<Running, RunResult> {
         let Some(path) = resolve_tool(spec.tool.binary_name()) else {
-            return RunResult::NotFound;
+            return Err(RunResult::NotFound);
         };
         let mut cmd = Command::new(path);
         cmd.args(&spec.args)
@@ -173,31 +199,30 @@ impl CommandRunner for SystemRunner {
         }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RunResult::NotFound,
-            Err(e) => return RunResult::Failed(format!("spawn failed: {}", e.kind())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(RunResult::NotFound),
+            Err(e) => return Err(RunResult::Failed(format!("spawn failed: {}", e.kind()))),
         };
-        let out_rx = spawn_reader(child.stdout.take());
-        let err_rx = spawn_reader(child.stderr.take());
-        let deadline = Instant::now().checked_add(spec.timeout);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return RunResult::Failed(format!("wait failed: {}", e.kind()));
-                }
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return RunResult::TimedOut;
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        };
-        let stdout = out_rx.recv_timeout(DRAIN_TIMEOUT).ok().flatten();
-        let stderr = err_rx.recv_timeout(DRAIN_TIMEOUT).ok().flatten();
+        let out = spawn_reader(child.stdout.take());
+        let err = spawn_reader(child.stderr.take());
+        Ok(Running { child, out, err })
+    }
+
+    /// `Ok(Some)` once the child exited.
+    fn poll(&mut self) -> Result<Option<ExitStatus>, RunResult> {
+        self.child.try_wait().map_err(|e| {
+            self.kill();
+            RunResult::Failed(format!("wait failed: {}", e.kind()))
+        })
+    }
+
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn finish(self, status: ExitStatus) -> RunResult {
+        let stdout = self.out.recv_timeout(DRAIN_TIMEOUT).ok().flatten();
+        let stderr = self.err.recv_timeout(DRAIN_TIMEOUT).ok().flatten();
         match (stdout, stderr) {
             (Some(stdout), Some(stderr)) => RunResult::Exited {
                 code: status.code(),
@@ -206,6 +231,88 @@ impl CommandRunner for SystemRunner {
             },
             _ => RunResult::Failed("output missing or over the size limit".into()),
         }
+    }
+}
+
+fn past(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|d| Instant::now() >= d)
+}
+
+impl CommandRunner for SystemRunner {
+    fn run(&self, spec: &CommandSpec) -> RunResult {
+        let mut child = match Running::start(spec) {
+            Ok(c) => c,
+            Err(r) => return r,
+        };
+        let deadline = Instant::now().checked_add(spec.timeout);
+        loop {
+            match child.poll() {
+                Ok(Some(status)) => return child.finish(status),
+                Ok(None) => {}
+                Err(r) => return r,
+            }
+            if past(deadline) {
+                child.kill();
+                return RunResult::TimedOut;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    fn run_with_dialog(&self, main: &CommandSpec, dialog: &CommandSpec) -> Race {
+        let mut m = match Running::start(main) {
+            Ok(c) => c,
+            Err(r) => return Race::Main(r),
+        };
+        let mut d = match Running::start(dialog) {
+            Ok(c) => c,
+            Err(r) => {
+                m.kill();
+                return Race::Dialog(r);
+            }
+        };
+        let now = Instant::now();
+        let main_end = now.checked_add(main.timeout);
+        let dialog_end = now.checked_add(dialog.timeout);
+        loop {
+            match m.poll() {
+                Ok(Some(status)) => {
+                    d.kill();
+                    return Race::Main(m.finish(status));
+                }
+                Ok(None) => {}
+                Err(r) => {
+                    d.kill();
+                    return Race::Main(r);
+                }
+            }
+            match d.poll() {
+                Ok(Some(status)) => {
+                    m.kill();
+                    return Race::Dialog(d.finish(status));
+                }
+                Ok(None) => {}
+                Err(r) => {
+                    m.kill();
+                    return Race::Dialog(r);
+                }
+            }
+            if past(main_end) {
+                m.kill();
+                d.kill();
+                return Race::Main(RunResult::TimedOut);
+            }
+            if past(dialog_end) {
+                m.kill();
+                d.kill();
+                return Race::Dialog(RunResult::TimedOut);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    fn window_icon(&self) -> Option<PathBuf> {
+        WINDOW_ICONS.iter().map(PathBuf::from).find(|p| p.is_file())
     }
 
     fn tool_available(&self, tool: Tool) -> bool {
@@ -386,6 +493,52 @@ mod tests {
                 assert!(stdout.starts_with(b"pkcheck"));
             }
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn race_returns_the_first_to_end() {
+        if resolve_tool("pkcheck").is_none() {
+            return;
+        }
+        let quick = CommandSpec {
+            tool: Tool::Pkcheck,
+            args: vec!["--version".into()],
+            env: EnvPolicy::System,
+            timeout: Duration::from_secs(10),
+        };
+        let missing = CommandSpec {
+            tool: Tool::FprintdList,
+            ..quick.clone()
+        };
+        match SystemRunner.run_with_dialog(&quick, &quick) {
+            Race::Main(RunResult::Exited { code, .. })
+            | Race::Dialog(RunResult::Exited { code, .. }) => {
+                assert_eq!(code, Some(0));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        if resolve_tool("fprintd-list").is_none() {
+            assert!(matches!(
+                SystemRunner.run_with_dialog(&quick, &missing),
+                Race::Dialog(RunResult::NotFound)
+            ));
+            assert!(matches!(
+                SystemRunner.run_with_dialog(&missing, &quick),
+                Race::Main(RunResult::NotFound)
+            ));
+        }
+    }
+
+    #[test]
+    fn icons_come_from_fixed_system_paths() {
+        assert!(
+            WINDOW_ICONS
+                .iter()
+                .all(|p| p.starts_with("/usr/") && p.ends_with("/hirz.svg"))
+        );
+        if let Some(p) = SystemRunner.window_icon() {
+            assert!(WINDOW_ICONS.iter().any(|w| p == Path::new(w)));
         }
     }
 
