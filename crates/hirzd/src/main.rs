@@ -65,6 +65,36 @@ pub(crate) fn log_event(event: LoopEvent) {
     }
 }
 
+/// `HIRZ_DEBUG_CTAP=1` logs every CTAP2 request and response in hex. Requests carry client
+/// data hashes, relying party ids and credential ids, never keys; still, keep it off normally.
+fn debug_ctap() -> bool {
+    std::env::var_os("HIRZ_DEBUG_CTAP").is_some_and(|v| v == "1")
+}
+
+struct DebugHandler(Arc<dyn hid::CborHandler>);
+
+impl hid::CborHandler for DebugHandler {
+    fn handle(&self, request: &[u8], ctx: &hid::RequestContext) -> Vec<u8> {
+        log(format_args!("debug request {}", hex(request)));
+        let response = self.0.handle(request, ctx);
+        log(format_args!("debug response {}", hex(&response)));
+        response
+    }
+
+    fn wink(&self) {
+        self.0.wink();
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 /// Serves the broker until the process is stopped, reconnecting whenever it goes away.
 fn serve(path: &PathBuf, handler: Arc<Ctap2Handler<VaultAuthenticator<HirzApprover>>>) {
     let mut delay = MIN_BACKOFF;
@@ -77,12 +107,14 @@ fn serve(path: &PathBuf, handler: Arc<Ctap2Handler<VaultAuthenticator<HirzApprov
                 ));
                 let started = Instant::now();
                 let mut io = StreamReportIo::new(stream);
-                match hid::run(
-                    &mut io,
-                    Arc::clone(&handler) as Arc<dyn hid::CborHandler>,
-                    hid::Config::default(),
-                    log_event,
-                ) {
+                let served: Arc<dyn hid::CborHandler> = if debug_ctap() {
+                    Arc::new(DebugHandler(
+                        Arc::clone(&handler) as Arc<dyn hid::CborHandler>
+                    ))
+                } else {
+                    Arc::clone(&handler) as Arc<dyn hid::CborHandler>
+                };
+                match hid::run(&mut io, served, hid::Config::default(), log_event) {
                     // The broker closes the connection when it refuses the uid or stops.
                     Ok(()) => log(format_args!("the broker closed the connection")),
                     Err(e) => log(format_args!("transport error: {e}")),
