@@ -1,0 +1,109 @@
+.TH HIRZ\-UHID\-BROKER 8 2026-11-16 hirz "System Administration"
+.SH NAME
+hirz\-uhid\-broker \- root helper that creates the hirz virtual security key devices
+.SH SYNOPSIS
+.B hirz\-uhid\-broker
+.RB [ \-\-listen
+.IR PATH ]
+.RB [ \-\-uhid
+.IR PATH ]
+.RB [ \-\-min\-uid
+.IR N ]
+.RB [ \-\-max\-connections
+.IR N ]
+.SH DESCRIPTION
+.B hirz\-uhid\-broker
+owns
+.I /dev/uhid
+and creates one FIDO HID device for each client that connects to its Unix socket.
+The client is
+.BR hirzd (1),
+running as the user.
+.PP
+For each connection the broker reads the peer credentials (SO_PEERCRED), refuses uids below
+.BR \-\-min\-uid ,
+a uid that already has a device, and connections beyond
+.BR \-\-max\-connections .
+It then creates the device with fixed values (name "hirz virtual authenticator", bus USB,
+the client's uid in the phys field and the FIDO report descriptor) and relays 64\-byte
+reports in both directions.
+Nothing in the device description comes from the client.
+When the client disconnects, the device is destroyed.
+The uhid descriptor never leaves the broker, and descriptors sent by clients are never
+accepted.
+The broker logs uids, pids and report counts, never report contents.
+.PP
+Normally the broker is started by systemd socket activation through
+.B hirz\-uhid\-broker.socket
+(socket
+.IR /run/hirz/uhid.sock ,
+mode 0666; any local user may connect and the broker enforces the uid policy).
+After setting up the socket it drops every capability and sets PR_SET_NO_NEW_PRIVS,
+PR_SET_DUMPABLE 0 and RLIMIT_CORE 0.
+As uid 0 it opens the root\-owned
+.I /dev/uhid
+through the owner permission bits, so it needs no capability.
+.SH OPTIONS
+.TP
+.BI \-\-listen " PATH"
+Bind
+.I PATH
+itself (mode 0666, parent folder created with mode 0755) instead of using a socket passed
+by systemd.
+For manual runs.
+.TP
+.BI \-\-uhid " PATH"
+The uhid device (default
+.IR /dev/uhid ).
+.TP
+.BI \-\-min\-uid " N"
+Refuse peers with a uid below
+.I N
+(default 1000).
+0 is rejected.
+.TP
+.BI \-\-max\-connections " N"
+Devices at the same time, one per uid (default 8, at least 1).
+.TP
+.BR \-h ", " \-\-help
+Print the usage and exit with status 2.
+.SH EXIT STATUS
+.B 2
+on wrong arguments,
+.B 1
+when the socket cannot be set up, the process cannot drop its capabilities or harden itself,
+or
+.I /dev/uhid
+cannot be opened.
+Otherwise the broker runs until it is stopped.
+.SH FILES
+.TP
+.I /run/hirz/uhid.sock
+The socket.
+.TP
+.I /usr/lib/systemd/system/hirz\-uhid\-broker.{socket,service}
+The systemd units.
+.TP
+.I /usr/lib/udev/rules.d/{70,72}\-hirz.rules
+udev rules: each hidraw node of a hirz device is owned by the uid that created it (mode
+0600) and gets no seat ACL.
+.TP
+.I /usr/lib/modules\-load.d/hirz.conf
+Loads the uhid kernel module.
+.SH EXAMPLES
+Run by hand for a test, with
+.B hirzd
+started by the user in another terminal:
+.PP
+.nf
+.RS
+sudo hirz\-uhid\-broker \-\-listen /run/hirz/uhid.sock
+.RE
+.fi
+.SH SEE ALSO
+.BR hirzd (1),
+.BR hirz (1),
+.BR systemd.socket (5)
+.PP
+.I docs/uhid.md
+in the hirz sources.

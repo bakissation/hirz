@@ -167,6 +167,12 @@ pub fn count(n: usize, noun: &str) -> String {
     }
 }
 
+/// A credential's RP id for people: OpenSSH keys read "SSH key (NAME)", see
+/// [`hirz_uv::display::site_label_with`]. JSON output keeps the raw RP id.
+pub fn site(rp_id: &str, max_chars: usize) -> String {
+    hirz_uv::display::site_label_with(rp_id, |s| clean(s, max_chars))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -179,6 +185,14 @@ mod tests {
         assert_eq!(clean("\u{1b}[31mred", 40), "[31mred");
         assert_eq!(clean("abcdefghij", 6), "abc...");
         assert_eq!(clean("abc", 3), "abc");
+    }
+
+    #[test]
+    fn ssh_sites() {
+        assert_eq!(site("ssh:", 40), "SSH key");
+        assert_eq!(site("ssh:git\u{202e}hub", 40), "SSH key (github)");
+        assert_eq!(site("ssh:abcdefghij", 6), "SSH key (abc...)");
+        assert_eq!(site("example.com", 40), "example.com");
     }
 
     #[test]

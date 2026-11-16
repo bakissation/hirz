@@ -100,6 +100,10 @@ install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
   %{buildroot}%{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
 install -d %{buildroot}%{_modulesloaddir}
 echo uhid > %{buildroot}%{_modulesloaddir}/hirz.conf
+%{_mandir}/man1/hirz.1*
+%{_mandir}/man1/hirzd.1*
+%{_mandir}/man1/hirz-nmh.1*
+%{_mandir}/man8/hirz-uhid-broker.8*
 
 # Firefox on Fedora reads /usr/lib64/mozilla; the portal and the proxy also read /usr/lib.
 # The second path is a relative symlink: identical files would be hardlinked by rpmbuild,
@@ -114,6 +118,9 @@ install -d %{buildroot}%{_libdir}/mozilla/native-messaging-hosts
 ln -s ../../../lib/mozilla/native-messaging-hosts/hirz.json \
   %{buildroot}%{_libdir}/mozilla/native-messaging-hosts/hirz.json
 %endif
+
+install -Dm0644 -t %{buildroot}%{_mandir}/man1 docs/man/hirz.1 docs/man/hirzd.1 docs/man/hirz-nmh.1
+install -Dm0644 -t %{buildroot}%{_mandir}/man8 docs/man/hirz-uhid-broker.8
 
 %check
 cargo test --release --locked --frozen --offline --workspace

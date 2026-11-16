@@ -34,9 +34,9 @@ written.
 
 ## Manifest decisions
 
-- `browser_specific_settings.gecko.id` is `hirz@hirz.dev`. This is a
-  placeholder until the project owns a domain for the id; the native manifest's
-  `allowed_extensions` must carry the same value.
+- `browser_specific_settings.gecko.id` is `hirz@berkati.xyz`, on the
+  maintainer's domain. AMO binds the listing to this id for good, and the
+  native manifest's `allowed_extensions` must carry the same value.
 - `strict_min_version` is `140.0`: `world: "MAIN"` content scripts (128),
   `Uint8Array.prototype.toBase64` / `Uint8Array.fromBase64` (133),
   `data_collection_permissions` (140).

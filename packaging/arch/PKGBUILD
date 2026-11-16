@@ -82,6 +82,9 @@ package() {
     > "$pkgdir/usr/lib/mozilla/native-messaging-hosts/hirz.json"
   grep -q "\"path\": \"$nmh\"" "$pkgdir/usr/lib/mozilla/native-messaging-hosts/hirz.json"
 
+  install -Dm0644 -t "$pkgdir/usr/share/man/man1" docs/man/hirz.1 docs/man/hirzd.1 docs/man/hirz-nmh.1
+  install -Dm0644 -t "$pkgdir/usr/share/man/man8" docs/man/hirz-uhid-broker.8
+
   install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE-MIT LICENSE-APACHE
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname" README.md SECURITY.md docs/install.md
 }

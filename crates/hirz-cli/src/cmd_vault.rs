@@ -359,7 +359,7 @@ fn passkey_rows(records: &[&CredentialRecord]) -> Vec<Vec<String>> {
         .iter()
         .map(|r| {
             vec![
-                clean(&r.rp_id, 40),
+                ui::site(&r.rp_id, 40),
                 account_of(r).map_or_else(|| "(no name)".to_string(), |a| clean(a, 40)),
                 ui::date(r.created_at),
                 short_id(&r.credential_id),
@@ -630,7 +630,7 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
         for (site, n) in &exposed {
             ctx.say(&format!(
                 "  {}  ({})",
-                clean(site, 60),
+                ui::site(site, 60),
                 count(*n, "passkey")
             ))?;
         }

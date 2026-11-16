@@ -2,7 +2,7 @@
 
 `hirz` sets up and manages the vault that holds your passkeys. It never talks to the
 network. Approving passkey requests is done by `hirzd` and `hirz-nmh` through `hirz-uv`
-(see [approval.md](approval.md)); `hirz` only manages the vault and the setup around it.
+(see [approval.md](approval.md)); `hirz` only manages the vault and the setup around it. Manual pages: `docs/man/`.
 
 ```
 hirz [--vault DIR] COMMAND [OPTIONS]
@@ -160,7 +160,9 @@ the vault at the same time. Run `hirz forget-local` to delete this computer's ke
 A table of passkeys: site (relying party id), account (user name, or display name), date
 created (UTC) and the first 12 hex digits of the credential id. `--site` keeps one site
 (exact match, case-insensitive). Names come from websites and are cleaned of control and
-invisible characters before display. Private keys are never printed.
+invisible characters before display. Private keys are never printed. Keys that OpenSSH made
+on hirz (RP id `ssh:` or `ssh:NAME`) are shown as "SSH key" or "SSH key (NAME)"; `--site`
+and `--json` use the raw RP id.
 
 `--json` prints an array of objects with `site`, `site_name`, `user_name`,
 `user_display_name`, `created_at` (unix seconds), `credential_id` (base64url),

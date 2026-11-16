@@ -16,6 +16,7 @@ manifest points to the same `hirz-nmh` path everywhere.
 | polkit action | `/usr/share/polkit-1/actions/dev.hirz.authenticate.policy` | same | same | 0644 |
 | Module list (`uhid`) | `/usr/lib/modules-load.d/hirz.conf` | same | same | 0644 |
 | Firefox native manifest | `/usr/lib/mozilla/native-messaging-hosts/hirz.json` | same, plus `/usr/lib64/mozilla/native-messaging-hosts/hirz.json` (a relative symlink to it) | same as Debian | 0644 |
+| Manual pages | `/usr/share/man/man1/hirz.1`, `hirzd.1`, `hirz-nmh.1` and `/usr/share/man/man8/hirz-uhid-broker.8` (compressed by the package tools) | same | same | 0644 |
 | Preset enabling the broker socket | none | `/usr/lib/systemd/system-preset/80-hirz.preset` | none | 0644 |
 
 All files and directories are owned by root. Nothing is installed in `/etc` (no conffiles)
@@ -32,6 +33,7 @@ and nothing in a home directory.
 | `dev.hirz.authenticate.policy` | `packaging/polkit/dev.hirz.authenticate.policy` | none |
 | `hirz.json` | `packaging/native-messaging/hirz.json` | `@HIRZ_NMH_PATH@` replaced by `/usr/lib/hirz/hirz-nmh` |
 | `hirz.conf` | written by the build | contains `uhid` |
+| Manual pages | `docs/man/` (hand-written roff) | gzip |
 
 Every package script checks that the substitution happened and stops otherwise.
 

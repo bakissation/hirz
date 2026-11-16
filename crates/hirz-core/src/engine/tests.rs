@@ -983,6 +983,47 @@ fn invalid_requests() {
 }
 
 #[test]
+fn machine_login_rp_ids_are_refused_without_a_prompt() {
+    assert!(super::is_machine_login_rp_id("pam://laptop"));
+    assert!(super::is_machine_login_rp_id("PAM://laptop"));
+    assert!(super::is_machine_login_rp_id("pam://"));
+    assert!(!super::is_machine_login_rp_id("pam:"));
+    assert!(!super::is_machine_login_rp_id("pam.example.com"));
+    assert!(!super::is_machine_login_rp_id("ssh:"));
+    assert!(!super::is_machine_login_rp_id("p\u{00E4}m://x"));
+    assert!(!super::is_machine_login_rp_id(
+        "\u{00E9}\u{00E9}\u{00E9}://"
+    ));
+
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let allowed = create(&mut vault, &make_req("alice", &[-7]), up());
+    let fake = Fake::with(vec![Ok(uv()), Ok(uv()), Ok(uv())]);
+    let mut engine = Engine::new(&mut vault, &fake);
+    fn refused<T>(r: &Result<T, CoreError>) -> bool {
+        matches!(r, Err(CoreError::Approval(ApprovalError::Unavailable)))
+    }
+
+    let mut req = make_req("alice", &[-7]);
+    req.rp.id = "pam://laptop".to_owned();
+    assert!(refused(&engine.make_credential(&req, None)));
+    assert!(refused(
+        &engine.make_credential(&req, Some("https://example.com"))
+    ));
+
+    for up in [true, false] {
+        let mut get = get_req(&[&allowed.credential_id]);
+        get.rp_id = "pam://laptop".to_owned();
+        get.up = up;
+        assert!(refused(&engine.get_assertion(&get, None, None)));
+        get.allow_list.clear();
+        assert!(refused(&engine.get_assertion(&get, None, None)));
+    }
+    assert_eq!(fake.calls(), 0);
+    assert_eq!(engine.vault().list_all().len(), 1);
+}
+
+#[test]
 fn selection_is_presence_only() {
     let t = TempDir::new();
     let mut vault = t.vault();

@@ -48,6 +48,12 @@ does not.
   who copied the device secret, the key ring and the vault folder (or who runs a modified
   hirz) is not stopped by it and keeps every passkey the device could read before the
   removal. Replacing those passkeys at each site is the only remedy.
+- **Logging in to the computer hirz runs on.** hirz passkeys are synced software keys:
+  whoever can read the vault on any of your devices holds them, so they must not unlock the
+  machine itself. hirz refuses every request whose RP id starts with `pam://` (pam-u2f, used
+  for login, sudo and screen unlock) with `CTAP2_ERR_NOT_ALLOWED`, without a prompt. This
+  also avoids an unlock screen that waits for a hirz approval it cannot show. Use a hardware
+  security key for machine login.
 - **Sites that refuse software authenticators.** Some relying parties require hardware
   attestation or allow only certain authenticators. hirz uses `none` attestation and will be
   refused there.

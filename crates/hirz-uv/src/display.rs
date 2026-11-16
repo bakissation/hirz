@@ -140,6 +140,8 @@ fn step_hint(step: Step) -> &'static str {
     }
 }
 
+/// Click-to-allow for an SSH key: there is no site to point at.
+const SSH_ALLOW_HINT: &str = "Allow only if you just started this with ssh yourself.";
 /// Last line of every hirz PIN entry.
 const PIN_ENTRY_HINT: &str = "Enter your hirz PIN to continue.";
 /// Last line of the fingerprint window, shown while the reader waits.
@@ -165,26 +167,47 @@ pub fn fallback_label(next: UvMethod) -> &'static str {
     }
 }
 
-/// Title bar text: the RP id, so it stays visible even when the body is long.
-pub fn title(ctx: &ApprovalContext<'_>) -> String {
-    format!(
-        "hirz: {}",
-        or_placeholder(sanitize(ctx.rp_id, MAX_RP_CHARS), "unknown site")
+const SSH_PREFIX: &str = "ssh:";
+
+/// OpenSSH security keys (`ssh-keygen -t ecdsa-sk` or `-t ed25519-sk`) use `ssh:` or
+/// `ssh:NAME` as their RP id. Returns NAME, empty for plain `ssh:`.
+pub fn ssh_key_name(rp_id: &str) -> Option<&str> {
+    rp_id.strip_prefix(SSH_PREFIX)
+}
+
+/// The RP id as a person reads it: "SSH key" or "SSH key (NAME)" for OpenSSH keys, the RP id
+/// itself otherwise. `clean` makes the untrusted part safe for the output it goes to. Logs
+/// and machine-readable output keep the raw RP id.
+pub fn site_label_with(rp_id: &str, clean: impl Fn(&str) -> String) -> String {
+    match ssh_key_name(rp_id).map(&clean) {
+        Some(name) if name.is_empty() => "SSH key".to_owned(),
+        Some(name) => format!("SSH key ({name})"),
+        None => clean(rp_id),
+    }
+}
+
+/// [`site_label_with`] for dialogs.
+pub fn site_label(rp_id: &str) -> String {
+    or_placeholder(
+        site_label_with(rp_id, |s| sanitize(s, MAX_RP_CHARS)),
+        "unknown site",
     )
 }
 
+/// Title bar text: the RP id, so it stays visible even when the body is long.
+pub fn title(ctx: &ApprovalContext<'_>) -> String {
+    format!("hirz: {}", site_label(ctx.rp_id))
+}
+
 fn header(ctx: &ApprovalContext<'_>) -> Vec<String> {
-    let verb = match ctx.ceremony {
-        Ceremony::Create => "Create a passkey for",
-        Ceremony::Get => "Sign in with a passkey on",
+    let ssh = ssh_key_name(ctx.rp_id).is_some();
+    let verb = match (ctx.ceremony, ssh) {
+        (Ceremony::Create, false) => "Create a passkey for",
+        (Ceremony::Get, false) => "Sign in with a passkey on",
+        (Ceremony::Create, true) => "Create a new",
+        (Ceremony::Get, true) => "Use your",
     };
-    let mut lines = vec![
-        verb.to_owned(),
-        format!(
-            "    {}",
-            or_placeholder(sanitize(ctx.rp_id, MAX_RP_CHARS), "unknown site")
-        ),
-    ];
+    let mut lines = vec![verb.to_owned(), format!("    {}", site_label(ctx.rp_id))];
     if let Some(origin) = ctx.origin {
         lines.push(format!(
             "Requested by: {}",
@@ -192,6 +215,7 @@ fn header(ctx: &ApprovalContext<'_>) -> Vec<String> {
         ));
     }
     if let Some(name) = ctx.rp_name.map(|n| sanitize(n, MAX_FIELD_CHARS))
+        && !ssh
         && !name.is_empty()
         && !name.eq_ignore_ascii_case(ctx.rp_id)
     {
@@ -230,6 +254,7 @@ pub fn prompt_text(
     }
     lines.push(match step {
         Step::Uv(UvMethod::Pin) => PIN_ENTRY_HINT.to_owned(),
+        Step::ClickToAllow if ssh_key_name(ctx.rp_id).is_some() => SSH_ALLOW_HINT.to_owned(),
         other => step_hint(other).to_owned(),
     });
     lines.join("\n")
@@ -693,6 +718,61 @@ mod tests {
         );
         assert!(!t.contains("Name the site gives"));
         assert!(t.contains("Wrong PIN. 3 attempts left.\nEnter your hirz PIN"));
+    }
+
+    #[test]
+    fn ssh_rp_ids_read_as_ssh_keys() {
+        assert_eq!(site_label("ssh:"), "SSH key");
+        assert_eq!(site_label("ssh:work"), "SSH key (work)");
+        assert_eq!(
+            site_label("ssh:<b>x</b>"),
+            "SSH key (\u{FF1C}b\u{FF1E}x\u{FF1C}/b\u{FF1E})"
+        );
+        assert_eq!(site_label("ssh:\u{202E}\n"), "SSH key");
+        assert_eq!(site_label("example.com"), "example.com");
+        assert_eq!(site_label("sshd.example.com"), "sshd.example.com");
+        assert_eq!(site_label("SSH:"), "SSH:");
+        assert_eq!(site_label("\u{200B}"), "unknown site");
+        assert_eq!(ssh_key_name("ssh:"), Some(""));
+        assert_eq!(ssh_key_name("example.com"), None);
+        assert_eq!(
+            site_label_with("ssh:abcdef", |s| s.chars().take(3).collect()),
+            "SSH key (abc)"
+        );
+
+        let c = cands();
+        for (rp, label) in [("ssh:", "SSH key"), ("ssh:work", "SSH key (work)")] {
+            let mut ctx = get_ctx(&c, None);
+            ctx.rp_id = rp;
+            ctx.rp_name = Some(rp);
+            let t = prompt_text(&ctx, Some(0), Step::ClickToAllow, None);
+            let lines: Vec<&str> = t.lines().collect();
+            assert_eq!(lines[0], "Use your");
+            assert_eq!(lines[1], format!("    {label}"));
+            assert_eq!(lines[2], "Account: Alice (alice@example.com)");
+            assert!(t.ends_with(SSH_ALLOW_HINT));
+            assert!(!t.contains("ssh:") && !t.contains("Name the site gives"));
+            let a = question_args(
+                &ctx,
+                Some(0),
+                Step::ClickToAllow,
+                None,
+                Duration::from_secs(5),
+            );
+            assert!(a.contains(&format!("--title=hirz: {label}")));
+            let a = pin_args(&ctx, Some(0), None, Duration::from_secs(5));
+            assert!(a.contains(&format!("--title=hirz: {label}")));
+            assert!(!a.iter().any(|x| x.contains("ssh:")));
+            let a = list_args(&ctx, &c, Duration::from_secs(5));
+            assert!(!a.iter().any(|x| x.contains("ssh:")));
+            assert!(context_text(&ctx, Some(0)).contains(label));
+            assert_eq!(title(&ctx), format!("hirz: {label}"));
+
+            ctx.ceremony = Ceremony::Create;
+            let t = prompt_text(&ctx, None, Step::Uv(UvMethod::Polkit), None);
+            assert!(t.starts_with(&format!("Create a new\n    {label}\n")));
+            assert!(t.ends_with("Next, your system will ask for your password."));
+        }
     }
 
     #[test]

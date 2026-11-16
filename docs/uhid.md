@@ -236,6 +236,19 @@ answers with the engine of `hirz-core` over the user's vault, asking `hirz-uv`
   readable when the process is not dumpable; pkcheck gives the same answer for a hardened
   and an unhardened process.
 
+## OpenSSH and pam-u2f
+
+OpenSSH security keys (`ssh-keygen -t ecdsa-sk` or `-t ed25519-sk`) work with hirz. Their RP
+id is `ssh:` or `ssh:NAME` (`-O application=`); prompts and `hirz list` show it as "SSH key"
+or "SSH key (NAME)", logs and `--json` output keep the raw value.
+
+pam-u2f is refused. Requests whose RP id starts with `pam://` (its default origin is
+`pam://HOSTNAME`) get `CTAP2_ERR_NOT_ALLOWED` for makeCredential and getAssertion, silent
+probes included, before the vault is opened and without a prompt; hirzd logs one line naming
+the RP id. A synced software key must not be a login factor for the machine it runs on, and
+a screen unlock that needs a hirz approval could deadlock. The engine enforces the same rule,
+so the extension path refuses it too. See `docs/threat-model.md`.
+
 ## Silent probes
 
 Before the real request, platforms check which entries of an allow list (getAssertion) or

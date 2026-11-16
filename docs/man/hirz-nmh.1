@@ -1,0 +1,83 @@
+.TH HIRZ\-NMH 1 2026-11-16 hirz "User Commands"
+.SH NAME
+hirz\-nmh \- native messaging host of the hirz Firefox extension
+.SH SYNOPSIS
+.B hirz\-nmh
+.RI [ MANIFEST " [" EXTENSION\-ID ]]
+.SH DESCRIPTION
+.B hirz\-nmh
+is started by Firefox when the hirz extension (id
+.BR hirz@berkati.xyz )
+connects to the native application
+.BR hirz .
+It is not meant to be run by hand.
+It answers the extension's
+.BR hello ,
+.BR capabilities ,
+.BR create ,
+.BR get ,
+.B list
+and
+.B cancel
+requests with the passkeys in the user's hirz vault.
+The host validates every field again, including the origin and relying party id, builds the
+WebAuthn client data itself and asks for the same approval window as
+.BR hirzd (1),
+showing the requesting origin too.
+Without a vault on the device, ceremonies are answered as not handled and Firefox runs them
+itself.
+.PP
+Messages are exchanged on standard input and output: a 32\-bit length in native byte order
+followed by that many bytes of UTF\-8 JSON.
+Requests are limited to 256 KiB and replies to 1 MiB.
+Standard output carries only messages; diagnostics go to standard error.
+.PP
+The arguments Firefox passes (the path of the native manifest and the extension id) are
+ignored: any local process can start the host, so they prove nothing.
+.SH EXIT STATUS
+.B 0
+when Firefox closes standard input between messages,
+.B 1
+on a message over the limit, a truncated message, an I/O error, or when the process cannot
+harden itself or locate its folders.
+.SH ENVIRONMENT
+.TP
+.B HIRZ_LOG
+Set to
+.B debug
+to log one line per message with its type, id and size, never its contents.
+.TP
+.B HIRZ_VAULT
+Vault folder.
+Default: the folder recorded in
+.I vault\-path
+of the state directory, else
+.IR $XDG_DATA_HOME/hirz/vault .
+.TP
+.B HIRZ_STATE
+Device state directory (default
+.IR $XDG_STATE_HOME/hirz ).
+.TP
+.BR HOME ", " XDG_DATA_HOME ", " XDG_STATE_HOME ", " XDG_CONFIG_HOME
+Base folders; relative values are ignored.
+.SH FILES
+.TP
+.I /usr/lib/mozilla/native\-messaging\-hosts/hirz.json
+System native messaging manifest installed by the packages (also under
+.I /usr/lib64
+on some distributions).
+.TP
+.I ~/.mozilla/native\-messaging\-hosts/hirz.json
+Per\-user manifest written by
+.BR "hirz setup firefox" .
+It takes precedence over the system manifest; package users should not create it.
+.TP
+.I $XDG_CONFIG_HOME/hirz/config
+Approval configuration, see
+.BR hirzd (1).
+.SH SEE ALSO
+.BR hirz (1),
+.BR hirzd (1)
+.PP
+.I docs/extension.md
+in the hirz sources.

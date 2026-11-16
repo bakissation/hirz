@@ -32,7 +32,7 @@ fn frame(msg: &str) -> Vec<u8> {
 fn binary_without_vault_falls_back_to_firefox() {
     let dir = temp_dir();
     let mut child = Command::new(env!("CARGO_BIN_EXE_hirz-nmh"))
-        .args(["/path/to/hirz.json", "hirz@hirz.dev"])
+        .args(["/path/to/hirz.json", "hirz@berkati.xyz"])
         .env_clear()
         .env("HOME", &dir)
         .env("HIRZ_VAULT", dir.join("vault"))

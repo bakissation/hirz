@@ -274,7 +274,7 @@ One CXF `Account` with one `Item` per passkey; each item holds one `passkey` cre
 | CXF field | hirz value |
 |---|---|
 | Header `version` | `{ "major": 1, "minor": 0 }` |
-| Header `exporterRpId`, `exporterDisplayName` | `hirz.dev`, `hirz` |
+| Header `exporterRpId`, `exporterDisplayName` | `hirz.berkati.xyz`, `hirz` |
 | Header `timestamp` | export time, unix seconds |
 | `Account.id` | 16 random bytes; `username` and `email` are empty strings |
 | `Item.id` | the credential id |
@@ -291,7 +291,7 @@ CXF requires that passkeys with a non-zero signature counter are left out of exp
 never uses a counter (it is always 0), so every passkey is exported, and imported passkeys
 keep a counter of 0.
 
-hirz adds an item extension named `hirz.dev/passkey` (the CXF form for exporter
+hirz adds an item extension named `hirz.berkati.xyz/passkey` (the CXF form for exporter
 extensions) with fields CXF has no place for: `discoverable` (bool), `rpName` (the name the
 site gave itself, when known) and `credProtect` (1 to 3, when set). Other programs ignore
 it; hirz uses it when importing so a hirz to hirz round trip keeps every field.

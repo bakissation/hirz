@@ -125,6 +125,19 @@ fn is_touch_request(req: &MakeCredentialRequest) -> bool {
     req.rp.id == "make.me.blink" || req.rp.id.starts_with('.')
 }
 
+/// pam-u2f asks with `pam://HOST`. Refused before the vault is opened or anything is shown;
+/// the engine refuses it as well.
+fn refuse_machine_login(rp_id: &str) -> Result<(), CoreError> {
+    if hirz_core::engine::is_machine_login_rp_id(rp_id) {
+        log(format_args!(
+            "refused rp id {rp_id:?}: hirz passkeys cannot be a login factor for this computer \
+             (pam-u2f); use a hardware security key for that"
+        ));
+        return Err(CoreError::Approval(ApprovalError::Unavailable));
+    }
+    Ok(())
+}
+
 fn logged<T>(r: Result<T, CoreError>) -> Result<T, CoreError> {
     if let Err(CoreError::Vault(e) | CoreError::Crypto(e)) = &r {
         log(format_args!("request failed: {e}"));
@@ -138,6 +151,7 @@ impl<A: Approver + Send> Authenticator for VaultAuthenticator<A> {
         req: &MakeCredentialRequest,
         ctx: &RequestContext,
     ) -> Result<MakeCredentialResponse, CoreError> {
+        refuse_machine_login(&req.rp.id)?;
         self.prepare(ctx)?;
         if is_touch_request(req) {
             self.select(ctx)?;
@@ -155,6 +169,7 @@ impl<A: Approver + Send> Authenticator for VaultAuthenticator<A> {
         hmac: Option<&dyn HmacSecretWrap>,
         ctx: &RequestContext,
     ) -> Result<AssertionResponse, CoreError> {
+        refuse_machine_login(&req.rp_id)?;
         self.prepare(ctx)?;
         logged(
             self.session

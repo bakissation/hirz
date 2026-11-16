@@ -832,6 +832,34 @@ fn list_and_delete() {
 }
 
 #[test]
+fn ssh_keys_are_named_in_the_terminal_and_raw_in_json() {
+    let m = Machine::new("ssh");
+    init(&m);
+    let vault = m.default_vault();
+    put(
+        &m,
+        &vault,
+        vec![
+            record("ssh:", "openssh", false, 4),
+            record("ssh:work", "openssh", false, 5),
+        ],
+    );
+    let out = run(&m, &["list"], &[]).ok().to_owned();
+    assert!(out.contains("SSH key (work)"));
+    assert!(out.lines().any(|l| l.starts_with("SSH key ")));
+    assert!(!out.contains("ssh:"));
+
+    let r = run(&m, &["list", "--site", "ssh:work", "--json"], &[]);
+    let v: Value = serde_json::from_str(r.ok()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["site"], "ssh:work");
+
+    let r = run(&m, &["delete", "0505"], &["n"]);
+    assert!(r.out.contains("Passkey: SSH key (work) (openssh)"));
+    assert_eq!(r.exit(), Exit::Cancelled);
+}
+
+#[test]
 fn delete_by_whole_id_when_it_prefixes_another() {
     let m = Machine::new("delete-short");
     init(&m);
@@ -930,7 +958,7 @@ fn plain_export_is_standard_cxf_and_counts_as_backup_when_confirmed() {
     let doc: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert_eq!(doc["version"]["major"], 1);
     assert_eq!(doc["version"]["minor"], 0);
-    assert_eq!(doc["exporterRpId"], "hirz.dev");
+    assert_eq!(doc["exporterRpId"], "hirz.berkati.xyz");
     let account = &doc["accounts"][0];
     assert_eq!(account["collections"], Value::Array(vec![]));
     let item = &account["items"][0];
@@ -950,7 +978,7 @@ fn plain_export_is_standard_cxf_and_counts_as_backup_when_confirmed() {
     let h = &pk["fido2Extensions"]["hmacCredentials"];
     assert_eq!(h["algorithm"], "hmac-sha256");
     assert_eq!(h["credWithUV"], hirz_proto::base64url::encode(&[1u8; 32]));
-    assert_eq!(item["extensions"][0]["name"], "hirz.dev/passkey");
+    assert_eq!(item["extensions"][0]["name"], "hirz.berkati.xyz/passkey");
 
     let c = Machine::new("plain-c");
     init(&c);
@@ -1486,7 +1514,7 @@ fn setup_firefox_writes_the_user_manifest() {
     let canon = fs::canonicalize(&nmh).unwrap();
     assert_eq!(v["path"], canon.to_str().unwrap());
     assert_eq!(v["name"], "hirz");
-    assert_eq!(v["allowed_extensions"][0], "hirz@hirz.dev");
+    assert_eq!(v["allowed_extensions"][0], "hirz@berkati.xyz");
     assert!(
         run(&m, &["setup", "firefox"], &[])
             .ok()

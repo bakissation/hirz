@@ -1,0 +1,126 @@
+.TH HIRZD 1 2026-11-16 hirz "User Commands"
+.SH NAME
+hirzd \- the hirz virtual security key (user daemon)
+.SH SYNOPSIS
+.B hirzd
+.RB [ \-\-self\-test ]
+.SH DESCRIPTION
+.B hirzd
+makes the user's hirz passkey vault available to browsers and other FIDO2 clients as a USB
+security key.
+It connects to
+.BR hirz\-uhid\-broker (8),
+which creates a FIDO HID device for the user, speaks CTAPHID and CTAP2 over it and answers
+with the passkeys in the vault.
+Every makeCredential and every getAssertion with user presence needs an approval in a hirz
+window (zenity): the system password through polkit, a fingerprint through fprintd, a hirz
+PIN, or a click for sites listed for click\-to\-allow.
+.PP
+The vault is opened on the first request and reloaded for every ceremony, so passkeys
+created by the Firefox extension path or synced from another device are seen at once.
+Without a vault, requests are refused with CTAP2_ERR_NOT_ALLOWED, and hirzd logs a message
+and shows a desktop notification at most once every 10 minutes.
+.PP
+When the broker closes the connection or cannot be reached, hirzd retries after 1 second,
+doubling up to 60 seconds; a connection that lasted 30 seconds resets the delay.
+.PP
+Requests whose relying party id starts with
+.B pam://
+(pam\-u2f, used for login, sudo and screen unlock) are refused with CTAP2_ERR_NOT_ALLOWED
+before the vault is opened and without a prompt, and one line is logged.
+hirz passkeys are synced software keys and are not a login factor for the computer they run
+on.
+OpenSSH keys made with
+.B ssh\-keygen \-t ecdsa\-sk
+or
+.B \-t ed25519\-sk
+are shown as "SSH key" in the approval window.
+.PP
+hirzd is normally started as the systemd user unit
+.BR hirzd.service ,
+which each user enables with
+.BR "systemctl \-\-user enable \-\-now hirzd" .
+It needs a graphical session for its approval windows.
+At start it sets RLIMIT_CORE to 0, PR_SET_DUMPABLE to 0 and PR_SET_NO_NEW_PRIVS.
+.SH OPTIONS
+.TP
+.B \-\-self\-test
+Run a loopback self\-test and exit: create a vault in a temporary folder and play the
+browser over an in\-process socket (getInfo, makeCredential, getAssertion with and without
+an allow list, a silent probe, and a request without a vault), verifying every signature.
+Needs neither root, nor
+.IR /dev/uhid ,
+nor a desktop.
+The approver of the self\-test approves everything and never sees the real vault.
+.PP
+Any other argument prints a usage message and exits with status 2.
+.SH EXIT STATUS
+hirzd runs until it is stopped.
+It exits with status 1 when it cannot harden itself or locate its folders, and with status 2
+on wrong arguments.
+.B \-\-self\-test
+exits with status 0 when the test passes and 1 otherwise.
+.SH ENVIRONMENT
+.TP
+.B HIRZ_BROKER_SOCKET
+Socket of the broker (default
+.IR /run/hirz/uhid.sock ).
+.TP
+.B HIRZ_VAULT
+Vault folder.
+Default: the folder recorded in
+.I vault\-path
+of the state directory, else
+.IR $XDG_DATA_HOME/hirz/vault .
+.TP
+.B HIRZ_STATE
+Device state directory (default
+.IR $XDG_STATE_HOME/hirz ).
+.TP
+.BR HOME ", " XDG_DATA_HOME ", " XDG_STATE_HOME ", " XDG_CONFIG_HOME
+Base folders; relative values are ignored.
+.TP
+.B HIRZ_MLOCK
+Set to 1 to lock all memory with mlockall.
+.TP
+.B HIRZ_DEBUG_CTAP
+Set to 1 to log every CTAP2 request and response in hex.
+They hold client data hashes, relying party ids and credential ids, never keys; keep it off
+normally.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/hirz/config
+Approval configuration, one
+.I key " = " value
+per line, lines starting with # are comments.
+Keys:
+.B methods
+(verifying methods in order of preference, from
+.BR polkit ,
+.BR fingerprint ,
+.BR pin ),
+.B click_to_allow
+(comma\-separated relying party ids where a click is enough when the site does not require
+verification),
+.B timeout
+(seconds for a whole request, 10 to 600, default 120) and
+.B prompts_per_minute
+(per site, 1 to 60, default 5).
+An invalid file makes every approval fail until it is fixed.
+.TP
+.I $XDG_STATE_HOME/hirz
+Device state, including the hirz PIN verifier.
+.TP
+.I /usr/lib/systemd/user/hirzd.service
+The systemd user unit.
+.SH SEE ALSO
+.BR hirz (1),
+.BR hirz\-uhid\-broker (8),
+.BR hirz\-nmh (1),
+.BR pkcheck (1),
+.BR zenity (1)
+.PP
+.I docs/uhid.md
+and
+.I docs/approval.md
+in the hirz sources.

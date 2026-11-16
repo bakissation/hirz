@@ -1,0 +1,267 @@
+.TH HIRZ 1 2026-11-16 hirz "User Commands"
+.SH NAME
+hirz \- set up and manage the hirz passkey vault
+.SH SYNOPSIS
+.B hirz
+.RB [ \-\-vault
+.IR DIR ]
+.I COMMAND
+.RI [ OPTIONS ]
+.br
+.B hirz help
+.RI [ COMMAND ]
+.br
+.B hirz
+.BR \-\-version
+.SH DESCRIPTION
+.B hirz
+manages the vault that holds your passkeys (WebAuthn and FIDO2 credentials) and the setup
+around it.
+It never talks to the network.
+Passkey requests are answered and approved by
+.BR hirzd (1)
+(the virtual security key) and
+.BR hirz\-nmh (1)
+(the Firefox extension host);
+.B hirz
+only manages the vault.
+.PP
+The vault is a folder of encrypted files that your own sync tool may copy between your
+computers.
+Each computer keeps its own device keys in the device state directory, which is never
+synced.
+.PP
+Options take their value as
+.B \-\-opt value
+or
+.BR \-\-opt=value .
+.B \-\-
+ends the options, so an account name that starts with
+.B \-
+can still be given.
+.B hirz help
+.I COMMAND
+or
+.B hirz
+.I COMMAND
+.B \-\-help
+shows the help of one command.
+Questions are written to standard error, so standard output stays clean when it is
+redirected.
+Recovery phrases, PINs and passphrases are read without echo when standard input is a
+terminal.
+.PP
+Sites are shown by their relying party id.
+Keys that OpenSSH created on hirz (relying party id \fBssh:\fR or \fBssh:\fINAME\fR)
+are shown as "SSH key" or "SSH key (NAME)"; JSON output keeps the raw id.
+.SH OPTIONS
+.TP
+.BI \-\-vault " DIR"
+Use the vault folder
+.IR DIR .
+Without it, hirz uses the folder recorded by
+.B init
+or
+.B join
+in the file
+.I vault\-path
+of the device state directory, else
+.IR $XDG_DATA_HOME/hirz/vault .
+.TP
+.BR \-h ", " \-\-help
+Show help.
+.TP
+.BR \-V ", " \-\-version
+Show the version.
+.SH COMMANDS
+.TP
+.B init \fR[\fB\-\-name \fINAME\fR] [\fB\-\-yes\-i\-saved\-it\fR]
+Create a new vault and set up this computer to use it.
+With
+.BR \-\-vault ,
+the folder must be empty or not exist yet.
+.B \-\-name
+sets this computer's name as other devices see it (1 to 64 characters, default the host
+name).
+The 24\-word recovery phrase is shown once and three of its words must be typed back;
+.B \-\-yes\-i\-saved\-it
+skips that check.
+Refuses when this computer is already set up or the folder already holds a vault.
+.TP
+.B join \-\-vault \fIDIR\fB \-\-request \fR[\fB\-\-name \fINAME\fR]
+Use an existing vault that your sync tool copied to
+.IR DIR ,
+approved from a device that already uses it.
+hirz writes a request into the vault folder, shows four verification words and waits.
+On the other device run
+.B hirz devices approve
+and compare the words.
+The request expires after 15 minutes.
+.TP
+.B join \-\-vault \fIDIR\fR [\fB\-\-name \fINAME\fR]
+The same without another device: type the vault's recovery phrase.
+.TP
+.B status \fR[\fB\-\-json\fR]
+Show the vault and state folders, this device, the number of passkeys and devices, whether
+passkeys count as backed up, sync problems, the approval methods that work now, the Firefox
+native messaging manifests and whether the uhid broker socket exists.
+.TP
+.B list \fR[\fB\-\-site \fISITE\fR] [\fB\-\-json\fR]
+List passkeys: site, account, creation date (UTC) and the first 12 hex digits of the
+credential id.
+.B \-\-site
+keeps one relying party id (exact match, case\-insensitive).
+Private keys are never printed.
+.TP
+.B delete \fIID\-PREFIX\fR | \fISITE ACCOUNT\fR [\fB\-\-yes\fR]
+Delete one passkey on all devices after showing it and asking.
+.I ID\-PREFIX
+is at least four hex digits of the credential id;
+.I ACCOUNT
+matches the user name or display name exactly.
+When several passkeys match, nothing is deleted.
+.TP
+.B devices \fR[\fB\-\-json\fR]
+List the devices of the vault and say when devices are waiting for approval.
+.TP
+.B devices approve \fR[\fIREQUEST\fR]
+Approve a device that ran
+.BR "join \-\-request" .
+hirz shows its name, when it asked and the four verification words; type
+.B yes
+only if the new device shows the same words.
+A hirz window then requires user verification (system password, fingerprint or hirz PIN).
+.I REQUEST
+is at least four hex digits of the request id.
+.TP
+.B devices deny \fIREQUEST
+Delete a join request so that device cannot join with it.
+.TP
+.B remove\-device \fIID\-PREFIX\fR [\fB\-\-yes\fR]
+Remove another device and change the vault key.
+hirz lists every site the removed device could have copied, then requires user
+verification in a hirz window.
+.B \-\-yes
+skips only the question in the terminal.
+This computer cannot remove itself.
+.TP
+.B forget\-local
+Delete this computer's hirz keys from the state directory (device secret, key ring, event
+counter and recorded vault location).
+The vault folder is not touched.
+.TP
+.B pin set\fR | \fBchange\fR | \fBreset\fR | \fBstatus
+Manage the hirz PIN.
+.B set
+asks for a new PIN twice and fails if one exists;
+.B change
+asks for the current PIN first;
+.B reset
+removes the PIN and clears a lock, and on a computer set up with a vault asks for the
+recovery phrase first;
+.B status
+shows whether a PIN is set, the wrong tries and whether it is locked.
+.TP
+.B export \-\-cxf \fIFILE\fR [\fB\-\-plain\fR]
+Write every passkey as a FIDO Credential Exchange Format document.
+.I FILE
+must not exist; it is created with mode 0600.
+By default the document is encrypted with a passphrase of at least 12 characters.
+.B \-\-plain
+writes the bare JSON document after a warning that must be answered with
+.BR yes .
+.TP
+.B import \-\-cxf \fIFILE
+Read an encrypted hirz export or a plain CXF document from another provider and add the
+valid passkeys.
+Existing passkeys are never replaced.
+.TP
+.B backup confirm \fR[\fB\-\-yes\fR]
+Record that your passkeys exist somewhere other than this computer, so new assertions carry
+the backed up (BS) flag.
+.TP
+.B setup firefox \fR[\fB\-\-nmh\-path \fIPATH\fR] [\fB\-\-force\fR]
+Write the per\-user Firefox native messaging manifest
+.I ~/.mozilla/native\-messaging\-hosts/hirz.json
+pointing at
+.B hirz\-nmh
+next to the running
+.BR hirz ,
+or at
+.IR PATH .
+An existing file that points elsewhere is replaced only after a question, or with
+.BR \-\-force .
+Meant for development builds: distribution packages install a root\-owned system manifest,
+and a per\-user manifest takes precedence over it.
+.TP
+.B help \fR[\fICOMMAND\fR]
+Show help.
+.TP
+.B version
+Show the version.
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 1
+The operation failed (file access, damaged vault, nothing matched, already set up, this
+computer was removed from the vault).
+.TP
+.B 2
+Wrong arguments, or an ambiguous id prefix.
+.TP
+.B 3
+hirz is not set up on this computer, or the vault folder is missing.
+.TP
+.B 4
+Cancelled: the answer was no, input ended, or the recovery phrase check failed.
+.TP
+.B 5
+A wrong recovery phrase, PIN or passphrase, or a locked PIN.
+.TP
+.B 6
+Import finished, but some passkeys were skipped.
+.SH ENVIRONMENT
+.TP
+.B HOME
+Base of the default folders.
+.TP
+.BR XDG_DATA_HOME ", " XDG_STATE_HOME ", " XDG_CONFIG_HOME
+Base folders of the vault, the device state and the approval config.
+Relative values are ignored.
+.TP
+.B HIRZ_BROKER_SOCKET
+Socket that
+.B status
+checks (default
+.IR /run/hirz/uhid.sock ).
+.SH FILES
+.TP
+.I $XDG_DATA_HOME/hirz/vault
+Default vault folder (synced by your sync tool).
+.TP
+.I $XDG_STATE_HOME/hirz
+Device state: device key, key ring, counter, PIN verifier and
+.IR vault\-path .
+Never synced.
+.TP
+.I $XDG_CONFIG_HOME/hirz/config
+Approval configuration, see
+.BR hirzd (1).
+.TP
+.I ~/.mozilla/native\-messaging\-hosts/hirz.json
+Per\-user Firefox manifest written by
+.BR "setup firefox" .
+.SH SEE ALSO
+.BR hirzd (1),
+.BR hirz\-nmh (1),
+.BR hirz\-uhid\-broker (8)
+.PP
+The documentation in
+.I docs/
+of the hirz sources, in particular
+.IR cli.md ,
+.I sync.md
+and
+.IR threat\-model.md .

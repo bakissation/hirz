@@ -312,9 +312,8 @@ The job runs `web-ext sign --channel=listed` on `extension/` with the AMO API cr
 Mozilla's review; the job submits and does not wait. `packaging/amo/metadata.json` gives the
 listing's category, summary, license and reviewer notes for the first submission.
 
-Before the first submission: the add-on id `hirz@hirz.dev` in `extension/manifest.json` is a
-placeholder (see [extension.md](extension.md)). AMO binds the listing to the id for good,
-and `packaging/native-messaging/hirz.json` must name the same id, so settle it first.
+The add-on id is `hirz@berkati.xyz` (see [extension.md](extension.md)). AMO binds the
+listing to the id for good, and `packaging/native-messaging/hirz.json` must name the same id.
 
 ### Snap
 

@@ -99,6 +99,13 @@ sed "s#@HIRZ_NMH_PATH@#$NMH#" packaging/native-messaging/hirz.json \
 ! grep -q '@HIRZ_' "$pkg/usr/lib/mozilla/native-messaging-hosts/hirz.json" ||
   die "placeholder left in the native messaging manifest"
 
+man="$pkg/usr/share/man"
+mkdir -p "$man/man1" "$man/man8"
+for page in hirz.1 hirzd.1 hirz-nmh.1 hirz-uhid-broker.8; do
+  gzip -9n <"docs/man/$page" >"$man/man${page##*.}/$page.gz"
+  chmod 0644 "$man/man${page##*.}/$page.gz"
+done
+
 doc="$pkg/usr/share/doc/hirz"
 mkdir -p "$doc"
 install -m 0644 README.md SECURITY.md docs/install.md "$doc/"

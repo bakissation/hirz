@@ -3,5 +3,5 @@
   "description": "hirz passkey authenticator (native messaging host)",
   "path": "@HIRZ_NMH_PATH@",
   "type": "stdio",
-  "allowed_extensions": ["hirz@hirz.dev"]
+  "allowed_extensions": ["hirz@berkati.xyz"]
 }

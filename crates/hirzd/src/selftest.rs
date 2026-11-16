@@ -425,6 +425,60 @@ mod tests {
         );
     }
 
+    struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Approver for Counting {
+        fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ApproveAll.approve(ctx)
+        }
+        fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ApproveAll.confirm_selection()
+        }
+    }
+
+    #[test]
+    fn machine_login_rp_ids_are_refused_without_a_prompt() {
+        let dir = ScratchDir::new("hirzd-test").unwrap();
+        let (vault_dir, state_dir) = (dir.path().join("vault"), dir.path().join("state"));
+        Vault::create(&vault_dir, &state_dir, "test").unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = Session::new(
+            settings_for(&vault_dir, &state_dir),
+            Counting(Arc::clone(&calls)),
+        );
+        let handler = Ctap2Handler::new(VaultAuthenticator::new(session, Notice::new(false)));
+        let rp = "pam://laptop";
+        let params = MapBuilder::new()
+            .int(0x01, CLIENT_DATA_HASH.as_slice())
+            .int(0x02, MapBuilder::new().text("id", rp).build())
+            .int(0x03, MapBuilder::new().text("id", [1u8].as_slice()).build())
+            .int(0x04, Value::Array(vec![public_key_entry()]))
+            .build();
+        let mut request = vec![0x01];
+        request.extend(cbor::encode(&params).unwrap());
+        let ctx = hid::RequestContext::new();
+        assert_eq!(handler.process(&request, &ctx), vec![STATUS_NOT_ALLOWED]);
+        for up in [true, false] {
+            let p = MapBuilder::new()
+                .int(0x01, rp)
+                .int(0x02, CLIENT_DATA_HASH.as_slice())
+                .int(0x05, MapBuilder::new().text("up", up).build())
+                .build();
+            let mut request = vec![0x02];
+            request.extend(cbor::encode(&p).unwrap());
+            assert_eq!(handler.process(&request, &ctx), vec![STATUS_NOT_ALLOWED]);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            Vault::open(&vault_dir, &state_dir)
+                .unwrap()
+                .list_all()
+                .is_empty()
+        );
+    }
+
     fn import_es256(vault_dir: &Path, state_dir: &Path, id: &[u8]) -> cose::PublicKey {
         let (pkcs8, x, y) = hirz_crypto::es256::generate().unwrap();
         let mut vault = Vault::open(vault_dir, state_dir).unwrap();

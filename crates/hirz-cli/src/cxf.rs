@@ -12,10 +12,10 @@ use hirz_vault::{
 };
 use serde_json::{Map, Value, json};
 
-pub const EXPORTER_RP_ID: &str = "hirz.dev";
+pub const EXPORTER_RP_ID: &str = "hirz.berkati.xyz";
 pub const EXPORTER_NAME: &str = "hirz";
 /// Item extension carrying hirz fields that CXF has no place for.
-pub const HIRZ_EXTENSION: &str = "hirz.dev/passkey";
+pub const HIRZ_EXTENSION: &str = "hirz.berkati.xyz/passkey";
 pub const MAX_PASSKEYS: usize = 100_000;
 
 fn b64(bytes: &[u8]) -> String {
@@ -132,7 +132,7 @@ pub struct Parsed {
 }
 
 pub fn label(rp_id: &str, account: Option<&str>) -> String {
-    let site = crate::ui::clean(rp_id, 60);
+    let site = crate::ui::site(rp_id, 60);
     match account.map(|a| crate::ui::clean(a, 40)) {
         Some(a) if !a.is_empty() => format!("{site} ({a})"),
         _ => site,

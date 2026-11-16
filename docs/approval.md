@@ -20,6 +20,10 @@ page cannot draw, hide or click it.
 - The relying party id (the site, such as `example.com`) in the title and as the first line
   of the dialog. On the Firefox extension path, the origin of the requesting page is shown
   too ("Requested by").
+- For OpenSSH security keys (`ssh-keygen -t ecdsa-sk` or `-t ed25519-sk`), whose RP id is
+  `ssh:` or `ssh:NAME`, "SSH key" or "SSH key (NAME)" instead of the raw id. Logs keep the
+  raw id. RP ids starting with `pam://` (pam-u2f) never reach a prompt: hirz refuses them
+  (see [threat-model.md](threat-model.md)).
 - The account: the one being created, or the one being used to sign in. When several
   accounts exist for the site, a list asks you to choose first ("Choose an account, then
   confirm it is you."; the method that follows depends on what is available).

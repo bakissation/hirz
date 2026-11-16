@@ -39,6 +39,11 @@
 //!   is stored.
 //! - **User entity**: returned for flows without an allow list; name and display name only
 //!   when the approval included UV (CTAP getAssertion, user identifiable information).
+//! - **Machine login**: RP ids starting with `pam://` (pam-u2f for login, sudo and screen
+//!   unlock) are refused with `ApprovalError::Unavailable` (CTAP2_ERR_NOT_ALLOWED) before any
+//!   prompt or vault access, silent probes included. hirz passkeys are synced software keys and
+//!   must not become a login factor for the computer they run on, and an unlock that waits for
+//!   a hirz approval could deadlock. See [`is_machine_login_rp_id`].
 
 use crate::types::{
     AAGUID, Approval, ApprovalContext, ApprovalError, Approver, AssertionResponse, COSE_ALG_EDDSA,
@@ -110,6 +115,7 @@ impl<'a> Engine<'a> {
         origin: Option<&str>,
     ) -> Result<MakeCredentialResponse, CoreError> {
         check_rp_id(&req.rp.id)?;
+        refuse_machine_login(&req.rp.id)?;
         if req.user.id.is_empty() || req.user.id.len() > MAX_USER_ID_LEN {
             return Err(CoreError::InvalidRequest("user id must be 1 to 64 bytes"));
         }
@@ -253,6 +259,7 @@ impl<'a> Engine<'a> {
         hmac: Option<&dyn HmacSecretWrap>,
     ) -> Result<AssertionResponse, CoreError> {
         check_rp_id(&req.rp_id)?;
+        refuse_machine_login(&req.rp_id)?;
         if !req.up {
             return self.silent_probe(req);
         }
@@ -353,6 +360,23 @@ impl<'a> Engine<'a> {
             Err(CoreError::Approval(ApprovalError::Denied))
         }
     }
+}
+
+const MACHINE_LOGIN_PREFIX: &str = "pam://";
+
+/// True for RP ids that ask for a login factor of this computer (pam-u2f uses `pam://HOST`
+/// by default). The engine refuses them; frontends use this to log the refusal.
+pub fn is_machine_login_rp_id(rp_id: &str) -> bool {
+    rp_id
+        .get(..MACHINE_LOGIN_PREFIX.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(MACHINE_LOGIN_PREFIX))
+}
+
+fn refuse_machine_login(rp_id: &str) -> Result<(), CoreError> {
+    if is_machine_login_rp_id(rp_id) {
+        return Err(CoreError::Approval(ApprovalError::Unavailable));
+    }
+    Ok(())
 }
 
 fn check_rp_id(rp_id: &str) -> Result<(), CoreError> {
