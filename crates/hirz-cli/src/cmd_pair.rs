@@ -5,7 +5,7 @@ use crate::app::Ctx;
 use crate::cmd_vault::{already_set_up, join_target};
 use crate::error::{CliError, CliResult, Exit};
 use crate::prompt::{self, confirm_word};
-use crate::ui::{self, clean, count, hex};
+use crate::ui::{self, clean, count, hex, short_id};
 use hirz_core::{Approval, ApprovalError, PairingApprovalContext};
 use hirz_uv::display::asked_ago;
 use hirz_vault::{PairingPoll, PairingRequest, PendingJoin, Vault, VaultError};
@@ -16,12 +16,6 @@ const POLL_EVERY: Duration = Duration::from_secs(2);
 /// An approval made just before the request expired may still be on its way.
 const SYNC_GRACE_SECS: u64 = 120;
 const NAME_CHARS: usize = 64;
-const REQUEST_ID_HEX: usize = 12;
-
-fn short(id: &[u8; 16]) -> String {
-    let h = hex(id);
-    h.get(..REQUEST_ID_HEX).unwrap_or(&h).to_string()
-}
 
 fn minutes(secs: u64) -> String {
     count(
@@ -130,27 +124,25 @@ fn finish(ctx: &mut Ctx<'_>, dir: &Path, name: &str, vault: &Vault) -> CliResult
         count(vault.list_all().len(), "passkey"),
         others.join(", ")
     ))?;
-    ctx.say(&format!(
-        "Passkeys you add on any device appear on the others once your sync tool has copied\n\
-         the files. Connect Firefox with: {} setup firefox",
-        ctx.program
-    ))?;
+    crate::cmd_vault::say_sync_hint(ctx)?;
     Ok(Exit::Ok)
 }
 
-fn request_rows(ctx: &Ctx<'_>, reqs: &[PairingRequest]) -> Vec<Vec<String>> {
+fn request_table(ctx: &Ctx<'_>, reqs: &[PairingRequest]) -> String {
     let now = ctx.sys.now();
-    reqs.iter()
+    let rows: Vec<Vec<String>> = reqs
+        .iter()
         .enumerate()
         .map(|(i, r)| {
             vec![
                 i.saturating_add(1).to_string(),
                 clean(&r.name, NAME_CHARS),
                 asked_ago(r.created_at, now),
-                short(&r.request_id),
+                short_id(&r.request_id),
             ]
         })
-        .collect()
+        .collect();
+    ui::table(&["#", "NAME", "ASKED", "REQUEST"], &rows)
 }
 
 fn no_requests() -> CliError {
@@ -182,14 +174,13 @@ fn choose(
         Some(p) => by_prefix(reqs, p)?,
         None => reqs,
     };
-    let header = ["#", "NAME", "ASKED", "REQUEST"];
     match reqs.as_slice() {
         [] => Err(CliError::failed(
             "No waiting device matches. Run `hirz devices approve` to see them.",
         )),
         [one] => Ok(one.clone()),
         several => {
-            ctx.write_raw(&ui::table(&header, &request_rows(ctx, several)))?;
+            ctx.write_raw(&request_table(ctx, several))?;
             ctx.say(
                 "Several devices are waiting. If you started only one, the others may have been\n\
                  planted by someone with access to your synced folder: deny them with\n\
@@ -267,7 +258,7 @@ fn pairing_change(ctx: &Ctx<'_>, req: Option<&PairingRequest>) -> Change<'static
             "Nothing was approved. The request is still waiting: run `{0} devices approve` \
              again, or remove it with `{0} devices deny {1}`.",
             ctx.program,
-            short(&r.request_id)
+            short_id(&r.request_id)
         ),
         None => "Nothing was approved; the request is still waiting.".to_string(),
     };
@@ -320,7 +311,7 @@ pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
          Approving gives it every passkey in the vault.\n\n\
          Compare the words below with the words on the new device's screen:",
         asked_ago(req.created_at, now),
-        short(&req.request_id)
+        short_id(&req.request_id)
     ))?;
     let words = vault.pairing_words(&req)?;
     show_words(ctx, &words)?;
@@ -377,10 +368,7 @@ pub fn deny(ctx: &mut Ctx<'_>, prefix: &str) -> CliResult<Exit> {
         }
         [one] => one.clone(),
         several => {
-            ctx.write_raw(&ui::table(
-                &["#", "NAME", "ASKED", "REQUEST"],
-                &request_rows(ctx, several),
-            ))?;
+            ctx.write_raw(&request_table(ctx, several))?;
             return Err(CliError::usage(
                 "Several requests match. Give a longer request id.",
             ));

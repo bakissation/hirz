@@ -11,7 +11,7 @@ mod session;
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hirz_core::{
@@ -177,6 +177,10 @@ fn classify(msg: &Json) -> (Option<u64>, Kind) {
     (id, kind)
 }
 
+fn id_text(id: Option<u64>) -> String {
+    id.map_or_else(|| "null".to_owned(), |n| n.to_string())
+}
+
 fn type_name(msg: &Json) -> &str {
     match msg.get("type").and_then(Json::as_str) {
         Some(t @ ("hello" | "capabilities" | "create" | "get" | "list" | "cancel")) => t,
@@ -217,10 +221,10 @@ fn reader<R: Read>(
         if let Ok(msg) = &parsed {
             let (id, kind) = classify(msg);
             if debug {
-                let id = id.map_or_else(|| "null".to_owned(), |n| n.to_string());
                 diag(format_args!(
-                    "recv type={} id={id} bytes={}",
+                    "recv type={} id={} bytes={}",
                     type_name(msg),
+                    id_text(id),
                     bytes.len()
                 ));
             }
@@ -345,7 +349,7 @@ where
     A: Approver + UvProbe,
 {
     let pending = Arc::new(Mutex::new(Pending::default()));
-    let (tx, rx): (SyncSender<Inbound>, Receiver<Inbound>) = sync_channel(QUEUE);
+    let (tx, rx) = sync_channel(QUEUE);
     let reader_pending = Arc::clone(&pending);
     std::thread::Builder::new()
         .name("stdin".into())
@@ -369,7 +373,7 @@ where
             let error = reply.get("error").and_then(Json::as_str).unwrap_or("-");
             diag(format_args!(
                 "send id={} ok={ok} error={error} bytes={}",
-                id.map_or_else(|| "null".to_owned(), |n| n.to_string()),
+                id_text(id),
                 bytes.len()
             ));
         }

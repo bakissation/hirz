@@ -244,20 +244,12 @@ pub fn prompt_text(
     step: Step,
     notice: Option<&str>,
 ) -> String {
-    let mut lines = header(ctx);
-    if let Some(a) = account_line(ctx, selected) {
-        lines.push(a);
-    }
-    lines.push(String::new());
-    if let Some(n) = notice {
-        lines.push(n.to_owned());
-    }
-    lines.push(match step {
-        Step::Uv(UvMethod::Pin) => PIN_ENTRY_HINT.to_owned(),
-        Step::ClickToAllow if ssh_key_name(ctx.rp_id).is_some() => SSH_ALLOW_HINT.to_owned(),
-        other => step_hint(other).to_owned(),
-    });
-    lines.join("\n")
+    let hint = match step {
+        Step::Uv(UvMethod::Pin) => PIN_ENTRY_HINT,
+        Step::ClickToAllow if ssh_key_name(ctx.rp_id).is_some() => SSH_ALLOW_HINT,
+        other => step_hint(other),
+    };
+    with_hint(&context_text(ctx, selected), notice, hint)
 }
 
 /// Site and account, for the fingerprint window.
@@ -269,12 +261,61 @@ pub fn context_text(ctx: &ApprovalContext<'_>, selected: Option<usize>) -> Strin
     lines.join("\n")
 }
 
+/// `context`, a blank line, the optional `notice` and the closing `hint`.
+fn with_hint(context: &str, notice: Option<&str>, hint: &str) -> String {
+    match notice {
+        Some(n) => format!("{context}\n\n{n}\n{hint}"),
+        None => format!("{context}\n\n{hint}"),
+    }
+}
+
 fn zenity_timeout(remaining: Duration) -> String {
     let secs = remaining
         .as_secs()
         .saturating_add(u64::from(remaining.subsec_nanos() > 0))
         .max(1);
     format!("--timeout={secs}")
+}
+
+/// Yes/no dialog with a Cancel button. `default_cancel` puts the focus on Cancel so a stray
+/// Enter does not approve.
+fn question(
+    title: &str,
+    text: &str,
+    ok: &str,
+    width: u32,
+    remaining: Duration,
+    default_cancel: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "--question".to_owned(),
+        "--no-markup".to_owned(),
+        format!("--title={title}"),
+        format!("--text={text}"),
+        format!("--ok-label={ok}"),
+        "--cancel-label=Cancel".to_owned(),
+        format!("--width={width}"),
+        zenity_timeout(remaining),
+    ];
+    if default_cancel {
+        args.push("--default-cancel".to_owned());
+    }
+    args
+}
+
+/// Hidden-text entry for the hirz PIN.
+fn pin_entry(title: &str, text: &str, remaining: Duration) -> Vec<String> {
+    vec![
+        "--entry".to_owned(),
+        "--hide-text".to_owned(),
+        "--no-markup".to_owned(),
+        format!("--title={title}"),
+        format!("--text={text}"),
+        "--ok-label=Verify".to_owned(),
+        "--cancel-label=Cancel".to_owned(),
+        "--width=460".to_owned(),
+        zenity_timeout(remaining),
+    ]
 }
 
 /// Yes/no dialog. Click-to-allow puts the focus on Cancel so a stray Enter does not approve.
@@ -289,35 +330,26 @@ pub fn question_args(
         Step::ClickToAllow => "Allow",
         Step::Uv(_) => "Continue",
     };
-    let mut args = vec![
-        "--question".to_owned(),
-        "--no-markup".to_owned(),
-        format!("--title={}", title(ctx)),
-        format!("--text={}", prompt_text(ctx, selected, step, notice)),
-        format!("--ok-label={ok}"),
-        "--cancel-label=Cancel".to_owned(),
-        "--width=460".to_owned(),
-        zenity_timeout(remaining),
-    ];
-    if step == Step::ClickToAllow {
-        args.push("--default-cancel".to_owned());
-    }
-    args
+    question(
+        &title(ctx),
+        &prompt_text(ctx, selected, step, notice),
+        ok,
+        460,
+        remaining,
+        step == Step::ClickToAllow,
+    )
 }
 
 /// authenticatorSelection: the browser asks which security key to use. Focus is on Cancel.
 pub fn selection_args(remaining: Duration) -> Vec<String> {
-    vec![
-        "--question".to_owned(),
-        "--no-markup".to_owned(),
-        "--title=hirz".to_owned(),
-        "--text=Your browser is asking which security key to use.\n\nUse hirz?".to_owned(),
-        "--ok-label=Use hirz".to_owned(),
-        "--cancel-label=Cancel".to_owned(),
-        "--width=420".to_owned(),
-        zenity_timeout(remaining),
-        "--default-cancel".to_owned(),
-    ]
+    question(
+        "hirz",
+        "Your browser is asking which security key to use.\n\nUse hirz?",
+        "Use hirz",
+        420,
+        remaining,
+        true,
+    )
 }
 
 /// Hidden-text entry for the hirz PIN. The context is in the same dialog.
@@ -327,20 +359,11 @@ pub fn pin_args(
     notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
-    vec![
-        "--entry".to_owned(),
-        "--hide-text".to_owned(),
-        "--no-markup".to_owned(),
-        format!("--title={}", title(ctx)),
-        format!(
-            "--text={}",
-            prompt_text(ctx, selected, Step::Uv(UvMethod::Pin), notice)
-        ),
-        "--ok-label=Verify".to_owned(),
-        "--cancel-label=Cancel".to_owned(),
-        "--width=460".to_owned(),
-        zenity_timeout(remaining),
-    ]
+    pin_entry(
+        &title(ctx),
+        &prompt_text(ctx, selected, Step::Uv(UvMethod::Pin), notice),
+        remaining,
+    )
 }
 
 /// Account chooser. Column 1 is a hidden row number that zenity prints back; row values come
@@ -382,8 +405,8 @@ pub fn list_args(
 pub const PAIRING_TITLE: &str = "hirz: approve a new device";
 const PAIRING_WORD_CHARS: usize = 16;
 
-fn pairing_device(ctx: &PairingApprovalContext<'_>) -> String {
-    or_placeholder(sanitize(ctx.device_name, MAX_FIELD_CHARS), "unnamed device")
+fn device_label(name: &str) -> String {
+    or_placeholder(sanitize(name, MAX_FIELD_CHARS), "unnamed device")
 }
 
 /// The four words in capitals with wide gaps: `--no-markup` rules out a larger font, so the
@@ -403,9 +426,9 @@ pub fn pairing_text(
     step: Step,
     notice: Option<&str>,
 ) -> String {
-    let mut lines = vec![
+    let context = [
         "A new device asks to join your hirz vault.".to_owned(),
-        format!("Device name: {}", pairing_device(ctx)),
+        format!("Device name: {}", device_label(ctx.device_name)),
         format!("Asked {}", asked_ago(ctx.requested_at, now)),
         String::new(),
         pairing_words_line(ctx.words),
@@ -414,13 +437,9 @@ pub fn pairing_text(
          setting up yourself right now."
             .to_owned(),
         "Approving gives it every passkey in the vault.".to_owned(),
-        String::new(),
-    ];
-    if let Some(n) = notice {
-        lines.push(n.to_owned());
-    }
-    lines.push(step_hint(step).to_owned());
-    lines.join("\n")
+    ]
+    .join("\n");
+    with_hint(&context, notice, step_hint(step))
 }
 
 /// Pairing question. Focus is on Cancel so a stray Enter does not approve.
@@ -431,17 +450,14 @@ pub fn pairing_question_args(
     notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
-    vec![
-        "--question".to_owned(),
-        "--no-markup".to_owned(),
-        format!("--title={PAIRING_TITLE}"),
-        format!("--text={}", pairing_text(ctx, now, step, notice)),
-        "--ok-label=They match".to_owned(),
-        "--cancel-label=Cancel".to_owned(),
-        "--width=520".to_owned(),
-        zenity_timeout(remaining),
-        "--default-cancel".to_owned(),
-    ]
+    question(
+        PAIRING_TITLE,
+        &pairing_text(ctx, now, step, notice),
+        "They match",
+        520,
+        remaining,
+        true,
+    )
 }
 
 /// Hidden-text entry for the hirz PIN when approving a new device.
@@ -457,7 +473,7 @@ pub fn pairing_pin_args(
 pub fn pairing_context(ctx: &PairingApprovalContext<'_>) -> String {
     format!(
         "Approve the new device: {}\n{}",
-        pairing_device(ctx),
+        device_label(ctx.device_name),
         pairing_words_line(ctx.words)
     )
 }
@@ -468,30 +484,15 @@ fn device_pin_args(
     notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
-    let mut lines = vec![context.to_owned(), String::new()];
-    if let Some(n) = notice {
-        lines.push(n.to_owned());
-    }
-    lines.push(PIN_ENTRY_HINT.to_owned());
-    vec![
-        "--entry".to_owned(),
-        "--hide-text".to_owned(),
-        "--no-markup".to_owned(),
-        format!("--title={title}"),
-        format!("--text={}", lines.join("\n")),
-        "--ok-label=Verify".to_owned(),
-        "--cancel-label=Cancel".to_owned(),
-        "--width=460".to_owned(),
-        zenity_timeout(remaining),
-    ]
+    pin_entry(
+        title,
+        &with_hint(context, notice, PIN_ENTRY_HINT),
+        remaining,
+    )
 }
 
 pub const REMOVAL_TITLE: &str = "hirz: remove a device";
 const DEVICE_ID_CHARS: usize = 32;
-
-fn removal_device(ctx: &RemovalApprovalContext<'_>) -> String {
-    or_placeholder(sanitize(ctx.device_name, MAX_FIELD_CHARS), "unnamed device")
-}
 
 fn removal_id(ctx: &RemovalApprovalContext<'_>) -> String {
     or_placeholder(sanitize(ctx.device_id_short, DEVICE_ID_CHARS), "unknown")
@@ -501,28 +502,24 @@ fn removal_id(ctx: &RemovalApprovalContext<'_>) -> String {
 pub fn removal_context(ctx: &RemovalApprovalContext<'_>) -> String {
     format!(
         "Remove the device: {} (id {})",
-        removal_device(ctx),
+        device_label(ctx.device_name),
         removal_id(ctx)
     )
 }
 
 /// Body of the removal question: which device, what removal does, and the step.
 pub fn removal_text(ctx: &RemovalApprovalContext<'_>, step: Step, notice: Option<&str>) -> String {
-    let mut lines = vec![
+    let context = [
         "Remove this device from your hirz vault?".to_owned(),
-        format!("Device name: {}", removal_device(ctx)),
+        format!("Device name: {}", device_label(ctx.device_name)),
         format!("Device id: {}", removal_id(ctx)),
         String::new(),
         "It will no longer be able to read passkeys added or changed from now on. Only remove \
          a device if you asked hirz to remove it yourself right now."
             .to_owned(),
-        String::new(),
-    ];
-    if let Some(n) = notice {
-        lines.push(n.to_owned());
-    }
-    lines.push(step_hint(step).to_owned());
-    lines.join("\n")
+    ]
+    .join("\n");
+    with_hint(&context, notice, step_hint(step))
 }
 
 /// Removal question. Focus is on Cancel so a stray Enter does not remove.
@@ -532,17 +529,14 @@ pub fn removal_question_args(
     notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
-    vec![
-        "--question".to_owned(),
-        "--no-markup".to_owned(),
-        format!("--title={REMOVAL_TITLE}"),
-        format!("--text={}", removal_text(ctx, step, notice)),
-        "--ok-label=Remove".to_owned(),
-        "--cancel-label=Cancel".to_owned(),
-        "--width=520".to_owned(),
-        zenity_timeout(remaining),
-        "--default-cancel".to_owned(),
-    ]
+    question(
+        REMOVAL_TITLE,
+        &removal_text(ctx, step, notice),
+        "Remove",
+        520,
+        remaining,
+        true,
+    )
 }
 
 /// Hidden-text entry for the hirz PIN when removing a device.
@@ -564,11 +558,6 @@ pub fn finger_args(
     fallback: Option<UvMethod>,
     remaining: Duration,
 ) -> Vec<String> {
-    let mut lines = vec![context.to_owned(), String::new()];
-    if let Some(n) = notice {
-        lines.push(n.to_owned());
-    }
-    lines.push(FINGER_HINT.to_owned());
     let mut args = vec![
         match fallback {
             Some(_) => "--question".to_owned(),
@@ -576,7 +565,7 @@ pub fn finger_args(
         },
         "--no-markup".to_owned(),
         format!("--title={title}"),
-        format!("--text={}", lines.join("\n")),
+        format!("--text={}", with_hint(context, notice, FINGER_HINT)),
     ];
     match fallback {
         Some(next) => {

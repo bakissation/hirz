@@ -47,6 +47,12 @@ impl Ctx<'_> {
             .map_err(|e| CliError::io("Could not write the output", &e))
     }
 
+    pub fn say_json(&mut self, value: &serde_json::Value) -> CliResult {
+        let text =
+            serde_json::to_string_pretty(value).map_err(|e| CliError::failed(e.to_string()))?;
+        self.say(&text)
+    }
+
     /// The vault folder for commands that use an existing vault.
     pub fn vault_dir(&self) -> CliResult<PathBuf> {
         self.env.vault_dir(self.vault_flag.as_deref())

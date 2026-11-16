@@ -19,7 +19,7 @@ use hirz_vault::Vault;
 use std::ffi::OsString;
 use std::io::{PipeReader, PipeWriter, pipe};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 const ORIGIN: &str = "https://example.com";

@@ -35,6 +35,7 @@ const HOST_ERRORS = new Set([
   "UnknownError",
   "TypeError",
 ]);
+const PASS = Object.freeze({ ok: false, error: PASSTHROUGH });
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isB64u = (v) =>
@@ -369,17 +370,17 @@ async function sameOriginContext(state) {
 }
 
 async function ceremony(state, kind, rid, options) {
-  if (!optionsOk(options)) return { ok: false, error: PASSTHROUGH };
+  if (!optionsOk(options)) return PASS;
   const ctx = await sameOriginContext(state);
-  if (!ctx) return { ok: false, error: PASSTHROUGH };
+  if (!ctx) return PASS;
   if (busyTabs.has(ctx.tabId)) return { ok: false, error: "NotAllowedError" };
   busyTabs.add(ctx.tabId);
   try {
     // Firefox only runs WebAuthn for the active tab of the focused window;
     // when that does not hold, let Firefox give its own answer.
-    if (!(await tabIsFocused(ctx.tabId))) return { ok: false, error: PASSTHROUGH };
+    if (!(await tabIsFocused(ctx.tabId))) return PASS;
     const h = await openHost();
-    if (!h) return { ok: false, error: PASSTHROUGH };
+    if (!h) return PASS;
     if (state.closed) return { ok: false, error: "AbortError" };
     const call = hostCall(
       h,
@@ -416,10 +417,9 @@ async function ceremony(state, kind, rid, options) {
 // the relay, which draws the suggestions; it is never passed on to the page. Returns
 // the final reply, or null when the request stays pending.
 async function startConditional(state, rid, options) {
-  const pass = { ok: false, error: PASSTHROUGH };
-  if (!optionsOk(options)) return pass;
+  if (!optionsOk(options)) return PASS;
   const ctx = await sameOriginContext(state);
-  if (!ctx) return pass;
+  if (!ctx) return PASS;
   state.latestConditional = rid;
   const previous = state.conditional;
   if (previous) {
@@ -432,7 +432,7 @@ async function startConditional(state, rid, options) {
   if (typeof options.rpId === "string") query.rpId = options.rpId;
   if (Array.isArray(options.allowCredentials)) query.allowCredentials = options.allowCredentials;
   const h = await openHost();
-  if (!h) return pass;
+  if (!h) return PASS;
   let r;
   try {
     r = await hostCall(
@@ -441,11 +441,11 @@ async function startConditional(state, rid, options) {
       LIST_TIMEOUT_MS,
     ).promise;
   } catch {
-    return pass;
+    return PASS;
   }
   if (state.closed || state.aborted.has(rid)) return null;
   const accounts = r.ok === true ? cleanAccounts(r.accounts) : [];
-  if (accounts.length === 0) return pass;
+  if (accounts.length === 0) return PASS;
   if (state.latestConditional !== rid) return { ok: false, error: "AbortError" };
   state.conditional = { rid, options, ids: new Set(accounts.map((a) => a.id)), busy: false };
   reply(state, rid, { phase: "accounts", accounts });
@@ -475,7 +475,7 @@ async function onPageMessage(state, msg) {
   switch (msg.kind) {
     case "capabilities": {
       const caps = (await sameOriginContext(state)) ? await hostCapabilities() : null;
-      reply(state, rid, caps ? { ok: true, capabilities: caps } : { ok: false, error: PASSTHROUGH });
+      reply(state, rid, caps ? { ok: true, capabilities: caps } : PASS);
       return;
     }
     case "cancel": {

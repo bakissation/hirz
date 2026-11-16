@@ -9,10 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Name of the file in the state directory that records where this device's vault is.
-pub const VAULT_POINTER: &str = "vault-path";
 pub const DEFAULT_BROKER_SOCKET: &str = "/run/hirz/uhid.sock";
-const MAX_POINTER_LEN: u64 = 4096;
 
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -95,7 +92,7 @@ impl Env {
         if let Some(p) = flag {
             return self.absolute(p);
         }
-        if let Some(p) = read_pointer(&self.state_dir().join(VAULT_POINTER))? {
+        if let Some(p) = read_pointer(&self.state_dir().join(hirz_vault::VAULT_POINTER_FILE))? {
             return Ok(p);
         }
         Ok(self.default_vault())
@@ -108,7 +105,7 @@ impl Env {
     pub fn record_vault_dir(&self, vault: &Path) -> CliResult<()> {
         write_private(
             self.state_dir(),
-            VAULT_POINTER,
+            hirz_vault::VAULT_POINTER_FILE,
             vault.as_os_str().as_bytes(),
         )
         .map_err(|e| CliError::io("Could not record the vault location", &e))
@@ -116,32 +113,15 @@ impl Env {
 }
 
 fn read_pointer(path: &Path) -> CliResult<Option<PathBuf>> {
-    let f = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(CliError::io(
-                "Could not read the recorded vault location",
-                &e,
-            ));
+    hirz_vault::read_vault_pointer(path).map_err(|e| match e {
+        hirz_vault::VaultPointerError::Io(e) => {
+            CliError::io("Could not read the recorded vault location", &e)
         }
-    };
-    let mut buf = Vec::new();
-    f.take(MAX_POINTER_LEN.saturating_add(1))
-        .read_to_end(&mut buf)
-        .map_err(|e| CliError::io("Could not read the recorded vault location", &e))?;
-    let p = PathBuf::from(std::ffi::OsStr::from_bytes(&buf));
-    if u64::try_from(buf.len()).unwrap_or(u64::MAX) > MAX_POINTER_LEN
-        || buf.is_empty()
-        || buf.contains(&0)
-        || !p.is_absolute()
-    {
-        return Err(CliError::failed(format!(
+        hirz_vault::VaultPointerError::Invalid => CliError::failed(format!(
             "The recorded vault location in {} is not valid. Give the folder with --vault.",
             path.display()
-        )));
-    }
-    Ok(Some(p))
+        )),
+    })
 }
 
 /// Writes `dir/name` with mode 0600 through a temp file and a rename, in a 0700 directory.
@@ -239,10 +219,7 @@ pub trait System {
     fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn hirz_core::Approver + 's>;
     /// Unix time in seconds.
     fn now(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+        crate::ui::now()
     }
     /// Waits between polls of the vault folder.
     fn sleep(&self, d: std::time::Duration) {

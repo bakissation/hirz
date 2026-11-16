@@ -112,6 +112,40 @@ pub(crate) fn list(dir: &Path) -> Result<Vec<String>, VaultError> {
     Ok(names)
 }
 
+/// File in the local state directory where `hirz init` and `hirz join` record the vault
+/// folder, so every frontend finds the same vault.
+pub const VAULT_POINTER_FILE: &str = "vault-path";
+const MAX_VAULT_POINTER_LEN: u64 = 4096;
+
+/// Why the recorded vault folder cannot be used.
+#[derive(Debug)]
+pub enum VaultPointerError {
+    Io(std::io::Error),
+    /// Empty, longer than 4096 bytes, relative, or containing a NUL byte.
+    Invalid,
+}
+
+/// Reads the vault folder recorded in the pointer file at `path`; `Ok(None)` when there is
+/// none.
+pub fn read_vault_pointer(path: &Path) -> Result<Option<PathBuf>, VaultPointerError> {
+    use std::os::unix::ffi::OsStrExt;
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(VaultPointerError::Io(e)),
+    };
+    let mut buf = Vec::new();
+    f.take(MAX_VAULT_POINTER_LEN.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(VaultPointerError::Io)?;
+    let p = PathBuf::from(std::ffi::OsStr::from_bytes(&buf));
+    let too_long = u64::try_from(buf.len()).map_or(true, |n| n > MAX_VAULT_POINTER_LEN);
+    if too_long || buf.is_empty() || buf.contains(&0) || !p.is_absolute() {
+        return Err(VaultPointerError::Invalid);
+    }
+    Ok(Some(p))
+}
+
 /// Cross-process lock on the local state directory, held for counter and key file updates.
 ///
 /// A `create_new` lock file, because `File::lock` is newer than the workspace MSRV. A lock

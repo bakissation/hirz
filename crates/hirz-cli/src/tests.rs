@@ -1216,7 +1216,7 @@ fn remove_device_reports_exposed_sites() {
     let r = run(&b, &["forget-local"], &["y"]);
     assert!(r.ok().contains(crate::app::REMOVED));
     assert!(!b.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
-    assert!(!b.state().join(crate::env::VAULT_POINTER).exists());
+    assert!(!b.state().join(hirz_vault::VAULT_POINTER_FILE).exists());
     assert_eq!(tree(&vault), vault_files);
     assert_eq!(run(&b, &["list"], &[]).exit(), Exit::NotSetUp);
     assert!(

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use hirz_core::{
@@ -452,18 +452,25 @@ impl<R: CommandRunner> HirzApprover<R> {
         args
     }
 
+    fn zenity_spec(&self, args: Vec<String>, remaining: Duration) -> CommandSpec {
+        CommandSpec {
+            tool: Tool::Zenity,
+            args: self.zenity_args(args),
+            env: EnvPolicy::Desktop,
+            timeout: remaining.saturating_add(DIALOG_GRACE),
+        }
+    }
+
     fn dialog(
         &self,
         deadline: &Deadline,
         build: impl FnOnce(Duration) -> Vec<String>,
     ) -> Result<Secret, ApprovalError> {
         let remaining = deadline.remaining()?;
-        map_dialog(self.runner.run(&CommandSpec {
-            tool: Tool::Zenity,
-            args: self.zenity_args(build(remaining)),
-            env: EnvPolicy::Desktop,
-            timeout: remaining.saturating_add(DIALOG_GRACE),
-        }))
+        map_dialog(
+            self.runner
+                .run(&self.zenity_spec(build(remaining), remaining)),
+        )
     }
 
     /// Get with several accounts: the user picks one first. Returns the selection and whether
@@ -619,12 +626,7 @@ impl<R: CommandRunner> HirzApprover<R> {
                 env: EnvPolicy::System,
                 timeout: remaining,
             };
-            let shown = CommandSpec {
-                tool: Tool::Zenity,
-                args: self.zenity_args(window(notice.as_deref(), fallback, remaining)),
-                env: EnvPolicy::Desktop,
-                timeout: remaining.saturating_add(DIALOG_GRACE),
-            };
+            let shown = self.zenity_spec(window(notice.as_deref(), fallback, remaining), remaining);
             diag("waiting for your fingerprint");
             let (code, stdout) = match self.runner.run_with_dialog(&verify, &shown) {
                 Race::Dialog(r) => return Err(Self::finger_window_closed(r, fallback)),
@@ -727,7 +729,7 @@ impl<R: CommandRunner> HirzApprover<R> {
         Err(Fail::Stop(ApprovalError::Denied))
     }
 
-    fn take_busy(&self) -> Result<std::sync::MutexGuard<'_, ()>, ApprovalError> {
+    fn take_busy(&self) -> Result<MutexGuard<'_, ()>, ApprovalError> {
         match self.busy.try_lock() {
             Ok(g) => Ok(g),
             Err(TryLockError::WouldBlock) => Err(ApprovalError::Denied),
@@ -736,9 +738,18 @@ impl<R: CommandRunner> HirzApprover<R> {
     }
 
     fn rate_allowed(&self, key: &str, per_minute: u32) -> bool {
-        match self.limiter.lock() {
-            Ok(mut l) => l.allow(key, Instant::now(), per_minute),
-            Err(p) => p.into_inner().allow(key, Instant::now(), per_minute),
+        self.limiter
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .allow(key, Instant::now(), per_minute)
+    }
+
+    fn require_zenity(&self) -> Result<(), ApprovalError> {
+        if self.runner.tool_available(Tool::Zenity) {
+            Ok(())
+        } else {
+            diag(ZENITY_MISSING);
+            Err(ApprovalError::Unavailable)
         }
     }
 
@@ -790,10 +801,7 @@ impl<R: CommandRunner> HirzApprover<R> {
             diag("too many device prompts; try again in a minute");
             return Err(ApprovalError::Denied);
         }
-        if !self.runner.tool_available(Tool::Zenity) {
-            diag(ZENITY_MISSING);
-            return Err(ApprovalError::Unavailable);
-        }
+        self.require_zenity()?;
         let deadline = Deadline::start(config.timeout);
         let now = unix_now();
         let methods = config.methods;
@@ -839,10 +847,7 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
             diag("too many approval prompts for one site; try again in a minute");
             return Err(ApprovalError::Denied);
         }
-        if !self.runner.tool_available(Tool::Zenity) {
-            diag(ZENITY_MISSING);
-            return Err(ApprovalError::Unavailable);
-        }
+        self.require_zenity()?;
         let deadline = Deadline::start(config.timeout);
         let plan = plan_methods(&config, ctx)?;
         let available = |m: &Method| match m {
@@ -901,10 +906,7 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
     fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
         let _busy = self.take_busy()?;
         let config = self.config()?;
-        if !self.runner.tool_available(Tool::Zenity) {
-            diag(ZENITY_MISSING);
-            return Err(ApprovalError::Unavailable);
-        }
+        self.require_zenity()?;
         let deadline = Deadline::start(config.timeout);
         self.dialog(&deadline, display::selection_args)?;
         Ok(Approval {

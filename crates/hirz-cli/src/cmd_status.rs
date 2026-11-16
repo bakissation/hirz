@@ -4,7 +4,7 @@ use crate::app::Ctx;
 use crate::cmd_setup::{
     ManifestState, flatpak_firefox, manifest_locations, manifest_state, snap_firefox,
 };
-use crate::error::{CliError, CliResult, Exit};
+use crate::error::{CliResult, Exit};
 use crate::ui::{clean, count, hex};
 use hirz_uv::PinStore;
 use hirz_vault::Vault;
@@ -412,9 +412,7 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
 pub fn status(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
     let report = gather(ctx)?;
     if json_out {
-        let text = serde_json::to_string_pretty(&to_json(&report))
-            .map_err(|e| CliError::failed(e.to_string()))?;
-        ctx.say(&text)?;
+        ctx.say_json(&to_json(&report))?;
     } else {
         print_text(ctx, &report)?;
     }

@@ -12,7 +12,7 @@ mod relay;
 mod slots;
 
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -135,6 +135,10 @@ fn manual_listener(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
+fn open_uhid(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(path)
+}
+
 fn serve(mut client: UnixStream, uhid_path: &Path, uid: u32, pid: i32) {
     if let Err(e) = client.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT)) {
         log(format_args!(
@@ -142,7 +146,7 @@ fn serve(mut client: UnixStream, uhid_path: &Path, uid: u32, pid: i32) {
         ));
         return;
     }
-    let mut uhid = match OpenOptions::new().read(true).write(true).open(uhid_path) {
+    let mut uhid = match open_uhid(uhid_path) {
         Ok(f) => f,
         Err(e) => {
             log(format_args!("uid {uid} pid {pid}: cannot open uhid: {e}"));
@@ -244,7 +248,7 @@ fn main() -> ExitCode {
         log(format_args!("cannot harden the process: {e}"));
         return ExitCode::FAILURE;
     }
-    if let Err(e) = OpenOptions::new().read(true).write(true).open(&args.uhid) {
+    if let Err(e) = open_uhid(&args.uhid) {
         log(format_args!(
             "cannot open {}: {e} (is the uhid module available?)",
             args.uhid.display()

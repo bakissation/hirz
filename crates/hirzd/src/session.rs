@@ -9,18 +9,14 @@
 //! The variables are read once at start; the recorded folder is read again whenever no
 //! vault is open, so a vault set up while the frontend runs is found without a restart.
 
-use std::ffi::{OsStr, OsString};
-use std::io::Read;
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use hirz_core::{Approval, ApprovalContext, ApprovalError, Approver, CoreError, Engine};
-use hirz_vault::{Vault, VaultError};
+use hirz_vault::{VAULT_POINTER_FILE, Vault, VaultError, VaultPointerError};
 
 pub const VAULT_ENV: &str = "HIRZ_VAULT";
 pub const STATE_ENV: &str = "HIRZ_STATE";
-const VAULT_POINTER: &str = "vault-path";
-const MAX_POINTER_LEN: u64 = 4096;
 const VARS: [&str; 6] = [
     "HOME",
     "XDG_CONFIG_HOME",
@@ -56,13 +52,13 @@ impl Settings {
         }
     }
 
+    fn var(&self, key: &str) -> Option<&OsString> {
+        self.vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+    }
+
     /// Relative and empty values are ignored, as the XDG base directory spec requires.
     fn abs(&self, key: &str) -> Option<PathBuf> {
-        self.vars
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| PathBuf::from(v))
-            .filter(|p| p.is_absolute())
+        self.var(key).map(PathBuf::from).filter(|p| p.is_absolute())
     }
 
     pub fn state_dir(&self) -> Result<PathBuf, &'static str> {
@@ -79,7 +75,7 @@ impl Settings {
         let state_dir = self.state_dir()?;
         let vault_dir = match self.abs(VAULT_ENV) {
             Some(p) => p,
-            None => match read_pointer(&state_dir.join(VAULT_POINTER))? {
+            None => match read_pointer(&state_dir.join(VAULT_POINTER_FILE))? {
                 Some(p) => p,
                 None => self
                     .abs("XDG_DATA_HOME")
@@ -97,35 +93,18 @@ impl Settings {
 
     /// hirz-uv paths (config file, PIN state) with the same state directory as the vault.
     pub fn uv_paths(&self) -> Result<hirz_uv::Paths, &'static str> {
-        let mut paths = hirz_uv::Paths::from_vars(|k| {
-            self.vars
-                .iter()
-                .find(|(n, _)| *n == k)
-                .map(|(_, v)| v.clone())
-        })?;
+        let mut paths = hirz_uv::Paths::from_vars(|k| self.var(k).cloned())?;
         paths.state_dir = self.state_dir()?;
         Ok(paths)
     }
 }
 
-/// The folder `hirz init --vault` recorded, if any. Same rules as the CLI: at most 4096
-/// bytes, absolute, no NUL byte.
+/// The folder `hirz init --vault` recorded, if any.
 fn read_pointer(path: &Path) -> Result<Option<PathBuf>, String> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-    };
-    let mut buf = Vec::new();
-    file.take(MAX_POINTER_LEN.saturating_add(1))
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let p = PathBuf::from(OsStr::from_bytes(&buf));
-    let too_long = u64::try_from(buf.len()).map_or(true, |n| n > MAX_POINTER_LEN);
-    if too_long || buf.is_empty() || buf.contains(&0) || !p.is_absolute() {
-        return Err(format!("{} does not hold a valid folder", path.display()));
-    }
-    Ok(Some(p))
+    hirz_vault::read_vault_pointer(path).map_err(|e| match e {
+        VaultPointerError::Io(e) => format!("cannot read {}: {e}", path.display()),
+        VaultPointerError::Invalid => format!("{} does not hold a valid folder", path.display()),
+    })
 }
 
 /// What opening the vault found.
@@ -323,13 +302,13 @@ mod location_tests {
         let state = dir.to_str().unwrap().to_owned();
         let s = settings(&[("HOME", "/home/alice"), (STATE_ENV, &state)]);
 
-        std::fs::write(dir.join(VAULT_POINTER), b"/srv/sync/hirz").unwrap();
+        std::fs::write(dir.join(VAULT_POINTER_FILE), b"/srv/sync/hirz").unwrap();
         assert_eq!(s.location().unwrap().vault_dir, Path::new("/srv/sync/hirz"));
-        std::fs::write(dir.join(VAULT_POINTER), b"relative/path").unwrap();
+        std::fs::write(dir.join(VAULT_POINTER_FILE), b"relative/path").unwrap();
         assert!(s.location().is_err());
-        std::fs::write(dir.join(VAULT_POINTER), b"").unwrap();
+        std::fs::write(dir.join(VAULT_POINTER_FILE), b"").unwrap();
         assert!(s.location().is_err());
-        std::fs::write(dir.join(VAULT_POINTER), vec![b'/'; 5000]).unwrap();
+        std::fs::write(dir.join(VAULT_POINTER_FILE), vec![b'/'; 5000]).unwrap();
         assert!(s.location().is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }

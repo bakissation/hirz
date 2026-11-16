@@ -5,7 +5,7 @@ use crate::args::DeleteTarget;
 use crate::cmd_pair::{Change, check_verdict, ensure_uv_possible};
 use crate::error::{CliError, CliResult, Exit, phrase_problem};
 use crate::prompt::{self, confirm, confirm_word};
-use crate::ui::{self, clean, count, hex};
+use crate::ui::{self, clean, count, hex, short_id};
 use hirz_vault::{CredentialRecord, DeviceInfo, RecoveryPhrase, Vault, VaultError};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -15,7 +15,6 @@ const QUIZ_WORDS: usize = 3;
 const QUIZ_ROUNDS: usize = 3;
 const PHRASE_ATTEMPTS: usize = 3;
 const MAX_NAME_CHARS: usize = 64;
-const ID_PREFIX_HEX: usize = 12;
 /// Clears the screen and the scrollback, so the recovery phrase does not stay on screen.
 const CLEAR_SCREEN: &str = "\x1b[2J\x1b[3J\x1b[H";
 
@@ -308,12 +307,17 @@ pub fn join(ctx: &mut Ctx<'_>, name: Option<String>, request: bool) -> CliResult
         dir.display(),
         count(n, "passkey")
     ))?;
+    say_sync_hint(ctx)?;
+    Ok(Exit::Ok)
+}
+
+/// Said once this computer has joined, by either join mode.
+pub(crate) fn say_sync_hint(ctx: &mut Ctx<'_>) -> CliResult {
     ctx.say(&format!(
         "Passkeys you add on any device appear on the others once your sync tool has copied\n\
          the files. Connect Firefox with: {} setup firefox",
         ctx.program
-    ))?;
-    Ok(Exit::Ok)
+    ))
 }
 
 fn account_of(r: &CredentialRecord) -> Option<&str> {
@@ -324,26 +328,15 @@ fn account_of(r: &CredentialRecord) -> Option<&str> {
 }
 
 fn sorted(mut v: Vec<&CredentialRecord>) -> Vec<&CredentialRecord> {
-    v.sort_by(|a, b| {
+    v.sort_by_key(|&r| {
         (
-            a.rp_id.as_str(),
-            account_of(a),
-            a.created_at,
-            a.credential_id.as_slice(),
+            r.rp_id.as_str(),
+            account_of(r),
+            r.created_at,
+            r.credential_id.as_slice(),
         )
-            .cmp(&(
-                b.rp_id.as_str(),
-                account_of(b),
-                b.created_at,
-                b.credential_id.as_slice(),
-            ))
     });
     v
-}
-
-fn short_id(id: &[u8]) -> String {
-    let h = hex(id);
-    h.get(..ID_PREFIX_HEX).unwrap_or(&h).to_string()
 }
 
 fn algorithm_name(alg: i64) -> &'static str {
@@ -354,8 +347,8 @@ fn algorithm_name(alg: i64) -> &'static str {
     }
 }
 
-fn passkey_rows(records: &[&CredentialRecord]) -> Vec<Vec<String>> {
-    records
+fn passkey_table(records: &[&CredentialRecord]) -> String {
+    let rows: Vec<Vec<String>> = records
         .iter()
         .map(|r| {
             vec![
@@ -365,7 +358,8 @@ fn passkey_rows(records: &[&CredentialRecord]) -> Vec<Vec<String>> {
                 short_id(&r.credential_id),
             ]
         })
-        .collect()
+        .collect();
+    ui::table(&["SITE", "ACCOUNT", "CREATED", "ID"], &rows)
 }
 
 pub fn list(ctx: &mut Ctx<'_>, site: Option<String>, json_out: bool) -> CliResult<Exit> {
@@ -396,9 +390,7 @@ pub fn list(ctx: &mut Ctx<'_>, site: Option<String>, json_out: bool) -> CliResul
                 })
             })
             .collect();
-        let text = serde_json::to_string_pretty(&Value::Array(items))
-            .map_err(|e| CliError::failed(e.to_string()))?;
-        ctx.say(&text)?;
+        ctx.say_json(&Value::Array(items))?;
         return Ok(Exit::Ok);
     }
     if records.is_empty() {
@@ -408,11 +400,7 @@ pub fn list(ctx: &mut Ctx<'_>, site: Option<String>, json_out: bool) -> CliResul
         })?;
         return Ok(Exit::Ok);
     }
-    let table = ui::table(
-        &["SITE", "ACCOUNT", "CREATED", "ID"],
-        &passkey_rows(&records),
-    );
-    ctx.write_raw(&table)?;
+    ctx.write_raw(&passkey_table(&records))?;
     ctx.say(&count(records.len(), "passkey"))?;
     Ok(Exit::Ok)
 }
@@ -460,11 +448,7 @@ pub fn delete(ctx: &mut Ctx<'_>, target: DeleteTarget, yes: bool) -> CliResult<E
         }
         [one] => (*one).clone(),
         several => {
-            let table = ui::table(
-                &["SITE", "ACCOUNT", "CREATED", "ID"],
-                &passkey_rows(several),
-            );
-            ctx.write_raw(&table)?;
+            ctx.write_raw(&passkey_table(several))?;
             return Err(CliError::usage(format!(
                 "{} match. Give a longer id prefix from the list above.",
                 count(several.len(), "passkey")
@@ -491,8 +475,9 @@ pub fn delete(ctx: &mut Ctx<'_>, target: DeleteTarget, yes: bool) -> CliResult<E
     Ok(Exit::Ok)
 }
 
-fn device_rows(devs: &[DeviceInfo]) -> Vec<Vec<String>> {
-    devs.iter()
+fn device_table(devs: &[DeviceInfo]) -> String {
+    let rows: Vec<Vec<String>> = devs
+        .iter()
         .map(|d| {
             vec![
                 clean(&d.name, MAX_NAME_CHARS),
@@ -507,7 +492,8 @@ fn device_rows(devs: &[DeviceInfo]) -> Vec<Vec<String>> {
                 },
             ]
         })
-        .collect()
+        .collect();
+    ui::table(&["NAME", "ID", "ADDED", "STATUS"], &rows)
 }
 
 fn sorted_devices(vault: &Vault) -> Vec<DeviceInfo> {
@@ -532,13 +518,10 @@ pub fn devices(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
                 })
             })
             .collect();
-        let text = serde_json::to_string_pretty(&Value::Array(items))
-            .map_err(|e| CliError::failed(e.to_string()))?;
-        ctx.say(&text)?;
+        ctx.say_json(&Value::Array(items))?;
         return Ok(Exit::Ok);
     }
-    let table = ui::table(&["NAME", "ID", "ADDED", "STATUS"], &device_rows(&devs));
-    ctx.write_raw(&table)?;
+    ctx.write_raw(&device_table(&devs))?;
     let active = devs.iter().filter(|d| !d.removed).count();
     ctx.say(&format!("{} in use.", count(active, "device")))?;
     let waiting = vault.pairing_requests().map(|r| r.len()).unwrap_or(0);
@@ -587,10 +570,7 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
         }
         [one] => one.clone(),
         several => {
-            ctx.write_raw(&ui::table(
-                &["NAME", "ID", "ADDED", "STATUS"],
-                &device_rows(several),
-            ))?;
+            ctx.write_raw(&device_table(several))?;
             return Err(CliError::usage(
                 "Several devices match. Give a longer id prefix.",
             ));
@@ -698,7 +678,7 @@ pub fn forget_local(ctx: &mut Ctx<'_>) -> CliResult<Exit> {
         return Err(CliError::cancelled("Nothing was deleted."));
     }
     Vault::forget_local(&state)?;
-    match std::fs::remove_file(state.join(crate::env::VAULT_POINTER)) {
+    match std::fs::remove_file(state.join(hirz_vault::VAULT_POINTER_FILE)) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {

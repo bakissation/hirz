@@ -26,6 +26,7 @@ pub type DeviceId = [u8; 16];
 pub use backup::{IMPORT_LIMIT, import_backup};
 pub use error::{PhraseError, VaultError};
 pub use format::GenId;
+pub use fsutil::{VAULT_POINTER_FILE, VaultPointerError, read_vault_pointer};
 pub use pairing::{PAIRING_LIFETIME_SECS, PAIRING_WORDS, PairingPoll, PairingRequest, PendingJoin};
 pub use record::{
     CredentialRecord, HmacSecretPair, MAX_CREDENTIAL_ID_LEN, MAX_DEVICE_NAME_LEN, MAX_PKCS8_LEN,

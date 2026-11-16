@@ -98,18 +98,23 @@ struct EchoOff {
     saved: String,
 }
 
+fn stty(path: &std::path::Path, arg: &str) -> Command {
+    let mut cmd = Command::new(path);
+    cmd.arg(arg).stdin(Stdio::inherit()).stderr(Stdio::null());
+    cmd
+}
+
+fn succeeds(mut cmd: Command) -> bool {
+    cmd.status().is_ok_and(|s| s.success())
+}
+
 impl EchoOff {
     fn start() -> Option<EchoOff> {
         if !io::stdin().is_terminal() {
             return None;
         }
-        let stty = hirz_uv::runner::resolve_tool("stty")?;
-        let out = Command::new(&stty)
-            .arg("-g")
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
+        let path = hirz_uv::runner::resolve_tool("stty")?;
+        let out = stty(&path, "-g").output().ok()?;
         if !out.status.success() {
             return None;
         }
@@ -122,26 +127,13 @@ impl EchoOff {
         {
             return None;
         }
-        let ok = Command::new(&stty)
-            .arg("-echo")
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        ok.then_some(EchoOff { stty, saved })
+        succeeds(stty(&path, "-echo")).then_some(EchoOff { stty: path, saved })
     }
 }
 
 impl Drop for EchoOff {
     fn drop(&mut self) {
-        let restored = Command::new(&self.stty)
-            .arg(&self.saved)
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let restored = succeeds(stty(&self.stty, &self.saved));
         show("\n");
         if !restored {
             show("hirz: could not turn typing display back on. Type `reset` and press Enter.\n");

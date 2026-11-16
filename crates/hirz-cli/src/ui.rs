@@ -77,6 +77,14 @@ pub fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// The start of an id as `hirz list`, `hirz devices` and `hirz devices approve` show it.
+pub fn short_id(id: &[u8]) -> String {
+    const SHOWN_HEX: usize = 12;
+    let mut h = hex(id);
+    h.truncate(SHOWN_HEX);
+    h
+}
+
 /// Normalises a user-typed id prefix: lowercase hex digits, at least 4, at most a whole
 /// credential id.
 pub fn hex_prefix(input: &str) -> Option<String> {
