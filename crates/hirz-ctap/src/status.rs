@@ -89,9 +89,6 @@ impl From<&CoreError> for Status {
             CoreError::UnsupportedAlgorithm => Status::UnsupportedAlgorithm,
             CoreError::UvRequiredUnavailable => Status::OperationDenied,
             CoreError::Approval(a) => Status::from(a),
-            // Silent (up: false) assertions are refused before any lookup; answering as if
-            // nothing matched reveals nothing and is what platforms expect from a probe.
-            CoreError::SilentNotAllowed => Status::NoCredentials,
             CoreError::InvalidRequest(_) => Status::InvalidParameter,
             CoreError::Vault(_) | CoreError::Crypto(_) => Status::Other,
         }
@@ -168,7 +165,6 @@ mod tests {
                 CoreError::Approval(ApprovalError::Internal("x".into())),
                 Status::Other,
             ),
-            (CoreError::SilentNotAllowed, Status::NoCredentials),
             (CoreError::InvalidRequest("x"), Status::InvalidParameter),
             (CoreError::Vault("x".into()), Status::Other),
             (CoreError::Crypto("x".into()), Status::Other),

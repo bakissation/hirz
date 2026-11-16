@@ -84,8 +84,8 @@ pub struct GetAssertionRequest {
     pub rp_id: String,
     pub allow_list: Vec<Vec<u8>>,
     pub uv: UvRequirement,
-    /// False only for CTAP silent probes (`up: false`); no signature is released then
-    /// without a later ceremony.
+    /// False only for CTAP silent probes (`up: false`): the engine answers without a prompt
+    /// and signs with UP=0, which relying parties reject for sign-in.
     pub up: bool,
     pub extensions: GetExtensions,
 }
@@ -175,7 +175,8 @@ pub trait HmacSecretWrap {
     fn wrap(&self, output: &[u8]) -> Result<Vec<u8>, CoreError>;
 }
 
-/// Implemented by hirz-uv. The engine never signs unless `approve` returns `Ok`.
+/// Implemented by hirz-uv. The engine never signs with the user-present flag unless `approve`
+/// returns `Ok`; silent probes (`up: false`) sign with UP=0 without asking.
 pub trait Approver {
     fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError>;
 
@@ -202,9 +203,6 @@ pub enum CoreError {
     /// The RP requires UV and only click-to-allow is possible (NotAllowedError).
     UvRequiredUnavailable,
     Approval(ApprovalError),
-    /// getAssertion with `up: false`. hirz never signs without a prompt, so silent
-    /// assertions are refused before any credential lookup.
-    SilentNotAllowed,
     InvalidRequest(&'static str),
     Vault(String),
     Crypto(String),

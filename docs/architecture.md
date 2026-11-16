@@ -83,7 +83,7 @@ pub struct GetAssertionRequest {
     pub extensions: GetExtensions,     // hmac_secret salts (prf)
 }
 
-/// Implemented by hirz-uv. The engine never signs unless this returns Ok.
+/// Implemented by hirz-uv. The engine never signs with UP=1 unless this returns Ok.
 pub trait Approver {
     fn approve(&self, ctx: &ApprovalContext) -> Result<Approval, ApprovalError>;
 }
@@ -121,15 +121,22 @@ signature and the user handle; frontends wrap them in CTAP2 CBOR or WebAuthn JSO
 2. Extension background: trusted for `sender.origin` (set by Firefox) and nothing else
    the page could influence. The host re-validates origin and RP ID.
 3. Native host / daemon: owns all policy, approval and signing. A request without a
-   fresh approval from `hirz-uv` is never signed.
+   fresh approval from `hirz-uv` is never signed with the user-present flag.
 4. Other processes of the same user: can read the vault while unlocked and can talk to
-   the hidraw node. hirz states this in `docs/threat-model.md`; every signature still
-   needs an approval prompt.
+   the hidraw node. hirz states this in `docs/threat-model.md`; every signature with the
+   user-present flag still needs an approval prompt. Silent existence checks (CTAP
+   getAssertion with `up: false`) sign with UP=0, which relying parties reject for sign-in,
+   matching hardware security keys; they reveal to local processes whether a credential
+   exists for a site, which same-user processes can learn from the vault anyway.
 5. Root broker: smallest possible surface; only relays fixed-size HID reports for a device
    it created with the FIDO report descriptor. It never passes the `/dev/uhid` fd out.
 
 ## Local state
 
-- Vault (synced): `$XDG_DATA_HOME/hirz/vault/` by default, or a user-chosen folder.
+- Vault (synced): `$XDG_DATA_HOME/hirz/vault/` by default, or a user-chosen folder that
+  `hirz init` / `hirz join` record in `$XDG_STATE_HOME/hirz/vault-path`. hirzd and
+  hirz-nmh resolve it the same way (`crates/hirzd/src/session.rs`, shared by both), with
+  `HIRZ_VAULT` and `HIRZ_STATE` as overrides for tests. Without a vault, hirzd refuses
+  every ceremony and hirz-nmh hands every ceremony back to Firefox.
 - Device state (never synced): `$XDG_STATE_HOME/hirz/` holds the device secret, the
   wrapped vault key, PIN verifier, retry counters and rate-limit state (files 0600, dir 0700).

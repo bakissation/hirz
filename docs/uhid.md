@@ -117,8 +117,9 @@ The file name sorts after `60-fido-id.rules` and before `70-snap.*.rules` and
 `70-uaccess.rules`; both orderings matter.
 
 Every process of the same user can still open the node and speak CTAP to it, as with a
-hardware key. That is inherent to the design; every signature requires an approval prompt
-from hirzd (see `docs/threat-model.md`).
+hardware key. That is inherent to the design; every signature with the user-present flag
+requires an approval prompt from hirzd (see `docs/threat-model.md` and "Silent probes"
+below).
 
 ## Snap and Flatpak
 
@@ -158,7 +159,79 @@ transaction runs at a time; other channels get CHANNEL_BUSY meanwhile.
 keepalives and listening for CANCEL. The handler polls `RequestContext::is_cancelled` and
 sets `KeepaliveStatus::UpNeeded` while it waits for the user.
 
-## Running the spike by hand
+## hirzd
+
+hirzd connects to the broker, runs `hirz_ctap::Ctap2Handler` on the CTAPHID transport and
+answers with the engine of `hirz-core` over the user's vault, asking `hirz-uv`
+(`HirzApprover`) for every approval.
+
+- **Vault.** Resolved like the CLI does: `HIRZ_VAULT`, else the folder recorded in
+  `$XDG_STATE_HOME/hirz/vault-path`, else `$XDG_DATA_HOME/hirz/vault`; state in
+  `HIRZ_STATE`, else `$XDG_STATE_HOME/hirz`. The vault is opened on the first request and
+  reloaded by the engine for every ceremony, so credentials created by the extension path
+  or synced from another device are seen at once. Without a vault, makeCredential,
+  getAssertion and authenticatorSelection return `CTAP2_ERR_OPERATION_DENIED`, hirzd logs
+  "run `hirz init` first" and shows a desktop notification (`zenity --notification`, at
+  most once every 10 minutes).
+- **getInfo** comes from `hirz_ctap::ctap2::get_info_response()`: versions `FIDO_2_0` and
+  `FIDO_2_1`, extensions `credProtect` and `hmac-secret`, the hirz AAGUID, options `rk`,
+  `up`, `uv` true and `plat` false, maxMsgSize 7609, PIN/UV auth protocols 2 and 1,
+  maxCredentialCountInList 16, maxCredentialIdLength 32 (every hirz credential id is 32
+  bytes, so platforms can skip longer ids without asking), transports `usb`, algorithms
+  ES256 and EdDSA, and firmwareVersion `0x000100` (0.1.0).
+- **Cancellation.** The approval prompt cannot be interrupted. On CTAPHID_CANCEL the
+  transport answers `CTAP2_ERR_KEEPALIVE_CANCEL` at once; the open prompt stays until it is
+  answered or times out, and its approval then counts as refused, so a cancelled request
+  creates and signs nothing. A request that arrives meanwhile waits for that prompt to
+  close.
+- **Reconnects.** When the broker closes the connection or cannot be reached, hirzd
+  retries after 1 second, doubling up to 60 seconds; a connection that lasted 30 seconds
+  resets the delay.
+- **Hardening.** At start: `RLIMIT_CORE 0`, `PR_SET_DUMPABLE 0`, `PR_SET_NO_NEW_PRIVS`
+  (`hirz_sys::harden_process`), and `mlockall` when `HIRZ_MLOCK=1`. None of the helpers
+  hirz-uv starts (zenity, pkcheck, fprintd-verify, fprintd-list) is setuid or has file
+  capabilities, so NO_NEW_PRIVS does not affect them. polkitd identifies the hirzd process
+  by pid, start time and uid from `/proc/<pid>/stat` and `/proc/<pid>/status`, which stay
+  readable when the process is not dumpable; pkcheck gives the same answer for a hardened
+  and an unhardened process.
+
+## Silent probes
+
+Before the real request, platforms check which entries of an allow list (getAssertion) or
+exclude list (makeCredential) a key holds, by sending authenticatorGetAssertion with the
+option `up: false` (CTAP 2.2 section 6.2.2 calls this pre-flight). Firefox does this for
+every CTAP2 device: in authenticator-rs, now vendored at
+`dom/webauthn/authenticator/src/ctap2/preflight.rs` in the Firefox tree
+(<https://searchfox.org/firefox-main/source/dom/webauthn/authenticator/src/ctap2/preflight.rs>),
+`do_credential_list_filtering_ctap2` sends getAssertion with `user_presence: Some(false)`
+for each chunk of `maxCredentialCountInList` entries (1 when the device does not say), keeps
+the chunk that succeeds, and drops ids longer than `maxCredentialIdLength`. `register` and
+`sign` in `src/ctap2/mod.rs` of the same crate run it on the exclude and allow lists. When
+the filtered allow list comes back empty, `sign` asks for a touch and fails with
+`NoCredentials` without ever sending the real request, so a key that refuses probes can
+never be used to sign in with an allow list. Chromium probes the same way
+(`MakeCredentialTask::NextSilentRequest` and `GetAssertionTask` in `device/fido/`, with
+`user_presence_required = false` and UV discouraged), but only when a list does not fit in
+one request of `maxCredentialCountInList` entries.
+
+hirz therefore answers probes as hardware keys do. With `up: false` and a non-empty allow
+list, the engine signs for the first credential of the list that belongs to the RP, without
+a prompt, with flags UP=0 and UV=0 (BE and BS as usual), no hmac-secret output and no user
+name. Credentials with credProtect level 3 are skipped (they need UV). An empty allow list
+gives `CTAP2_ERR_NO_CREDENTIALS`, and a probe that also asks for UV gives
+`CTAP2_ERR_OPERATION_DENIED`. Relying parties reject assertions without UP for sign-in, so a
+probe result cannot log anyone in. A probe reveals to local processes whether a credential
+exists for a site, which processes of the same user can learn from the vault anyway.
+
+When none of the allowed credentials is found, Firefox sends a throwaway makeCredential
+for the RP id `make.me.blink` (`dummy_make_credentials_cmd` in
+`src/ctap2/commands/make_credentials.rs`) only to wait for a touch before it reports
+`NoCredentials`; Chromium does the same with the RP id `.dummy` (`kDummyRpID`,
+`MakeCredentialTask::GetTouchRequest`). hirzd answers such
+requests with a presence-only prompt, as for authenticatorSelection, and then
+`CTAP2_ERR_OPERATION_DENIED`; it never stores a credential for them.
+
+## Running hirzd
 
 ```
 cargo build --release -p hirz-uhid-broker -p hirzd
@@ -166,6 +239,44 @@ sudo ./target/release/hirz-uhid-broker --listen /run/hirz/uhid.sock   # terminal
 ./target/release/hirzd                                                # terminal 2, as the user
 ```
 
-`HIRZ_BROKER_SOCKET` overrides the socket path for hirzd. `hirzd --self-test` runs the
-transport against an in-process fake broker over a socketpair and needs neither root nor
-`/dev/uhid`. hirzd exits when the broker closes the connection; it does not reconnect yet.
+`HIRZ_BROKER_SOCKET` overrides the socket path. As a service, install
+`packaging/systemd/hirzd.service` as a user unit (the comments in the file explain each
+hardening option, and why the namespace-based ones are not used):
+
+```
+install -D -m 0644 packaging/systemd/hirzd.service ~/.config/systemd/user/hirzd.service
+# edit ExecStart if the binary is not at /usr/local/libexec/hirz/hirzd
+systemctl --user daemon-reload
+systemctl --user enable --now hirzd.service
+journalctl --user -u hirzd -f
+```
+
+`hirzd --self-test` needs neither root nor `/dev/uhid` nor a desktop. It creates a vault in
+a temporary folder and plays the browser over an in-process socketpair: getInfo,
+makeCredential, getAssertion with an allow list, a discoverable getAssertion and a silent
+probe, verifying every signature, and then makeCredential without a vault, which must be
+denied. Its approver approves everything and exists only inside the self-test; no option
+or variable puts it in front of the real vault.
+
+## Manual test checklist
+
+Needs the broker running (root), the udev rule installed, a vault (`hirz init`), and an
+approval method (for example the polkit action).
+
+1. `hirzd --self-test` passes.
+2. Start hirzd; the log shows "connected to the broker". `fido2-token -L` lists
+   `hirz virtual authenticator`; `fido2-token -I <device>` shows the getInfo above.
+3. Firefox, https://webauthn.io, register with "Security key": one hirz prompt shows the
+   site; after approval the registration succeeds.
+4. Authenticate with the same username (allow list): the silent probe produces no prompt,
+   then one hirz prompt; the assertion succeeds with UP set.
+5. Authenticate without a username (discoverable): the account list appears when several
+   accounts exist.
+6. Register again with the same username (exclude list): one hirz prompt, then Firefox
+   reports that the key is already registered.
+7. Cancel in Firefox while the hirz prompt is open: Firefox stops at once; approving the
+   still open prompt afterwards creates nothing (`hirz list` is unchanged).
+8. Stop the broker: hirzd logs the reconnect delays; start it again: hirzd reconnects.
+9. Move the vault away (or use a fresh account): a ceremony is refused and a desktop
+   notification asks to run `hirz init`.
+10. Repeat 3 and 4 in Chromium.

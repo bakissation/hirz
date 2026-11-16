@@ -665,23 +665,110 @@ fn approval_errors_map() {
     assert_eq!(vault.list_all().len(), 1);
 }
 
+fn silent(allow: &[&[u8]]) -> GetAssertionRequest {
+    let mut req = get_req(allow);
+    req.up = false;
+    req
+}
+
 #[test]
-fn silent_assertion_refused() {
+fn silent_probe_signs_without_prompt_or_presence() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let mut req = make_req("alice", &[-8]);
+    req.extensions.hmac_secret = true;
+    let made = create(&mut vault, &req, uv());
+    let other = [1u8; 32];
+
+    let mut probe = silent(&[&other, &made.credential_id]);
+    probe.extensions.hmac_secret = Some(HmacSecretSalts {
+        salt1: [0x11; 32],
+        salt2: None,
+    });
+    let fake = Fake::default();
+    let a = Engine::new(&mut vault, &fake)
+        .get_assertion(&probe, None, Some(&XorWrap))
+        .unwrap();
+    assert_eq!(fake.calls(), 0);
+    assert_eq!(a.credential_id, made.credential_id);
+    assert_eq!(a.user_handle, b"alice");
+    assert!(a.user.is_none());
+    assert!(a.hmac_secret_output.is_none());
+    let ad = parse(&a.auth_data);
+    assert_eq!(ad.flags, FLAG_BE);
+    assert!(ad.extensions.is_none());
+    assert_eq!(ad.rp_id_hash, hirz_crypto::sha256(RP.as_bytes()));
+    verify(&public_key(&made), &a);
+}
+
+#[test]
+fn silent_probe_reports_backup_state() {
     let t = TempDir::new();
     let mut vault = t.vault();
     let made = create(&mut vault, &make_req("alice", &[-7]), up());
-    for allow in [
-        vec![],
-        vec![made.credential_id.as_slice()],
-        vec![&[1u8; 32][..]],
-    ] {
-        let mut req = get_req(&allow);
-        req.up = false;
-        let fake = Fake::with(vec![Ok(up())]);
-        let r = Engine::new(&mut vault, &fake).get_assertion(&req, None, None);
-        assert_eq!(r, Err(CoreError::SilentNotAllowed));
-        assert_eq!(fake.calls(), 0);
-    }
+    vault.confirm_backup().unwrap();
+    let fake = Fake::default();
+    let a = Engine::new(&mut vault, &fake)
+        .get_assertion(&silent(&[&made.credential_id]), None, None)
+        .unwrap();
+    assert_eq!(parse(&a.auth_data).flags, FLAG_BE | FLAG_BS);
+}
+
+#[test]
+fn silent_probe_without_match_or_allow_list() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let made = create(&mut vault, &make_req("alice", &[-7]), up());
+    let fake = Fake::default();
+    let mut engine = Engine::new(&mut vault, &fake);
+    assert_eq!(
+        engine.get_assertion(&silent(&[]), None, None),
+        Err(CoreError::NoCredentials)
+    );
+    assert_eq!(
+        engine.get_assertion(&silent(&[&[1u8; 32]]), None, None),
+        Err(CoreError::NoCredentials)
+    );
+    let mut other_rp = silent(&[&made.credential_id]);
+    other_rp.rp_id = "other.example".to_owned();
+    assert_eq!(
+        engine.get_assertion(&other_rp, None, None),
+        Err(CoreError::NoCredentials)
+    );
+    let mut wants_uv = silent(&[&made.credential_id]);
+    wants_uv.uv = UvRequirement::Required;
+    assert_eq!(
+        engine.get_assertion(&wants_uv, None, None),
+        Err(CoreError::UvRequiredUnavailable)
+    );
+    assert_eq!(fake.calls(), 0);
+}
+
+#[test]
+fn silent_probe_skips_cred_protect_3() {
+    let t = TempDir::new();
+    let mut vault = t.vault();
+    let strict = protected(&mut vault, "alice", CredProtect::UserVerificationRequired);
+    let listed = protected(
+        &mut vault,
+        "bob",
+        CredProtect::UserVerificationOptionalWithCredentialIdList,
+    );
+    let fake = Fake::default();
+    let mut engine = Engine::new(&mut vault, &fake);
+    assert_eq!(
+        engine.get_assertion(&silent(&[&strict.credential_id]), None, None),
+        Err(CoreError::NoCredentials)
+    );
+    let a = engine
+        .get_assertion(
+            &silent(&[&strict.credential_id, &listed.credential_id]),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(a.credential_id, listed.credential_id);
+    assert_eq!(fake.calls(), 0);
 }
 
 fn hmac_req(allow: &[u8], salt2: bool) -> GetAssertionRequest {

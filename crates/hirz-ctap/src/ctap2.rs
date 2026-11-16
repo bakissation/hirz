@@ -20,8 +20,8 @@
 use std::sync::Mutex;
 
 use hirz_core::{
-    AAGUID, AssertionResponse, COSE_ALG_EDDSA, COSE_ALG_ES256, CoreError, CredProtect,
-    GetAssertionRequest, GetExtensions, HmacSecretWrap, MakeCredentialRequest,
+    AAGUID, AssertionResponse, COSE_ALG_EDDSA, COSE_ALG_ES256, CREDENTIAL_ID_LEN, CoreError,
+    CredProtect, GetAssertionRequest, GetExtensions, HmacSecretWrap, MakeCredentialRequest,
     MakeCredentialResponse, MakeExtensions, RpEntity, UserEntity, UvRequirement,
 };
 use hirz_proto::cbor::{self, Limits, MapBuilder, Value};
@@ -57,6 +57,13 @@ pub mod client_pin {
     pub const GET_UV_RETRIES: u64 = 0x07;
     pub const GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS: u64 = 0x09;
 }
+
+/// getInfo maxCredentialCountInList: allow and exclude list entries per request that
+/// platforms may send, so their silent pre-flight probes need few round trips.
+pub const MAX_CREDENTIAL_COUNT_IN_LIST: u64 = 16;
+
+/// getInfo firmwareVersion: the package version as `major << 16 | minor << 8 | patch`.
+pub const FIRMWARE_VERSION: u64 = 0x00_01_00;
 
 /// Longest user handle (WebAuthn `user.id`).
 pub const MAX_USER_ID_LEN: usize = 64;
@@ -505,11 +512,14 @@ pub fn get_info_value() -> Value {
         )
         .int(0x05, MAX_MESSAGE_SIZE as u64)
         .int(0x06, Value::Array(vec![Value::int(2), Value::int(1)]))
+        .int(0x07, MAX_CREDENTIAL_COUNT_IN_LIST)
+        .int(0x08, CREDENTIAL_ID_LEN as u64)
         .int(0x09, text_array(&["usb"]))
         .int(
             0x0a,
             Value::Array(vec![algorithm(COSE_ALG_ES256), algorithm(COSE_ALG_EDDSA)]),
         )
+        .int(0x0e, FIRMWARE_VERSION)
         .build()
 }
 

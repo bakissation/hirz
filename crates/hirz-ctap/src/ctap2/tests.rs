@@ -205,23 +205,27 @@ fn text_map(entries: &[(&str, Value)]) -> Value {
 
 // Copy of the hand-written spike bytes in hirzd's getinfo.rs, which this encoder replaces.
 fn hand_written_get_info() -> Vec<u8> {
-    let mut v = vec![0x00, 0xa8, 0x01, 0x82];
+    let mut v = vec![0x00, 0xab, 0x01, 0x82];
     v.extend_from_slice(b"\x68FIDO_2_0\x68FIDO_2_1");
     v.extend_from_slice(b"\x02\x82\x6bcredProtect\x6bhmac-secret");
     v.extend_from_slice(&[0x03, 0x50]);
     v.extend_from_slice(&AAGUID);
     v.extend_from_slice(b"\x04\xa4\x62rk\xf5\x62up\xf5\x62uv\xf5\x64plat\xf4");
     v.extend_from_slice(&[0x05, 0x19, 0x1d, 0xb9, 0x06, 0x82, 0x02, 0x01]);
+    // maxCredentialCountInList 16, maxCredentialIdLength 32.
+    v.extend_from_slice(&[0x07, 0x10, 0x08, 0x18, 0x20]);
     v.extend_from_slice(b"\x09\x81\x63usb\x0a\x82");
     v.extend_from_slice(b"\xa2\x63alg\x26\x64type\x6apublic-key");
     v.extend_from_slice(b"\xa2\x63alg\x27\x64type\x6apublic-key");
+    // firmwareVersion 0x000100.
+    v.extend_from_slice(&[0x0e, 0x19, 0x01, 0x00]);
     v
 }
 
 #[test]
 fn get_info_equals_the_hand_written_bytes() {
     let r = get_info_response();
-    assert_eq!(r.len(), 146);
+    assert_eq!(r.len(), 155);
     assert_eq!(r, hand_written_get_info());
     let h = handler();
     assert_eq!(h.process(&[command::GET_INFO], &RequestContext::new()), r);

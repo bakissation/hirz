@@ -6,11 +6,16 @@
 //!
 //! Policy, relative to CTAP 2.2 section 6:
 //!
-//! - **Silent assertions** (`up: false`) are refused with [`CoreError::SilentNotAllowed`]
-//!   before any lookup, because every hirz signature needs a prompt. The refusal is the same
-//!   whether or not credentials exist. Platforms that probe allow lists silently will see
-//!   the error instead of a probe result; a CTAP frontend should advertise a large
-//!   `maxCredentialCountInList` so they have no reason to probe.
+//! - **Silent probes** (`up: false`): platforms send getAssertion with `up: false` to find
+//!   out which entries of an allow list or exclude list exist here before the real request
+//!   (CTAP 2.2 section 6.2.2, "pre-flight"). With a non-empty allow list the engine signs for
+//!   the first applicable credential without calling the approver: flags UP=0 and UV=0, BE
+//!   and BS as usual, no hmac-secret output and no user entity. Relying parties reject
+//!   assertions without UP for sign-in, so a probe result cannot log anyone in. Credentials
+//!   with credProtect level 3 are not applicable without UV and are skipped. An empty allow
+//!   list, or a probe that asks for UV, never reaches a credential (`NoCredentials` and
+//!   `UvRequiredUnavailable`). A probe reveals to local processes whether a credential exists
+//!   for a site, which processes of the same user can learn from the vault anyway.
 //! - **excludeList**: a listed credential of this RP still asks the user (a Create prompt)
 //!   before [`CoreError::CredentialExcluded`] is returned, so a page cannot probe for
 //!   credentials without a gesture. If the user declines or the prompt times out, the
@@ -183,7 +188,7 @@ impl<'a> Engine<'a> {
         }
         let auth_data = AuthenticatorData {
             rp_id_hash: hirz_crypto::sha256(req.rp.id.as_bytes()),
-            flags: flags(approval.user_verified, backup_state),
+            flags: flags(true, approval.user_verified, backup_state),
             sign_count: 0,
             attested_credential: Some(AttestedCredentialData {
                 aaguid: AAGUID,
@@ -247,10 +252,10 @@ impl<'a> Engine<'a> {
         origin: Option<&str>,
         hmac: Option<&dyn HmacSecretWrap>,
     ) -> Result<AssertionResponse, CoreError> {
-        if !req.up {
-            return Err(CoreError::SilentNotAllowed);
-        }
         check_rp_id(&req.rp_id)?;
+        if !req.up {
+            return self.silent_probe(req);
+        }
         self.reload()?;
         let vault: &Vault = self.vault;
         let with_list = !req.allow_list.is_empty();
@@ -288,20 +293,12 @@ impl<'a> Engine<'a> {
             ),
             (Some(out), None) => (None, Some(out.to_vec())),
         };
-        let auth_data = AuthenticatorData {
-            rp_id_hash: hirz_crypto::sha256(req.rp_id.as_bytes()),
-            flags: flags(uv, vault.backup_state()),
-            sign_count: 0,
-            attested_credential: None,
+        let (auth_data, signature) = sign_assertion(
+            record,
+            req,
+            flags(true, uv, vault.backup_state()),
             extensions,
-        }
-        .encode()
-        .map_err(encoding_error)?;
-
-        let mut message = Vec::with_capacity(auth_data.len().saturating_add(32));
-        message.extend_from_slice(&auth_data);
-        message.extend_from_slice(&req.client_data_hash);
-        let signature = sign(record, &message)?;
+        )?;
 
         let user = (!with_list).then(|| UserEntity {
             id: record.user_id.clone(),
@@ -315,6 +312,32 @@ impl<'a> Engine<'a> {
             user_handle: record.user_id.clone(),
             user,
             hmac_secret_output,
+        })
+    }
+
+    /// getAssertion with `up: false` (see the module documentation). Never prompts.
+    fn silent_probe(&mut self, req: &GetAssertionRequest) -> Result<AssertionResponse, CoreError> {
+        if req.allow_list.is_empty() {
+            return Err(CoreError::NoCredentials);
+        }
+        if req.uv == UvRequirement::Required {
+            return Err(CoreError::UvRequiredUnavailable);
+        }
+        self.reload()?;
+        let vault: &Vault = self.vault;
+        let record = locate(vault, req)
+            .into_iter()
+            .find(|r| !needs_uv(r, true))
+            .ok_or(CoreError::NoCredentials)?;
+        let (auth_data, signature) =
+            sign_assertion(record, req, flags(false, false, vault.backup_state()), None)?;
+        Ok(AssertionResponse {
+            credential_id: record.credential_id.to_vec(),
+            auth_data,
+            signature,
+            user_handle: record.user_id.clone(),
+            user: None,
+            hmac_secret_output: None,
         })
     }
 
@@ -443,8 +466,11 @@ fn approval_error(e: ApprovalError, uv_required: bool) -> CoreError {
     }
 }
 
-fn flags(uv: bool, backup_state: bool) -> u8 {
-    let mut f = FLAG_UP | FLAG_BE;
+fn flags(up: bool, uv: bool, backup_state: bool) -> u8 {
+    let mut f = FLAG_BE;
+    if up {
+        f |= FLAG_UP;
+    }
     if uv {
         f |= FLAG_UV;
     }
@@ -516,6 +542,29 @@ fn hmac_secret_output(
         out.extend_from_slice(Zeroizing::new(hirz_crypto::hmac_sha256(key, salt2)).as_slice());
     }
     Some(out)
+}
+
+/// authenticatorData for an assertion and the signature over it and the client data hash.
+fn sign_assertion(
+    record: &CredentialRecord,
+    req: &GetAssertionRequest,
+    flags: u8,
+    extensions: Option<hirz_proto::cbor::Value>,
+) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
+    let auth_data = AuthenticatorData {
+        rp_id_hash: hirz_crypto::sha256(req.rp_id.as_bytes()),
+        flags,
+        sign_count: 0,
+        attested_credential: None,
+        extensions,
+    }
+    .encode()
+    .map_err(encoding_error)?;
+    let mut message = Vec::with_capacity(auth_data.len().saturating_add(32));
+    message.extend_from_slice(&auth_data);
+    message.extend_from_slice(&req.client_data_hash);
+    let signature = sign(record, &message)?;
+    Ok((auth_data, signature))
 }
 
 fn sign(rec: &CredentialRecord, message: &[u8]) -> Result<Vec<u8>, CoreError> {

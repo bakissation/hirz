@@ -1,6 +1,6 @@
 # Approving passkey requests
 
-hirz never signs a request without a fresh approval from you. The `hirz-uv` crate asks for
+hirz never signs a request with the user-present flag without a fresh approval from you (silent existence checks from the browser are answered with that flag unset, like a hardware key; see `docs/threat-model.md`). The `hirz-uv` crate asks for
 that approval. There are four ways to give it. Three of them verify that it is you and set
 the UV (user verified) flag; one only shows that someone clicked and sets UP (user present)
 alone.

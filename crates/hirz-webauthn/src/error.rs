@@ -87,7 +87,6 @@ pub fn core_error_name(e: &CoreError) -> ErrorName {
         CoreError::CredentialExcluded => ErrorName::InvalidStateError,
         CoreError::NoCredentials
         | CoreError::UvRequiredUnavailable
-        | CoreError::SilentNotAllowed
         | CoreError::Approval(
             ApprovalError::Denied
             | ApprovalError::Timeout

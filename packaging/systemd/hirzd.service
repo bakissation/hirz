@@ -1,0 +1,56 @@
+# systemd USER unit for hirzd, the user daemon behind the hirz virtual security key.
+# Install to /usr/lib/systemd/user/ (packages) or ~/.config/systemd/user/ (development),
+# then: systemctl --user daemon-reload && systemctl --user enable --now hirzd.service
+[Unit]
+Description=hirz virtual security key (user daemon)
+Documentation=https://github.com/bakissation/hirz/blob/main/docs/uhid.md
+# Approval prompts (zenity) need the session's display, and polkit needs its agent; both
+# exist only while a graphical session runs. The desktop imports DISPLAY, WAYLAND_DISPLAY
+# and the session bus address into the user manager before graphical-session.target.
+After=graphical-session.target
+PartOf=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/hirz/hirzd
+# hirzd retries the broker itself (1 s doubling to 60 s), so it only exits on a fatal error.
+Restart=on-failure
+RestartSec=5s
+
+# hirzd and every helper it starts (zenity, pkcheck, fprintd-verify, fprintd-list) run
+# without setuid bits or file capabilities, so none of the following breaks approval.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+# Deny list rather than an allow list: the filter also applies to zenity (GTK) and its GPU
+# drivers, whose needs are broad and change with the desktop.
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+# AF_UNIX for the broker, the session bus, Wayland and X11; AF_NETLINK for GLib inside
+# zenity. hirzd itself never uses the network.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+UMask=0077
+LimitCORE=0
+TasksMax=64
+MemoryMax=256M
+
+# Deliberately not set:
+# - ProtectSystem=, ProtectHome=, PrivateTmp=, PrivateDevices=, ProtectKernel*=,
+#   ProtectControlGroups=, ProtectClock=, ProtectHostname=, ReadOnlyPaths= and similar:
+#   in a user unit they imply PrivateUsers=yes. In a user namespace root-owned files appear
+#   owned by the overflow uid, so hirz-uv no longer finds zenity, pkcheck and fprintd in
+#   root-owned system directories and refuses every approval. ProtectHome would also hide
+#   the vault.
+# - PrivateNetwork=, IPAddressDeny=: need a network namespace (and with it a user
+#   namespace); X11 over TCP would break too.
+# - MemoryDenyWriteExecute=: zenity's GTK renderer may JIT shaders (Mesa llvmpipe).
+# - CapabilityBoundingSet=, AmbientCapabilities=: a user service holds no capabilities, and
+#   NoNewPrivileges=yes keeps it from gaining any.
+# hirzd itself also sets PR_SET_DUMPABLE 0, NO_NEW_PRIVS and RLIMIT_CORE 0 at start.
+
+[Install]
+WantedBy=graphical-session.target

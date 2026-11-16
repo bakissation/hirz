@@ -9,9 +9,10 @@ The extension is deliberately thin. It holds no keys, builds no signed bytes and
 makes no decision with security meaning except reading the request origin from
 Firefox. The host re-validates every field.
 
-Status: v0.1 transport spike. The host speaks the protocol below and answers
-`create` and `get` with `NotHandled`, so every ceremony falls back to Firefox.
-The authenticator engine is connected in a later step.
+Status: v0.1. The host answers `create` and `get` with real passkeys from the
+user's vault (`hirz-webauthn` for the client role, `hirz-core` for the
+authenticator, `hirz-uv` for the approval prompt). Without a vault on the
+device it answers `NotHandled`, so Firefox runs the ceremony itself.
 
 ## Files
 
@@ -21,7 +22,7 @@ The authenticator engine is connected in a later step.
 | `extension/page/shim.js` | page (`MAIN`), `document_start`, top frame | Hooks `CredentialsContainer.prototype.create/get` and two `PublicKeyCredential` statics, snapshots options, builds result objects |
 | `extension/content/relay.js` | content script (`ISOLATED`), `document_start`, top frame | Pipe between the shim and the background |
 | `extension/background.js` | background event page (ES module) | Origin, tab and frame checks, one ceremony per tab, timeouts, the native port |
-| `crates/hirz-nmh` | native process | Framing, envelope parsing, replies |
+| `crates/hirz-nmh` | native process | Framing, the reader thread for `cancel`, the vault session, replies through `hirz_webauthn::handle` |
 | `packaging/native-messaging/hirz.json` | | Native manifest template |
 
 There is no build step: no npm packages, no bundler, no minification, no
@@ -220,10 +221,10 @@ Every request is a JSON object with these members:
 | `crossOrigin` | boolean | `create` and `get` only. Whether the caller is not same-origin with all its ancestors. Always `false` in v0.1 |
 | `options` | object | `create`: `PublicKeyCredentialCreationOptionsJSON`; `get`: `PublicKeyCredentialRequestOptionsJSON` (WebAuthn Level 3), as snapshotted by the shim |
 
-The host parses `v`, `id` and `type` strictly: they must be top-level members
-spelled without escapes, appear once, `v` and `id` must be plain non-negative
-integers without sign, fraction or exponent, and the whole message must be
-valid JSON with at most 64 levels of nesting. Unknown members are ignored.
+Every message is parsed with the strict JSON reader of `hirz-proto` (UTF-8, no
+duplicate keys, no lone surrogates, at most 32 levels of nesting); `v` and
+`id` must be non-negative integers, `id` at most 2^53-1. Unknown members are
+ignored.
 
 `options` as sent by v0.1 of the shim: defaults are filled in
 (`attestation: "none"`, `attestationFormats: []`, `hints: []`,
@@ -285,18 +286,37 @@ Failure:
 | `SecurityError` | Origin or RP ID validation failed | `DOMException` `SecurityError` |
 | `AbortError` | The request was cancelled | `DOMException` `AbortError` |
 | `ConstraintError` | A required option cannot be met (for example UV) | `DOMException` `ConstraintError` |
-| `UnknownError` | Internal failure | `DOMException` `UnknownError` |
-| `TypeError` | Options are malformed | `TypeError` |
-| `BadRequest` | The envelope could not be parsed; `id` is `null` if it could not be read | logged by the background |
-| `UnsupportedVersion` | `v` is missing or not `1` | logged by the background |
+| `UnknownError` | Internal failure, or an envelope that is not valid JSON, has no valid `id` or an unknown `type` (`id` is `null` when it could not be read) | `DOMException` `UnknownError` |
+
+Every failure also carries `message`, a fixed diagnostic text without request
+data. Options that fail validation get `NotHandled`, so Firefox produces the
+spec-defined `TypeError` itself. A message whose `v` is missing or not `1`
+gets `NotHandled`, so a newer extension falls back to Firefox.
 
 `cancel` uses the `id` of the request it cancels and has no reply of its own.
-If that request is still pending, the host answers it with `AbortError`;
-otherwise the cancel is ignored. The extension stops waiting as soon as it
-sends `cancel`.
+If that request is still pending (queued or waiting for the user), the host
+answers it with `AbortError`; otherwise the cancel is ignored. The extension
+stops waiting as soon as it sends `cancel`. The host reads stdin on its own
+thread, so a cancel arrives while a ceremony waits for the approval prompt.
+The prompt cannot be closed from outside; it stays until the user answers or
+it times out, and its approval then counts as refused, so a cancelled request
+creates and signs nothing. When Firefox closes stdin, every pending request is
+treated as cancelled.
 
-The spike host answers `hello` with its version, `capabilities` with both
-flags `true`, `create` and `get` with `NotHandled`, and ignores `cancel`.
+Requests are answered in order, one at a time: a request that arrives while a
+prompt is open waits for it (including `hello` and `capabilities`).
+
+`capabilities` reports `userVerifyingPlatformAuthenticator` and
+`passkeyPlatformAuthenticator` as `true` only when a vault exists and a
+verifying approval method (polkit, fingerprint or hirz PIN) is available right
+now; `extension:credProps`, `extension:credProtect` and `extension:prf` are
+always `true`.
+
+The vault is found like the CLI finds it: `HIRZ_VAULT`, else the folder
+recorded in `$XDG_STATE_HOME/hirz/vault-path`, else
+`$XDG_DATA_HOME/hirz/vault`; state in `HIRZ_STATE`, else
+`$XDG_STATE_HOME/hirz`. Without a vault, or when it cannot be opened (logged
+on stderr), `create` and `get` get `NotHandled`.
 
 ## Native manifest and install locations
 
@@ -399,10 +419,11 @@ Treat it as experimental.
 3. Open `about:debugging#/runtime/this-firefox`, choose "Load Temporary
    Add-on" and select `extension/manifest.json`. Click "Inspect" on the hirz
    entry to open the background console.
-4. Open https://webauthn.io and register. Expected with the spike host: the
-   background console logs `hirz: native host ready, version 0.1.0-dev`, and
-   Firefox's own security key prompt appears, because the host answered
-   `NotHandled`.
+4. Open https://webauthn.io and register. Expected: the background console
+   logs `hirz: native host ready, version 0.1.0-dev`, and a hirz prompt (not
+   Firefox's own dialog) shows `webauthn.io` and "Requested by
+   https://webauthn.io". Without a vault (`hirz init` not run) Firefox's own
+   security key prompt appears instead.
 5. In the page's web console:
    `await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`
    returns `true`, and `navigator.credentials.create.toString()` shows the hook
@@ -415,6 +436,46 @@ Without the host installed the extension is transparent: every ceremony goes
 to Firefox, and the background console logs one warning about the missing
 native application.
 
+### Checklist with a vault
+
+Needs `hirz init`, an approval method (for example the polkit action) and
+zenity.
+
+1. Register on https://webauthn.io (username `alice`): one hirz prompt, then
+   success; `hirz list` shows the new passkey for `webauthn.io`.
+2. Authenticate with the username (allow list) and without it
+   (discoverable): one prompt each, both succeed.
+3. Register `alice` again: the prompt appears, then the page reports
+   `InvalidStateError` (credential excluded).
+4. Start a registration and press the page's abort (or close the tab) while
+   the hirz prompt is open: the page gets `AbortError` at once; approving the
+   still open prompt afterwards creates nothing (`hirz list` is unchanged).
+5. Cancel the hirz prompt: the page gets `NotAllowedError`.
+6. Set "User verification: required" with click-to-allow as the only method:
+   the request fails with `NotAllowedError`.
+7. With `HIRZ_LOG=debug` (wrapper script, see above) the stderr log shows one
+   line per received and sent message with type, id, size and error name,
+   never contents.
+8. Move the vault away: registrations go to Firefox's own dialog again, and
+   `isUserVerifyingPlatformAuthenticatorAvailable()` falls back to Firefox's
+   answer after the 60 s capability cache expires.
+
+The automated equivalent of steps 1 to 4, without prompts, is the test module
+of `crates/hirz-nmh` (`cargo test -p hirz-nmh`): it drives the host loop over
+OS pipes with framed JSON, a temporary vault and an approver that exists only
+in test builds, and verifies the attestation object and the assertion
+signature. `tests/process.rs` runs the real binary without a vault.
+
+## Process hardening
+
+At start the host sets `RLIMIT_CORE 0`, `PR_SET_DUMPABLE 0` and
+`PR_SET_NO_NEW_PRIVS` (`hirz_sys::harden_process`). The helpers hirz-uv runs
+(zenity, pkcheck, fprintd-verify, fprintd-list) are neither setuid nor have
+file capabilities, so NO_NEW_PRIVS does not change what they can do: pkcheck
+asks polkitd over D-Bus, and the password dialog belongs to the session's
+polkit agent, not to hirz. polkitd identifies the host process by pid, start
+time and uid from `/proc`, which stay readable for a non-dumpable process.
+
 ## Not in v0.1
 
 - Frames other than the top frame, cross-origin iframes and Permissions
@@ -423,5 +484,4 @@ native application.
 - Related Origin Requests.
 - Signal methods (`signalUnknownCredential` and the others).
 - Detecting other extensions that hook the same functions.
-- Process hardening of the host (`PR_SET_DUMPABLE`, `RLIMIT_CORE`,
-  `NO_NEW_PRIVS`), which arrives with hirz-sys.
+- Closing an open approval prompt when the request is cancelled.

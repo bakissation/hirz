@@ -11,8 +11,13 @@ does not.
   - Extension: hirz checks the origin Firefox reports for the requesting page, and checks
     the relying party id against the public suffix list again in the native host. A page
     cannot claim another site or a whole public suffix such as `com`.
-- **Silent use by a web page.** Every signature needs a prompt drawn by hirz, outside the
-  page. A page cannot draw, hide or click it.
+- **Silent use by a web page.** Every signature with the user-present flag needs a prompt
+  drawn by hirz, outside the page. A page cannot draw, hide or click it. Browsers check
+  silently whether a key holds one of a site's credentials before they ask the user
+  (getAssertion with `up: false`); hirz answers these checks like a hardware security key,
+  with a signature whose user-present flag is not set. Relying parties reject such
+  signatures for sign-in. The check reveals to local processes whether a credential exists
+  for a site, which processes running as you can learn from the vault anyway.
 - **A stolen or copied sync folder.** Records are encrypted with a random 256-bit vault key.
   The folder does not contain anything derived from a password, so it cannot be attacked
   offline by guessing passwords. It does reveal metadata: how many records and devices exist,
@@ -27,8 +32,8 @@ does not.
 - **Malware running as your user.** While you are logged in, a program running as you can
   read hirz's local device secret, decrypt the vault and copy your passkeys. A hardware key
   (or a TPM-bound credential) is the answer if this matters to you. hirz still requires an
-  approval prompt for every signature it makes itself, but it cannot stop a program that
-  reads the files directly.
+  approval prompt for every signature with the user-present flag it makes itself, but it
+  cannot stop a program that reads the files directly.
 - **A compromised browser or a compromised hirz extension update.** It could show you one
   site and ask hirz to sign for another site that it claims is the page's origin. The native
   host re-validates origin and relying party id, but it cannot detect a browser that lies.

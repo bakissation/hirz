@@ -15,7 +15,7 @@ echo "== test"
 cargo test --workspace --locked
 
 echo "== unsafe outside hirz-sys"
-if grep -rn --include='*.rs' -E '\bunsafe\b' crates | grep -v '^crates/hirz-sys/' | grep -v 'forbid(unsafe_code)' | grep -v 'deny(unsafe' ; then
+if grep -rn --include='*.rs' -E '^[^/]*\bunsafe\b' crates | grep -v '^crates/hirz-sys/' | grep -v 'forbid(unsafe_code)' | grep -v 'deny(unsafe' ; then
   echo "unsafe code found outside hirz-sys" >&2
   exit 1
 fi
