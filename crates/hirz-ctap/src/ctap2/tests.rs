@@ -664,8 +664,6 @@ fn malformed_cbor_is_rejected() {
     trailing.push(0x00);
     let mut truncated = vec![command::MAKE_CREDENTIAL];
     truncated.extend_from_slice(&valid[..valid.len() - 1]);
-    // {2: 0, 1: 0}: keys out of canonical order.
-    let unsorted = vec![command::MAKE_CREDENTIAL, 0xa2, 0x02, 0x00, 0x01, 0x00];
     // 0x18 0x05: non-shortest integer.
     let long_int = vec![command::GET_ASSERTION, 0xa1, 0x18, 0x01, 0x00];
     let float = vec![command::MAKE_CREDENTIAL, 0xa1, 0x01, 0xf9, 0x3c, 0x00];
@@ -675,7 +673,6 @@ fn malformed_cbor_is_rejected() {
     for (name, msg) in [
         ("trailing", trailing),
         ("truncated", truncated),
-        ("unsorted", unsorted),
         ("long int", long_int),
         ("float", float),
         ("tag", tag),
@@ -764,6 +761,50 @@ fn engine_errors_become_statuses() {
             expected.code()
         );
     }
+}
+
+// Firefox writes the getAssertion options map as {"uv": true, "up": true}, out of canonical
+// key order. The request below has Firefox's exact layout, with neutral values.
+#[test]
+fn get_assertion_accepts_firefox_option_order() {
+    let h = handler();
+    let mut msg = vec![command::GET_ASSERTION, 0xa4, 0x01, 0x6b];
+    msg.extend_from_slice(b"example.com");
+    msg.extend_from_slice(&[0x02, 0x58, 0x20]);
+    msg.extend_from_slice(&[0x11; 32]);
+    msg.extend_from_slice(&[0x03, 0x81, 0xa2, 0x62]);
+    msg.extend_from_slice(b"id");
+    msg.extend_from_slice(&[0x58, 0x20]);
+    msg.extend_from_slice(&[0x22; 32]);
+    msg.push(0x64);
+    msg.extend_from_slice(b"type");
+    msg.push(0x6a);
+    msg.extend_from_slice(b"public-key");
+    msg.extend_from_slice(&[0x05, 0xa2, 0x62]);
+    msg.extend_from_slice(b"uv");
+    msg.extend_from_slice(&[0xf5, 0x62]);
+    msg.extend_from_slice(b"up");
+    msg.push(0xf5);
+    let out = h.process(&msg, &RequestContext::new());
+    assert_eq!(out.first(), Some(&Status::Ok.code()));
+    let req = with_engine(&h, |f| f.gets.pop().unwrap());
+    assert_eq!(req.uv, UvRequirement::Required);
+    assert!(req.up);
+    assert_eq!(req.allow_list, vec![vec![0x22; 32]]);
+}
+
+#[test]
+fn duplicate_keys_still_rejected_in_any_order() {
+    let h = handler();
+    let mut msg = vec![command::GET_ASSERTION, 0xa1, 0x05, 0xa2, 0x62];
+    msg.extend_from_slice(b"up");
+    msg.extend_from_slice(&[0xf5, 0x62]);
+    msg.extend_from_slice(b"up");
+    msg.push(0xf4);
+    assert_eq!(
+        h.process(&msg, &RequestContext::new()),
+        vec![Status::InvalidCbor.code()]
+    );
 }
 
 #[test]

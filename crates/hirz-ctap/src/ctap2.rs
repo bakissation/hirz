@@ -78,13 +78,16 @@ const PUBLIC_KEY: &str = "public-key";
 const MAX_ITEMS: usize = 2048;
 const MAX_DEPTH: usize = 8;
 
-/// Decoder limits for CTAP2 parameters: canonical CBOR within one CTAPHID message.
+/// Decoder limits for CTAP2 parameters within one CTAPHID message. Map key order is not
+/// enforced: Firefox sends getAssertion options as `{"uv": .., "up": ..}`, which is not
+/// canonical, and hardware keys accept it. Everything else stays strict (shortest-form
+/// integers, definite lengths, no duplicate keys, no floats or tags).
 pub fn limits() -> Limits {
     Limits {
         max_len: MAX_MESSAGE_SIZE,
         max_depth: MAX_DEPTH,
         max_items: MAX_ITEMS,
-        require_canonical: true,
+        require_canonical: false,
     }
 }
 
