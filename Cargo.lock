@@ -251,6 +251,7 @@ dependencies = [
 name = "hirz-webauthn"
 version = "0.1.0-dev"
 dependencies = [
+ "hirz-core",
  "hirz-crypto",
  "hirz-proto",
 ]

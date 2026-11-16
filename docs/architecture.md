@@ -39,7 +39,7 @@ them: the vault is a folder of immutable files, so concurrent writers are safe b
 | `hirz-sys` | lib | The only crate with `unsafe`: prctl, rlimit, mlock, peer credentials, uhid event structs, fd passing | libc |
 | `hirz-vault` | lib | Vault folder format, record encryption, merge, device registry, recovery key | hirz-proto, hirz-crypto |
 | `hirz-ctap` | lib | CTAPHID framing, CTAP2 command decode/encode, U2F later | hirz-proto |
-| `hirz-webauthn` | lib | Client role for the extension path: origin parsing, RP ID validation with the public suffix list, options and response JSON | hirz-proto, hirz-crypto |
+| `hirz-webauthn` | lib | Client role for the extension path: origin parsing, RP ID validation with the public suffix list, options and response JSON | hirz-proto, hirz-crypto, hirz-core |
 | `hirz-core` | lib | Authenticator engine, independent of transport | hirz-proto, hirz-crypto, hirz-vault |
 | `hirz-uv` | lib | Approval methods (polkit, fprintd, hirz PIN, click-to-allow) and trusted prompts | hirz-core, hirz-crypto, hirz-sys |
 | `hirzd` | bin | User daemon: uhid frontend | all libs |
