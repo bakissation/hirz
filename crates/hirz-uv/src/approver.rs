@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn list_cancel_or_garbage_is_denied() {
-        for script in [exit(1, ""), exit(0, "7\n"), exit(0, ""), exit(0, "1|2\n")] {
+        for script in [exit(1, ""), exit(0, "7\n"), exit(0, ""), exit(0, "|2\n")] {
             let d = TempDir::new("list-bad");
             let c = two();
             let a = approver(
