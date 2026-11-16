@@ -1,9 +1,7 @@
 name: backmerge
 
-# After a release, dev must contain the release commit from main (version bump and
-# CHANGELOG.md), or the next release PR conflicts. Opens a pull request main -> dev and
-# enables auto-merge with a merge commit; it merges once the required "ci" check passes.
-# Called by release-plz.yml after a release; can also be started by hand.
+# After a release, dev must contain the release commit from main or the next release PR conflicts:
+# opens a main -> dev pull request with auto-merge (merge commit). Called by release-plz.yml.
 
 on:
   workflow_call:
@@ -20,8 +18,8 @@ jobs:
     env:
       HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
     steps:
-      # A pull request opened with GITHUB_TOKEN starts no workflow, so the required check
-      # would never run on it. The release GitHub App is required here.
+      # A pull request opened with GITHUB_TOKEN starts no workflow, so the required check would never
+      # run on it: the release GitHub App is required here.
       - name: GitHub App token
         id: app
         if: env.HAS_APP == 'true'

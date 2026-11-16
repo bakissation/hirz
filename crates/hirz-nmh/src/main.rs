@@ -1,8 +1,6 @@
-//! hirz-nmh: the native messaging host of the hirz Firefox extension.
-//!
-//! A reader thread takes frames from stdin so that `cancel` arrives while a ceremony waits
-//! for the user; everything else is answered in order by the main thread through
-//! `hirz_webauthn::handle`. See `docs/extension.md` for the protocol.
+//! hirz-nmh: the native messaging host of the hirz Firefox extension. A reader thread takes frames
+//! from stdin so `cancel` arrives while a ceremony waits for the user; everything else is answered
+//! in order through `hirz_webauthn::handle` (docs/extension.md).
 #![forbid(unsafe_code)]
 
 #[path = "../../hirzd/src/session.rs"]
@@ -33,14 +31,12 @@ const LIMITS: Limits = Limits {
     max_depth: 32,
     max_items: 65_536,
 };
-/// Requests waiting behind a running ceremony.
 const QUEUE: usize = 64;
 
 fn diag(msg: std::fmt::Arguments<'_>) {
     let _ = writeln!(io::stderr(), "hirz-nmh: {msg}");
 }
 
-/// Whether a host-verified approval method can be used right now.
 pub trait UvProbe {
     fn uv_available(&self) -> bool;
 }
@@ -52,7 +48,6 @@ impl<R: CommandRunner> UvProbe for HirzApprover<R> {
     }
 }
 
-/// `hirz_webauthn::Engine` over the session's vault and approver.
 struct HostEngine<'s, A> {
     session: &'s mut Session<A>,
     uv: bool,
@@ -100,10 +95,8 @@ impl<A: Approver> hirz_webauthn::Engine for HostEngine<'_, A> {
     }
 }
 
-/// The accounts conditional mediation may suggest, chosen like the engine chooses what a
-/// `get` without user verification may use: allow-list order without duplicates and
-/// credProtect 3 hidden, or the RP's discoverable credentials, newest first, with
-/// credProtect 2 and 3 hidden.
+/// Accounts conditional mediation may suggest, chosen like the engine for a `get` without UV:
+/// credProtect 3 hidden, and credProtect 2 too without an allow list.
 fn visible_accounts(vault: &Vault, rp_id: &str, allow_list: &[Vec<u8>]) -> Vec<CandidateAccount> {
     let mut found: Vec<&CredentialRecord> = Vec::new();
     if allow_list.is_empty() {
@@ -138,7 +131,6 @@ fn visible_accounts(vault: &Vault, rp_id: &str, allow_list: &[Vec<u8>]) -> Vec<C
         .collect()
 }
 
-/// Ceremonies received but not yet answered, and those of them the extension cancelled.
 #[derive(Debug, Default)]
 struct Pending {
     waiting: BTreeSet<u64>,
@@ -159,7 +151,6 @@ enum Kind {
     Other,
 }
 
-/// The `id` of a well-formed version 1 envelope, and its type.
 fn classify(msg: &Json) -> (Option<u64>, Kind) {
     let id = msg
         .get("id")
@@ -336,7 +327,6 @@ impl<A: Approver + UvProbe> Host<A> {
     }
 }
 
-/// Serves one connection: `input` is read on its own thread, replies go to `output`.
 fn run<R, W, A>(
     input: R,
     output: &mut W,

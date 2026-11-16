@@ -1,8 +1,6 @@
-//! FIDO Credential Exchange Format 1.0 (Proposed Standard): passkey items only.
-//!
-//! Export writes one `Account` with one `Item` per passkey; each item holds one `passkey`
-//! credential. Import reads every `passkey` credential of every item of every account and
-//! counts the other credential types, which hirz does not store.
+//! FIDO Credential Exchange Format 1.0 (Proposed Standard): passkey items only. Export writes one
+//! `Account` with one `Item` per passkey; import reads every `passkey` credential and counts the
+//! other credential types, which hirz does not store.
 
 use crate::foreign::identify_key;
 use hirz_crypto::{Zeroize, Zeroizing};
@@ -29,7 +27,6 @@ fn unb64(s: &str) -> Option<Zeroizing<Vec<u8>>> {
         .map(Zeroizing::new)
 }
 
-/// Overwrites every string in a JSON tree before it is dropped.
 pub fn wipe(v: &mut Value) {
     match v {
         Value::String(s) => s.zeroize(),
@@ -83,8 +80,7 @@ fn passkey_item(r: &CredentialRecord) -> Value {
     item
 }
 
-/// Serialises passkeys as a CXF 1.0 document. hirz never uses a signature counter, so every
-/// passkey qualifies for export.
+/// hirz never uses a signature counter, so every passkey qualifies for export.
 pub fn export_json(
     records: &[&CredentialRecord],
     timestamp: u64,
@@ -109,12 +105,10 @@ pub fn export_json(
     out.map(Zeroizing::new)
 }
 
-/// One passkey found in an import file.
 #[derive(Debug)]
 pub enum Candidate {
     Ready {
         record: Box<CredentialRecord>,
-        /// Data in the file that hirz cannot keep.
         dropped: Vec<&'static str>,
     },
     Skipped {
@@ -127,7 +121,6 @@ pub enum Candidate {
 pub struct Parsed {
     pub exporter: String,
     pub passkeys: Vec<Candidate>,
-    /// Credentials of other types (passwords, notes, cards...).
     pub other_credentials: usize,
 }
 
@@ -313,8 +306,7 @@ fn object_list<'a>(o: &'a Map<String, Value>, key: &str) -> Result<&'a [Value], 
     }
 }
 
-/// Parses a CXF document. Fails only when the document as a whole is unusable; a bad passkey
-/// becomes a `Skipped` entry.
+/// Fails only when the document as a whole is unusable; a bad passkey becomes a `Skipped` entry.
 pub fn parse(data: &[u8], now: u64) -> Result<Parsed, String> {
     let mut doc: Value = serde_json::from_slice(data)
         .map_err(|_| "The file is not valid JSON, so it is not a CXF export.".to_string())?;

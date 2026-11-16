@@ -1,36 +1,27 @@
 //! The only hirz crate that calls cryptographic libraries (aws-lc-rs, argon2).
 //! Every other crate goes through this API so the crypto surface stays small and auditable.
-//!
-//! API contract: the function signatures below are relied on by other crates. Implementations
-//! may change; signatures change only together with their callers.
 #![forbid(unsafe_code)]
 
 use aws_lc_rs::{constant_time, digest, hkdf, hmac, pbkdf2, rand as lc_rand};
 
-/// Re-exported so crates without a direct zeroize dependency can hold secrets.
 pub use zeroize::{Zeroize, Zeroizing};
 
-/// Secret bytes that are wiped on drop.
 pub type Secret = Zeroizing<Vec<u8>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CryptoError {
-    /// Malformed key, ciphertext, signature or parameter.
     Invalid,
-    /// Authentication failed (AEAD tag, MAC, signature verification).
     Auth,
-    /// The system random generator failed.
     Rng,
 }
 
 pub type Result<T> = core::result::Result<T, CryptoError>;
 
-/// Fill `out` from the system CSPRNG.
 pub fn random_fill(out: &mut [u8]) -> Result<()> {
     lc_rand::fill(out).map_err(|_| CryptoError::Rng)
 }
 
-/// Constant-time equality. Lengths are not secret: different lengths return false at once.
+/// Lengths are not secret: different lengths return false at once.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && constant_time::verify_slices_are_equal(a, b).is_ok()
 }
@@ -46,7 +37,6 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     to_array(tag.as_ref())
 }
 
-/// Maximum HKDF-SHA-256 output length (RFC 5869: 255 * HashLen).
 pub const HKDF_SHA256_MAX_OUT: usize = 255 * 32;
 
 struct OutLen(usize);
@@ -57,7 +47,6 @@ impl hkdf::KeyType for OutLen {
     }
 }
 
-/// HKDF-SHA-256 (RFC 5869). `out.len()` at most 255 * 32.
 pub fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8], out: &mut [u8]) -> Result<()> {
     if out.is_empty() || out.len() > HKDF_SHA256_MAX_OUT {
         return Err(CryptoError::Invalid);
@@ -70,8 +59,7 @@ pub fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8], out: &mut [u8]) -> Resu
     okm.fill(out).map_err(|_| CryptoError::Invalid)
 }
 
-/// HKDF-Expand with SHA-256 (RFC 5869 section 2.3), using `prk` as the pseudorandom key
-/// without an extract step. `out.len()` at most 255 * 32.
+/// Expand only: `prk` is used as the pseudorandom key, without an extract step.
 pub fn hkdf_sha256_expand(prk: &[u8], info: &[u8], out: &mut [u8]) -> Result<()> {
     if prk.is_empty() || out.is_empty() || out.len() > HKDF_SHA256_MAX_OUT {
         return Err(CryptoError::Invalid);
@@ -84,18 +72,15 @@ pub fn hkdf_sha256_expand(prk: &[u8], info: &[u8], out: &mut [u8]) -> Result<()>
     okm.fill(out).map_err(|_| CryptoError::Invalid)
 }
 
-/// Checks an HMAC-SHA-256 tag in constant time.
 pub fn hmac_sha256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<()> {
     let k = hmac::Key::new(hmac::HMAC_SHA256, key);
     hmac::verify(&k, data, tag).map_err(|_| CryptoError::Auth)
 }
 
-/// Largest PBKDF2 iteration count this crate runs, so a count read from a hostile file
-/// cannot stall the caller for hours.
+/// Caps a count read from a hostile file so it cannot stall the caller.
 pub const PBKDF2_MAX_ITERATIONS: u32 = 10_000_000;
 
-/// PBKDF2-HMAC-SHA-256 (RFC 8018). `iterations` from 1 to [`PBKDF2_MAX_ITERATIONS`], output
-/// from 1 to 1024 bytes.
+/// Output 1 to 1024 bytes.
 pub fn pbkdf2_hmac_sha256(
     password: &[u8],
     salt: &[u8],
@@ -147,15 +132,13 @@ fn uncompressed_point(x: &[u8; 32], y: &[u8; 32]) -> [u8; 65] {
     p
 }
 
-/// ES256 (ECDSA P-256 with SHA-256).
 pub mod es256 {
     use super::{CryptoError, Result, Secret};
     use aws_lc_rs::rand::SystemRandom;
     use aws_lc_rs::signature::{self, EcdsaKeyPair, KeyPair};
     use zeroize::Zeroizing;
 
-    /// DER prefix of a P-256 SubjectPublicKeyInfo: SEQUENCE { SEQUENCE { id-ecPublicKey,
-    /// prime256v1 }, BIT STRING (0 unused bits) 0x04 }; x and y follow.
+    /// DER prefix of a P-256 SubjectPublicKeyInfo; the uncompressed point 0x04 || x || y follows.
     const P256_SPKI_PREFIX: [u8; 27] = [
         0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
         0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04,
@@ -166,7 +149,7 @@ pub mod es256 {
             .map_err(|_| CryptoError::Invalid)
     }
 
-    /// Returns (PKCS#8 private key, uncompressed public point x, y).
+    /// (PKCS#8 private key, x, y).
     pub fn generate() -> Result<(Secret, [u8; 32], [u8; 32])> {
         let kp = EcdsaKeyPair::generate(&signature::ECDSA_P256_SHA256_ASN1_SIGNING)
             .map_err(|_| CryptoError::Rng)?;
@@ -174,7 +157,7 @@ pub mod es256 {
         let (x, y) = super::split_point(kp.public_key().as_ref())?;
         Ok((Zeroizing::new(doc.as_ref().to_vec()), x, y))
     }
-    /// ASN.1 DER signature over `msg` (WebAuthn wants DER for ES256).
+    /// ASN.1 DER signature, as WebAuthn requires for ES256.
     pub fn sign(pkcs8: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
         let kp = load(pkcs8)?;
         let sig = kp
@@ -186,14 +169,12 @@ pub mod es256 {
         let kp = load(pkcs8)?;
         super::split_point(kp.public_key().as_ref())
     }
-    /// Verify a DER signature against an uncompressed point (tests and self-checks).
     pub fn verify(x: &[u8; 32], y: &[u8; 32], msg: &[u8], der_sig: &[u8]) -> Result<()> {
         let point = super::uncompressed_point(x, y);
         signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point)
             .verify(msg, der_sig)
             .map_err(|_| CryptoError::Auth)
     }
-    /// SubjectPublicKeyInfo DER for WebAuthn `getPublicKey()`.
     pub fn spki_der(x: &[u8; 32], y: &[u8; 32]) -> Vec<u8> {
         let mut out = Vec::with_capacity(91);
         out.extend_from_slice(&P256_SPKI_PREFIX);
@@ -203,14 +184,12 @@ pub mod es256 {
     }
 }
 
-/// Ed25519 (COSE EdDSA, alg -8).
 pub mod ed25519 {
     use super::{CryptoError, Result, Secret};
     use aws_lc_rs::signature::{self, Ed25519KeyPair, KeyPair};
     use zeroize::Zeroizing;
 
-    /// DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410): SEQUENCE { SEQUENCE {
-    /// id-Ed25519 }, BIT STRING (0 unused bits) }; the 32-byte key follows.
+    /// DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410); the 32-byte key follows.
     const ED25519_SPKI_PREFIX: [u8; 12] = [
         0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
     ];
@@ -223,13 +202,11 @@ pub mod ed25519 {
         <[u8; 32]>::try_from(kp.public_key().as_ref()).map_err(|_| CryptoError::Invalid)
     }
 
-    /// Returns (PKCS#8 private key, 32-byte public key).
     pub fn generate() -> Result<(Secret, [u8; 32])> {
         let kp = Ed25519KeyPair::generate().map_err(|_| CryptoError::Rng)?;
         let doc = kp.to_pkcs8v1().map_err(|_| CryptoError::Invalid)?;
         Ok((Zeroizing::new(doc.as_ref().to_vec()), public_of(&kp)?))
     }
-    /// PKCS#8 v1 document for a 32-byte RFC 8032 seed (import and test vectors).
     pub fn pkcs8_from_seed(seed: &[u8; 32]) -> Result<Secret> {
         let kp = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| CryptoError::Invalid)?;
         let doc = kp.to_pkcs8v1().map_err(|_| CryptoError::Invalid)?;
@@ -256,7 +233,7 @@ pub mod ed25519 {
     }
 }
 
-/// AES-256-GCM. Output layout of `seal`: 12-byte random nonce || ciphertext || 16-byte tag.
+/// AES-256-GCM. `seal` output: 12-byte random nonce || ciphertext || 16-byte tag.
 pub mod aead {
     use super::{CryptoError, Result, Secret};
     use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -277,7 +254,7 @@ pub mod aead {
         seal_with_nonce(key, &nonce, aad, plaintext)
     }
 
-    /// Deterministic variant for known-answer tests. A nonce must never repeat under one key.
+    /// A nonce must never repeat under one key; for known-answer tests only.
     pub fn seal_with_nonce(
         k: &[u8; KEY_LEN],
         nonce: &[u8; NONCE_LEN],
@@ -289,7 +266,7 @@ pub mod aead {
             .len()
             .checked_add(NONCE_LEN + TAG_LEN)
             .ok_or(CryptoError::Invalid)?;
-        // Capacity is reserved up front so no reallocation leaves plaintext behind.
+        // Reserved up front so no reallocation leaves plaintext behind.
         let mut out = Vec::with_capacity(cap);
         out.extend_from_slice(nonce);
         out.extend_from_slice(plaintext);
@@ -323,12 +300,7 @@ pub mod aead {
     }
 }
 
-/// X25519 key agreement plus a small sealed-box construction for wrapping keys to a device:
-/// ephemeral X25519, HKDF-SHA-256 over (shared || eph_pub || recipient_pub), AES-256-GCM.
-///
-/// Exact construction: key = HKDF-SHA-256(salt = empty, ikm = X25519(eph, recipient),
-/// info = "hirz x25519 seal v1" || eph_pub || recipient_pub, L = 32); output =
-/// eph_pub || nonce || ciphertext || tag.
+/// Sealed box for wrapping keys to a device; construction in docs/vault-format.md.
 pub mod x25519 {
     use super::{CryptoError, Result, Secret};
     use aws_lc_rs::agreement::{self, PrivateKey, UnparsedPublicKey, X25519};
@@ -345,7 +317,7 @@ pub mod x25519 {
         <[u8; 32]>::try_from(pk.as_ref()).map_err(|_| CryptoError::Invalid)
     }
 
-    /// Raw X25519 (RFC 7748). Fails on an all-zero shared secret (small-order peer key).
+    /// Fails on an all-zero shared secret (small-order peer key).
     pub fn agree(private: &[u8; 32], peer: &[u8; 32]) -> Result<Secret> {
         agree_with(&load(private)?, peer)
     }
@@ -377,7 +349,6 @@ pub mod x25519 {
         Ok(key)
     }
 
-    /// Returns (32-byte private key, 32-byte public key).
     pub fn generate() -> Result<(Secret, [u8; 32])> {
         let mut private = Zeroizing::new([0u8; 32]);
         super::random_fill(private.as_mut_slice())?;
@@ -387,7 +358,6 @@ pub mod x25519 {
     pub fn public_key(private: &[u8; 32]) -> Result<[u8; 32]> {
         public_of(&load(private)?)
     }
-    /// Output: 32-byte ephemeral public key || aead::seal output.
     pub fn seal_to(recipient: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         let eph = PrivateKey::generate(&X25519).map_err(|_| CryptoError::Rng)?;
         let eph_pub = public_of(&eph)?;
@@ -412,7 +382,6 @@ pub mod x25519 {
     }
 }
 
-/// Primitives for the CTAP2 PIN/UV auth protocols (used for hmac-secret key agreement).
 pub mod ctap_pin_uv {
     use super::{CryptoError, Result, Secret};
     use aws_lc_rs::agreement::{self, ECDH_P256, PrivateKey, UnparsedPublicKey};
@@ -424,11 +393,7 @@ pub mod ctap_pin_uv {
     use aws_lc_rs::iv::FixedLength;
     use zeroize::Zeroizing;
 
-    /// Ephemeral P-256 key agreement key: (private handle bytes, public x, y).
-    /// The private part is a PKCS#8 or raw scalar as the implementation needs; callers
-    /// only pass it back to `ecdh`.
-    ///
-    /// This implementation returns the raw 32-byte big-endian scalar.
+    /// The private part is the raw 32-byte big-endian scalar; callers only pass it back to `ecdh`.
     pub fn generate() -> Result<(Secret, [u8; 32], [u8; 32])> {
         let k = PrivateKey::generate(&ECDH_P256).map_err(|_| CryptoError::Rng)?;
         let scalar: EcPrivateKeyBin<'static> = k.as_be_bytes().map_err(|_| CryptoError::Invalid)?;
@@ -436,7 +401,6 @@ pub mod ctap_pin_uv {
         let (x, y) = super::split_point(public.as_ref())?;
         Ok((Zeroizing::new(scalar.as_ref().to_vec()), x, y))
     }
-    /// Raw ECDH x-coordinate (32 bytes) with the peer's uncompressed point.
     pub fn ecdh(private: &[u8], peer_x: &[u8; 32], peer_y: &[u8; 32]) -> Result<Secret> {
         let k =
             PrivateKey::from_private_key(&ECDH_P256, private).map_err(|_| CryptoError::Invalid)?;
@@ -448,7 +412,7 @@ pub mod ctap_pin_uv {
             |s| Ok(Zeroizing::new(s.to_vec())),
         )
     }
-    /// AES-256-CBC without padding; `data.len()` must be a multiple of 16.
+    /// No padding: `data.len()` must be a multiple of 16.
     pub fn aes256_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Result<Vec<u8>> {
         if !data.len().is_multiple_of(16) {
             return Err(CryptoError::Invalid);
@@ -482,8 +446,8 @@ pub mod ctap_pin_uv {
     }
 }
 
-/// AES-256-CBC with PKCS#7 padding followed by HMAC-SHA-256 over `iv || ciphertext`
-/// (encrypt then MAC), as some password manager export formats use it.
+/// AES-256-CBC with PKCS#7 padding, then HMAC-SHA-256 over `iv || ciphertext`, as some
+/// password manager exports use it.
 pub mod aes_cbc_hmac {
     use super::{CryptoError, Result, Secret};
     use aws_lc_rs::cipher::{
@@ -505,7 +469,7 @@ pub mod aes_cbc_hmac {
         ctx.sign()
     }
 
-    /// Encrypts under a fresh random IV. Returns (iv, ciphertext, tag).
+    /// Returns (iv, ciphertext, tag).
     pub fn seal(
         enc_key: &[u8; KEY_LEN],
         mac_key: &[u8; KEY_LEN],
@@ -522,7 +486,7 @@ pub mod aes_cbc_hmac {
         Ok((iv, buf, super::to_array(t.as_ref())))
     }
 
-    /// Checks the tag in constant time, then decrypts and removes the padding.
+    /// Verifies the tag in constant time before decrypting.
     pub fn open(
         enc_key: &[u8; KEY_LEN],
         mac_key: &[u8; KEY_LEN],
@@ -552,7 +516,6 @@ pub mod aes_cbc_hmac {
     }
 }
 
-/// Argon2id password hashing (RFC 9106).
 pub mod kdf {
     use super::{CryptoError, Result, Secret};
     use argon2::{Algorithm, Argon2, AssociatedData, ParamsBuilder, Version};
@@ -580,7 +543,6 @@ pub mod kdf {
         p_cost: 64,
     };
 
-    /// Output length of `argon2id`.
     pub const OUTPUT_LEN: usize = 32;
 
     pub fn within_limits(params: Argon2Params) -> bool {
@@ -589,12 +551,11 @@ pub mod kdf {
             && params.p_cost <= LIMIT.p_cost
     }
 
-    /// Argon2id v1.3 with a 32-byte output.
     pub fn argon2id(password: &[u8], salt: &[u8], params: Argon2Params) -> Result<Secret> {
         argon2id_full(password, salt, &[], &[], params, OUTPUT_LEN)
     }
 
-    /// Argon2id v1.3 with the optional secret value K and associated data X of RFC 9106.
+    /// Argon2id with the optional secret value K and associated data X of RFC 9106.
     pub fn argon2id_full(
         password: &[u8],
         salt: &[u8],

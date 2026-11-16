@@ -1,10 +1,6 @@
-//! What the prompts say, and the zenity argument vectors that show it. Pure functions.
-//!
-//! RP names, user names and display names come from the relying party and are hostile. They
-//! are passed with `--no-markup`, and on top of that every untrusted string goes through
-//! [`sanitize`]: control, bidi and invisible characters are removed, whitespace runs collapse,
-//! characters that Pango markup or zenity escape processing would interpret are replaced by
-//! look-alikes, and the result is truncated.
+//! What the prompts say, and the zenity argument vectors that show it. Pure functions. RP names,
+//! user names and display names are hostile: they are passed with `--no-markup` and every untrusted
+//! string also goes through [`sanitize`] (docs/approval.md).
 
 use std::time::Duration;
 
@@ -107,7 +103,6 @@ fn list_cell(value: Option<&str>) -> String {
     }
 }
 
-/// "Display Name (name)", or whichever of the two exists.
 pub fn account_label(name: Option<&str>, display_name: Option<&str>) -> String {
     let n = name
         .map(|s| sanitize(s, MAX_FIELD_CHARS))
@@ -123,14 +118,12 @@ pub fn account_label(name: Option<&str>, display_name: Option<&str>) -> String {
     }
 }
 
-/// How the user will approve; changes the last line of the dialog text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     ClickToAllow,
     Uv(UvMethod),
 }
 
-/// What happens after the question is answered.
 fn step_hint(step: Step) -> &'static str {
     match step {
         Step::ClickToAllow => "Allow only if you started this on the site above.",
@@ -142,14 +135,11 @@ fn step_hint(step: Step) -> &'static str {
 
 /// Click-to-allow for an SSH key: there is no site to point at.
 const SSH_ALLOW_HINT: &str = "Allow only if you just started this with ssh yourself.";
-/// Last line of every hirz PIN entry.
 const PIN_ENTRY_HINT: &str = "Enter your hirz PIN to continue.";
-/// Last line of the fingerprint window, shown while the reader waits.
 pub const FINGER_HINT: &str = "Touch the fingerprint reader.";
 /// Account list: the same for every method, since what follows depends on what is available.
 pub const LIST_HINT: &str = "Choose an account, then confirm it is you.";
 
-/// How long ago something was asked, the same words in the terminal and in windows.
 pub fn asked_ago(requested_at: u64, now: u64) -> String {
     match now.saturating_sub(requested_at) / 60 {
         0 => "less than a minute ago".to_owned(),
@@ -158,7 +148,6 @@ pub fn asked_ago(requested_at: u64, now: u64) -> String {
     }
 }
 
-/// Label of the fingerprint window's button that switches to the next method.
 pub fn fallback_label(next: UvMethod) -> &'static str {
     match next {
         UvMethod::Polkit => "Use password instead",
@@ -186,7 +175,6 @@ pub fn site_label_with(rp_id: &str, clean: impl Fn(&str) -> String) -> String {
     }
 }
 
-/// [`site_label_with`] for dialogs.
 pub fn site_label(rp_id: &str) -> String {
     or_placeholder(
         site_label_with(rp_id, |s| sanitize(s, MAX_RP_CHARS)),
@@ -236,8 +224,7 @@ fn account_line(ctx: &ApprovalContext<'_>, selected: Option<usize>) -> Option<St
     Some(format!("Account: {label}"))
 }
 
-/// Body text of a confirmation or PIN dialog. `notice` is a trusted, hirz-written line such
-/// as "Wrong PIN".
+/// `notice` is a trusted, hirz-written line such as "Wrong PIN".
 pub fn prompt_text(
     ctx: &ApprovalContext<'_>,
     selected: Option<usize>,
@@ -252,7 +239,6 @@ pub fn prompt_text(
     with_hint(&context_text(ctx, selected), notice, hint)
 }
 
-/// Site and account, for the fingerprint window.
 pub fn context_text(ctx: &ApprovalContext<'_>, selected: Option<usize>) -> String {
     let mut lines = header(ctx);
     if let Some(a) = account_line(ctx, selected) {
@@ -261,7 +247,6 @@ pub fn context_text(ctx: &ApprovalContext<'_>, selected: Option<usize>) -> Strin
     lines.join("\n")
 }
 
-/// `context`, a blank line, the optional `notice` and the closing `hint`.
 fn with_hint(context: &str, notice: Option<&str>, hint: &str) -> String {
     match notice {
         Some(n) => format!("{context}\n\n{n}\n{hint}"),
@@ -277,8 +262,7 @@ fn zenity_timeout(remaining: Duration) -> String {
     format!("--timeout={secs}")
 }
 
-/// Yes/no dialog with a Cancel button. `default_cancel` puts the focus on Cancel so a stray
-/// Enter does not approve.
+/// `default_cancel` puts the focus on Cancel so a stray Enter does not approve.
 fn question(
     title: &str,
     text: &str,
@@ -303,7 +287,6 @@ fn question(
     args
 }
 
-/// Hidden-text entry for the hirz PIN.
 fn pin_entry(title: &str, text: &str, remaining: Duration) -> Vec<String> {
     vec![
         "--entry".to_owned(),
@@ -352,7 +335,6 @@ pub fn selection_args(remaining: Duration) -> Vec<String> {
     )
 }
 
-/// Hidden-text entry for the hirz PIN. The context is in the same dialog.
 pub fn pin_args(
     ctx: &ApprovalContext<'_>,
     selected: Option<usize>,
@@ -419,7 +401,6 @@ pub fn pairing_words_line(words: &[&str]) -> String {
     format!("        {}", shown.join("    "))
 }
 
-/// Body of the pairing question: device name, age of the request, the words and the step.
 pub fn pairing_text(
     ctx: &PairingApprovalContext<'_>,
     now: u64,
@@ -460,7 +441,6 @@ pub fn pairing_question_args(
     )
 }
 
-/// Hidden-text entry for the hirz PIN when approving a new device.
 pub fn pairing_pin_args(
     ctx: &PairingApprovalContext<'_>,
     notice: Option<&str>,
@@ -469,7 +449,6 @@ pub fn pairing_pin_args(
     device_pin_args(PAIRING_TITLE, &pairing_context(ctx), notice, remaining)
 }
 
-/// The device and its words, repeated in the PIN and fingerprint windows of a pairing.
 pub fn pairing_context(ctx: &PairingApprovalContext<'_>) -> String {
     format!(
         "Approve the new device: {}\n{}",
@@ -498,7 +477,6 @@ fn removal_id(ctx: &RemovalApprovalContext<'_>) -> String {
     or_placeholder(sanitize(ctx.device_id_short, DEVICE_ID_CHARS), "unknown")
 }
 
-/// The device being removed, repeated in the PIN and fingerprint windows.
 pub fn removal_context(ctx: &RemovalApprovalContext<'_>) -> String {
     format!(
         "Remove the device: {} (id {})",
@@ -507,7 +485,6 @@ pub fn removal_context(ctx: &RemovalApprovalContext<'_>) -> String {
     )
 }
 
-/// Body of the removal question: which device, what removal does, and the step.
 pub fn removal_text(ctx: &RemovalApprovalContext<'_>, step: Step, notice: Option<&str>) -> String {
     let context = [
         "Remove this device from your hirz vault?".to_owned(),
@@ -539,7 +516,6 @@ pub fn removal_question_args(
     )
 }
 
-/// Hidden-text entry for the hirz PIN when removing a device.
 pub fn removal_pin_args(
     ctx: &RemovalApprovalContext<'_>,
     notice: Option<&str>,

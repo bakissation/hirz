@@ -1,13 +1,6 @@
-//! Where the vault lives, and one opened vault with its approver. Shared by hirzd and
-//! hirz-nmh (included there with `#[path]`), so both frontends find the same vault.
-//!
-//! Locations:
-//! - state: `$HIRZ_STATE`, else `$XDG_STATE_HOME/hirz`, else `~/.local/state/hirz`;
-//! - vault: `$HIRZ_VAULT`, else the folder recorded by `hirz init` in `<state>/vault-path`,
-//!   else `$XDG_DATA_HOME/hirz/vault`, else `~/.local/share/hirz/vault`.
-//!
-//! The variables are read once at start; the recorded folder is read again whenever no
-//! vault is open, so a vault set up while the frontend runs is found without a restart.
+//! Where the vault lives, and one opened vault with its approver. Shared by hirzd and hirz-nmh
+//! (included there with `#[path]`); locations are in docs/architecture.md, "Local state". The
+//! variables are read once at start; the recorded folder is re-read while no vault is open.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,7 +19,6 @@ const VARS: [&str; 6] = [
     STATE_ENV,
 ];
 
-/// The environment variables that decide the locations, captured once.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     vars: Vec<(&'static str, OsString)>,
@@ -91,7 +83,6 @@ impl Settings {
         })
     }
 
-    /// hirz-uv paths (config file, PIN state) with the same state directory as the vault.
     pub fn uv_paths(&self) -> Result<hirz_uv::Paths, &'static str> {
         let mut paths = hirz_uv::Paths::from_vars(|k| self.var(k).cloned())?;
         paths.state_dir = self.state_dir()?;
@@ -99,7 +90,6 @@ impl Settings {
     }
 }
 
-/// The folder `hirz init --vault` recorded, if any.
 fn read_pointer(path: &Path) -> Result<Option<PathBuf>, String> {
     hirz_vault::read_vault_pointer(path).map_err(|e| match e {
         VaultPointerError::Io(e) => format!("cannot read {}: {e}", path.display()),
@@ -107,24 +97,18 @@ fn read_pointer(path: &Path) -> Result<Option<PathBuf>, String> {
     })
 }
 
-/// What opening the vault found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultStatus {
     Ready,
-    /// No vault, or no device state for it: `hirz init` (or `hirz join`) has not run.
     Missing,
-    /// A vault exists but cannot be opened; the text says why.
     Broken(String),
     /// Another device removed this one from the vault. Its passkeys are no longer used here.
     Removed,
 }
 
-/// Logged and shown once when a frontend finds that this device was removed.
 pub const REMOVED_NOTICE: &str =
     "This computer was removed from your hirz vault; its passkeys are no longer used here";
 
-/// An opened vault (kept between requests, reloaded by the engine for every ceremony) and
-/// the approver.
 pub struct Session<A> {
     settings: Settings,
     vault: Option<Vault>,
@@ -153,9 +137,7 @@ impl<A: Approver> Session<A> {
         &self.approver
     }
 
-    /// Opens the vault, or re-reads it when it is already open, and checks that this device
-    /// still belongs to it. A removed device keeps no vault open, so nothing is served from
-    /// it; joining again later is picked up by the next call.
+    /// A removed device keeps no vault open, so nothing is served from it; joining again later is picked up by the next call.
     pub fn ensure_vault(&mut self) -> VaultStatus {
         if let Some(vault) = self.vault.as_mut() {
             match vault.reload() {
@@ -182,10 +164,8 @@ impl<A: Approver> Session<A> {
         }
     }
 
-    /// Runs `f` on an engine over the open vault. Call [`Session::ensure_vault`] first.
-    /// Once `cancelled` returns true, approvals count as refused, so a request cancelled
-    /// while its prompt was open creates and signs nothing. A vault error closes the vault,
-    /// so the next request opens it again from disk.
+    /// Once `cancelled` returns true approvals count as refused, so a cancelled request creates and
+    /// signs nothing. A vault error closes the vault; the next request reopens it from disk.
     pub fn with_engine<T>(
         &mut self,
         cancelled: &dyn Fn() -> bool,
@@ -207,7 +187,6 @@ impl<A: Approver> Session<A> {
     }
 }
 
-/// Refuses approvals for requests cancelled before or while the prompt was shown.
 struct CancelGuard<'a, A> {
     inner: &'a A,
     cancelled: &'a dyn Fn() -> bool,

@@ -14,20 +14,10 @@ const HEADER_LEN: usize = 4;
 
 #[derive(Debug)]
 pub enum FrameError {
-    /// The stream ended inside the 4-byte length prefix.
     TruncatedHeader,
-    /// The stream ended inside a message body.
-    TruncatedBody {
-        expected: usize,
-        got: usize,
-    },
-    /// A zero-length message; never valid JSON.
+    TruncatedBody { expected: usize, got: usize },
     Empty,
-    /// The announced or supplied length is above the cap.
-    TooLarge {
-        len: u64,
-        max: usize,
-    },
+    TooLarge { len: u64, max: usize },
     Io(io::Error),
 }
 
@@ -56,11 +46,8 @@ impl From<io::Error> for FrameError {
     }
 }
 
-/// Reads one framed message. Returns `Ok(None)` on a clean end of stream,
-/// that is EOF before the first byte of a length prefix.
-///
-/// The length is checked against `max` before any allocation, so a hostile
-/// prefix can never make us reserve more than `max` bytes.
+/// `Ok(None)` on a clean end of stream (EOF before the first byte of a length prefix). The length
+/// is checked against `max` before any allocation.
 pub fn read_frame<R: Read>(reader: &mut R, max: usize) -> Result<Option<Vec<u8>>, FrameError> {
     let mut header = [0u8; HEADER_LEN];
     let mut filled = 0usize;
@@ -104,7 +91,6 @@ pub fn read_frame<R: Read>(reader: &mut R, max: usize) -> Result<Option<Vec<u8>>
     Ok(Some(body))
 }
 
-/// Writes one framed message and flushes, so the browser sees it at once.
 pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), FrameError> {
     let too_large = || FrameError::TooLarge {
         len: u64::try_from(payload.len()).unwrap_or(u64::MAX),

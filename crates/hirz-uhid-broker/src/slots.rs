@@ -27,7 +27,6 @@ pub struct Slots {
     max: usize,
 }
 
-/// Holds a uid's slot; dropping it frees the slot.
 #[derive(Debug)]
 pub struct SlotGuard {
     slots: Arc<Slots>,

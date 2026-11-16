@@ -1,8 +1,6 @@
-//! The WebAuthn client role for the Firefox extension path: origin parsing, RP ID
-//! validation against the public suffix list, options JSON to engine requests,
-//! clientDataJSON, and engine output to response JSON.
-//!
-//! In the virtual security key path the browser does all of this itself.
+//! The WebAuthn client role for the Firefox extension path: origin parsing, RP ID validation
+//! against the public suffix list, options JSON to engine requests, clientDataJSON, and engine
+//! output to response JSON.
 #![forbid(unsafe_code)]
 
 mod common;

@@ -111,7 +111,6 @@ fn supported_examples_round_trip() {
 #[test]
 fn unsupported_examples_are_rejected() {
     let unsupported = [
-        // Floats.
         "f90000",
         "f98000",
         "f93c00",
@@ -134,11 +133,9 @@ fn unsupported_examples_are_rejected() {
         "fb7ff0000000000000",
         "fb7ff8000000000000",
         "fbfff0000000000000",
-        // Simple values other than false, true and null; undefined.
         "f0",
         "f7",
         "f8ff",
-        // Tags, including bignums.
         "c074323031332d30332d32315432303a30343a30305a",
         "c11a514b67b0",
         "c1fb41d452d9ec200000",
@@ -147,7 +144,6 @@ fn unsupported_examples_are_rejected() {
         "d82076687474703a2f2f7777772e6578616d706c652e636f6d",
         "c249010000000000000000",
         "c349010000000000000000",
-        // Indefinite lengths.
         "5f42010243030405ff",
         "7f657374726561646d696e67ff",
         "9fff",

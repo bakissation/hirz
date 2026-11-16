@@ -6,12 +6,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeleteTarget {
-    /// Leading hex digits of the credential id.
     IdPrefix(String),
-    Account {
-        site: String,
-        account: String,
-    },
+    Account { site: String, account: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +18,6 @@ pub enum PinAction {
     Status,
 }
 
-/// File formats `hirz import` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportFormat {
     Cxf,
@@ -58,7 +53,6 @@ pub enum Command {
         json: bool,
     },
     DevicesApprove {
-        /// Leading hex digits of the request id.
         request: Option<String>,
     },
     DevicesDeny {
@@ -105,7 +99,6 @@ struct Raw {
     version: bool,
 }
 
-/// Options that take a value, so `--opt value` and `--opt=value` both work.
 const VALUE_OPTS: &[&str] = &[
     "--vault",
     "--name",
@@ -217,7 +210,6 @@ impl Raw {
         self.value(name).map(|v| utf8(&v)).transpose()
     }
 
-    /// Every option must have been consumed by the command.
     fn finish(self, command: &str) -> CliResult<()> {
         if let Some(f) = self.flags.first() {
             return Err(CliError::usage(format!(
@@ -247,7 +239,6 @@ fn expect_args(rest: &[String], n: usize, command: &str) -> CliResult<()> {
     Ok(())
 }
 
-/// Parses the arguments after the program name.
 pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
     let mut raw = split_raw(args)?;
     let vault = raw.vault.take();

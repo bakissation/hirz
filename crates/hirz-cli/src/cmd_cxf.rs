@@ -244,7 +244,6 @@ fn import_bitwarden(ctx: &mut Ctx<'_>, vault: &mut Vault, file: &Path) -> CliRes
     )
 }
 
-/// The `.passkey` files of a folder, sorted by name.
 fn passkey_files(dir: &Path) -> CliResult<Vec<PathBuf>> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| CliError::io(&format!("Could not read {}", dir.display()), &e))?;

@@ -164,7 +164,6 @@ fn descriptor(id: &[u8]) -> Value {
         .build()
 }
 
-/// A valid makeCredential parameter map with `edit` applied to its entries.
 fn make_params(edit: impl FnOnce(&mut Vec<(i64, Value)>)) -> Value {
     let mut e: Vec<(i64, Value)> = vec![
         (1, Value::from([0x11u8; 32].as_slice())),
@@ -203,7 +202,6 @@ fn text_map(entries: &[(&str, Value)]) -> Value {
     )
 }
 
-// Copy of the hand-written spike bytes in hirzd's getinfo.rs, which this encoder replaces.
 fn hand_written_get_info() -> Vec<u8> {
     let mut v = vec![0x00, 0xab, 0x01, 0x82];
     v.extend_from_slice(b"\x68FIDO_2_0\x68FIDO_2_1");
@@ -231,8 +229,7 @@ fn get_info_equals_the_hand_written_bytes() {
     assert_eq!(h.process(&[command::GET_INFO], &RequestContext::new()), r);
 }
 
-// authenticatorMakeCredential example request from the CTAP specification
-// (section "authenticatorMakeCredential", example with ES256 and RS256).
+// CTAP specification example request (authenticatorMakeCredential, ES256 and RS256).
 const SPEC_MAKE_CREDENTIAL: &str = "
 a5
 01 5820 687134968222ec17202e42505f8ed2b16ae22f16bb05b88c25db9e602645f141
@@ -245,7 +242,7 @@ a5
       a2 63616c67 390100 6474797065 6a7075626c69632d6b6579
 07 a1 62726b f5";
 
-// authenticatorGetAssertion example request from the CTAP specification.
+// CTAP specification example request (authenticatorGetAssertion).
 const SPEC_GET_ASSERTION: &str = "
 a4
 01 6b6578616d706c652e636f6d
@@ -763,8 +760,7 @@ fn engine_errors_become_statuses() {
     }
 }
 
-// Firefox writes the getAssertion options map as {"uv": true, "up": true}, out of canonical
-// key order. The request below has Firefox's exact layout, with neutral values.
+// Firefox writes the getAssertion options map as {"uv": true, "up": true}, out of canonical key order.
 #[test]
 fn get_assertion_accepts_firefox_option_order() {
     let h = handler();
@@ -851,7 +847,6 @@ fn get_assertion_options_and_response() {
     assert!(resp.get_int(5).is_none());
     assert_eq!(resp.get_int(6), Some(&Value::Bool(true)));
 
-    // With an allow list the platform chose the credential: no userSelected.
     let params = get_params(|e| {
         set(
             e,
@@ -866,7 +861,6 @@ fn get_assertion_options_and_response() {
     assert_eq!(req.allow_list.len(), 2);
     assert_eq!(req.uv, UvRequirement::Required);
 
-    // Silent probe: up false, no userSelected, no user when the engine has none.
     let h = handler();
     let params = get_params(|e| set(e, 5, text_map(&[("up", Value::Bool(false))])));
     let resp = body(&run(&h, command::GET_ASSERTION, &params));
@@ -1113,7 +1107,6 @@ fn get_assertion_error_paths() {
     }
 }
 
-/// Plays the platform side: getKeyAgreement, then ECDH with a fresh platform key.
 fn platform(h: &Ctap2Handler<Fake>, protocol: PinUvAuthProtocol) -> (Value, SharedSecret) {
     let params = MapBuilder::new()
         .int(1, protocol.number())
@@ -1388,7 +1381,6 @@ fn descriptor_ids_of_any_length_up_to_1023() {
         Status::InvalidParameter
     );
 
-    // Descriptors of other types are skipped whatever their id.
     let other = Value::Array(vec![
         MapBuilder::new()
             .text("id", [6u8; 1024].as_slice())

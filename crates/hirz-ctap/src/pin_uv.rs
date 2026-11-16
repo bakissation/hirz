@@ -1,7 +1,5 @@
 //! PIN/UV auth protocols one and two (CTAP 2.2 sections 6.5.6 and 6.5.7), limited to what
-//! hmac-secret needs: the authenticator key-agreement key, shared-secret derivation,
-//! encrypt, decrypt, authenticate and verify. hirz has no clientPin and issues no
-//! pinUvAuthToken.
+//! hmac-secret needs. hirz has no clientPin and issues no pinUvAuthToken.
 
 use core::fmt;
 
@@ -42,8 +40,7 @@ impl PinUvAuthProtocol {
     }
 }
 
-/// The result of `kdf(Z)`: 32 bytes for protocol one, HMAC key followed by AES key (64
-/// bytes) for protocol two.
+/// 32 bytes for protocol one; HMAC key then AES key (64 bytes) for protocol two.
 pub struct SharedSecret {
     protocol: PinUvAuthProtocol,
     key: Secret,
@@ -62,7 +59,6 @@ fn key32(bytes: &[u8]) -> Result<&[u8; 32], CryptoError> {
 }
 
 impl SharedSecret {
-    /// `kdf(Z)` for the given protocol, where `z` is the ECDH x coordinate.
     pub fn from_z(protocol: PinUvAuthProtocol, z: &[u8]) -> Result<Self, CryptoError> {
         let key = match protocol {
             PinUvAuthProtocol::One => Zeroizing::new(hirz_crypto::sha256(z).to_vec()),
@@ -156,8 +152,7 @@ impl KeyPair {
     }
 }
 
-/// The authenticator key-agreement keys, one per protocol. They live for the process
-/// lifetime (one "power cycle" of the virtual device) and are created on first use.
+/// One per protocol; they live for the process lifetime (one "power cycle") and are created on first use.
 #[derive(Default)]
 pub struct KeyAgreementKeys {
     keys: [Option<KeyPair>; 2],
@@ -185,7 +180,6 @@ impl KeyAgreementKeys {
         slot.as_ref().ok_or(CryptoError::Invalid)
     }
 
-    /// `getPublicKey()`: the x and y coordinates of the protocol's P-256 key.
     pub fn public_key(
         &mut self,
         protocol: PinUvAuthProtocol,
@@ -194,7 +188,6 @@ impl KeyAgreementKeys {
         Ok((pair.x, pair.y))
     }
 
-    /// `decapsulate(peerCoseKey)`: ECDH with the platform key, then `kdf(Z)`.
     pub fn shared_secret(
         &mut self,
         protocol: PinUvAuthProtocol,
@@ -205,14 +198,12 @@ impl KeyAgreementKeys {
         SharedSecret::from_z(protocol, &z)
     }
 
-    /// Forgets every key; the next use creates fresh ones.
     pub fn regenerate(&mut self) {
         self.keys = Default::default();
     }
 }
 
-/// Encrypts the engine's hmac-secret output for the platform before it is embedded in
-/// authenticatorData.
+/// Encrypts the engine's hmac-secret output for the platform before it goes into authenticatorData.
 #[derive(Debug)]
 pub struct HmacSecretWrapper {
     secret: SharedSecret,

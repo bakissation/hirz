@@ -23,7 +23,6 @@ pub fn hex32(s: &str) -> [u8; 32] {
     hex(s).try_into().unwrap()
 }
 
-/// Deterministic xorshift64* generator for reproducible pseudo-random tests.
 pub struct XorShift(u64);
 
 impl XorShift {

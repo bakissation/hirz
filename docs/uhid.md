@@ -200,6 +200,47 @@ transaction runs at a time; other channels get CHANNEL_BUSY meanwhile.
 keepalives and listening for CANCEL. The handler polls `RequestContext::is_cancelled` and
 sets `KeepaliveStatus::UpNeeded` while it waits for the user.
 
+## CTAP2 command policy
+
+Policy of `hirz_ctap::ctap2` for an authenticator with built-in user verification and no
+clientPin. Requests are decoded with the strict canonical CBOR decoder into `hirz_core`
+types, handed to an `Authenticator` (the engine adapter) and the results are encoded as
+canonical CBOR.
+
+- The `uv` option maps to `UvRequirement::Required` when true and to `Discouraged` when
+  false or absent. Discouraged does not forbid UV: when the approval method verifies the
+  user anyway, the UV flag is set.
+- hirz shows its own account picker during approval, so a discoverable getAssertion returns
+  exactly one credential with `userSelected`, and authenticatorGetNextAssertion is never
+  needed. The `user` entity carries only the id; the platform never needs name or
+  displayName for its own picker. With an allow list the platform chose the credential and
+  `userSelected` is not set.
+- authenticatorReset is refused: credentials are managed with the hirz CLI.
+- hmac-secret: the handler decrypts the salts and passes an `HmacSecretWrap` to the engine,
+  which encrypts its output through it and embeds the result in authData before signing.
+- Parameter decoding does not enforce map key order: Firefox sends getAssertion options as
+  `{"uv": .., "up": ..}`, which is not canonical, and hardware keys accept it. Everything
+  else stays strict (shortest-form integers, definite lengths, no duplicate keys, no floats
+  or tags).
+- Allow and exclude list ids of any length up to the WebAuthn limit (1023) are kept, since
+  imported credentials keep the id their original authenticator chose. Longer ids are
+  refused rather than dropped, so a list never turns into an empty (discoverable) one.
+  `maxCredentialCountInList` is 16 so that platforms' silent pre-flight probes need few
+  round trips.
+- hirz never issues a pinUvAuthToken, so a non-empty pinUvAuthParam with a supported
+  protocol can never verify. The zero-length pinUvAuthParam probe waits for a gesture and
+  then reports that no PIN is set.
+- makeCredential step 7 (`CTAP2_ERR_PUAT_REQUIRED` when uv is false on a UV-protected
+  authenticator) is not applied: the approval method decides, and click-to-allow without UV
+  stays possible when the platform does not ask for UV.
+- authenticatorClientPIN supports only getKeyAgreement. Every other subcommand needs
+  clientPin or a pinUvAuthToken, neither of which getInfo advertises, so it answers
+  `CTAP2_ERR_INVALID_SUBCOMMAND`.
+- Status mapping: a refused or unavailable approval is `CTAP2_ERR_NOT_ALLOWED` and a lock is
+  `UV_BLOCKED` rather than `PIN_BLOCKED`, because hirz has no clientPin and platforms retry
+  built-in UV in a loop on `UV_INVALID` and `OPERATION_DENIED` (see "Refusals end the
+  ceremony").
+
 ## hirzd
 
 hirzd connects to the broker, runs `hirz_ctap::Ctap2Handler` on the CTAPHID transport and
@@ -235,6 +276,37 @@ answers with the engine of `hirz-core` over the user's vault, asking `hirz-uv`
   by pid, start time and uid from `/proc/<pid>/stat` and `/proc/<pid>/status`, which stay
   readable when the process is not dumpable; pkcheck gives the same answer for a hardened
   and an unhardened process.
+
+### hirzd user unit
+
+`packaging/systemd/hirzd.service` is a user unit ordered after `graphical-session.target`:
+the approval prompts (zenity) need the session's display and polkit needs its agent, and
+both exist only while a graphical session runs. The desktop imports `DISPLAY`,
+`WAYLAND_DISPLAY` and the session bus address into the user manager before that target.
+hirzd retries the broker itself, so it only exits on a fatal error.
+
+The sandbox options are chosen so that the helpers hirzd starts keep working. `SystemCallFilter`
+is a deny list, not an allow list, because the filter also applies to zenity (GTK) and its GPU
+drivers, whose needs are broad and change with the desktop. `RestrictAddressFamilies` allows
+`AF_UNIX` (broker, session bus, Wayland, X11) and `AF_NETLINK` (GLib inside zenity); hirzd
+itself never uses the network. None of the helpers carries setuid bits or file capabilities,
+so `NoNewPrivileges=yes` does not break approval.
+
+Deliberately not set:
+
+- `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`, `PrivateDevices=`, `ProtectKernel*=`,
+  `ProtectControlGroups=`, `ProtectClock=`, `ProtectHostname=`, `ReadOnlyPaths=` and similar:
+  in a user unit they imply `PrivateUsers=yes`. In a user namespace root-owned files appear
+  owned by the overflow uid, so hirz-uv no longer finds zenity, pkcheck and fprintd in
+  root-owned system directories and refuses every approval. `ProtectHome` would also hide
+  the vault.
+- `PrivateNetwork=`, `IPAddressDeny=`: they need a network namespace (and with it a user
+  namespace), and X11 over TCP would break too.
+- `MemoryDenyWriteExecute=`: zenity's GTK renderer may JIT shaders (Mesa llvmpipe).
+- `CapabilityBoundingSet=`, `AmbientCapabilities=`: a user service holds no capabilities, and
+  `NoNewPrivileges=yes` keeps it from gaining any.
+
+hirzd also sets `PR_SET_DUMPABLE 0`, `NO_NEW_PRIVS` and `RLIMIT_CORE 0` at start.
 
 ## OpenSSH and pam-u2f
 

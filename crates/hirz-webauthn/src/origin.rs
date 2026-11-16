@@ -1,39 +1,25 @@
-//! Serialized origins as Firefox reports them in `MessageSender.origin`.
-//!
-//! Only tuple origins that can be a WebAuthn caller are accepted: `https` with a domain
-//! host, or `http` with `localhost` or a subdomain of it (potentially trustworthy per the
-//! secure contexts rules). The input must already be in the browser's serialization:
-//! lowercase ASCII, punycode for IDN labels, no default port. Anything else is rejected
-//! rather than normalized, because the string is copied verbatim into clientDataJSON.
-//!
-//! IP literals are rejected: WebAuthn requires the effective domain to be a valid domain,
-//! and an IP address is not one.
+//! Serialized origins as Firefox reports them in `MessageSender.origin`: `https` with a domain host
+//! or `http` with `localhost` (or a subdomain). Anything not already in browser serialization is
+//! rejected rather than normalized, because the string is copied verbatim into clientDataJSON.
 
 use core::fmt;
 
 /// Longest origin string accepted: `https://` + 253 byte host + `:65535`.
 pub const MAX_ORIGIN_LEN: usize = 8 + MAX_DOMAIN_LEN + 6;
-/// Longest domain in its ASCII form, without a trailing dot.
 pub const MAX_DOMAIN_LEN: usize = 253;
-/// Longest DNS label.
 pub const MAX_LABEL_LEN: usize = 63;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainError {
     Empty,
     TooLong,
-    /// ASCII uppercase; browsers serialize hosts in lowercase.
     Uppercase,
-    /// Non-ASCII; browsers serialize IDN hosts as punycode.
     NonAscii,
-    /// A character outside `a-z`, `0-9`, `-` and `.`.
     InvalidChar,
     TrailingDot,
     EmptyLabel,
     LabelTooLong,
-    /// A label that starts or ends with `-`.
     Hyphen,
-    /// An IPv4 or IPv6 literal.
     IpAddress,
 }
 
@@ -57,14 +43,10 @@ impl fmt::Display for DomainError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OriginError {
     TooLong,
-    /// `null`: an opaque origin (sandboxed frame, `data:`, `file:`).
     Opaque,
-    /// A scheme other than `https` and `http`, or no scheme at all.
     UnsupportedScheme,
-    /// `http` for a host that is not `localhost` or a subdomain of it.
     Insecure,
     Userinfo,
-    /// A path, query or fragment after the host.
     PathOrQuery,
     InvalidPort,
     Host(DomainError),
@@ -93,7 +75,6 @@ pub enum Scheme {
     Http,
 }
 
-/// A validated tuple origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
     serialized: String,
@@ -103,7 +84,6 @@ pub struct Origin {
 }
 
 impl Origin {
-    /// Parses `scheme://host[:port]`.
     pub fn parse(input: &str) -> Result<Origin, OriginError> {
         if input == "null" {
             return Err(OriginError::Opaque);
@@ -143,7 +123,6 @@ impl Origin {
         })
     }
 
-    /// The origin exactly as serialized by the browser.
     pub fn as_str(&self) -> &str {
         &self.serialized
     }
@@ -190,7 +169,6 @@ fn parse_port(port: &str, scheme: Scheme) -> Result<u16, OriginError> {
     Ok(value)
 }
 
-/// True for `localhost` and its subdomains.
 pub fn is_localhost(host: &str) -> bool {
     host == "localhost" || host.ends_with(".localhost")
 }

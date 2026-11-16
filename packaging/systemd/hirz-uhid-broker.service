@@ -15,8 +15,7 @@ User=root
 CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes
-# Not PrivateUsers=: inside a user namespace SO_PEERCRED would report unmapped client uids
-# as the overflow uid, and the per-uid policy would break.
+# Not PrivateUsers=: SO_PEERCRED would report unmapped client uids as the overflow uid (docs/uhid.md).
 
 DevicePolicy=closed
 DeviceAllow=/dev/uhid rw

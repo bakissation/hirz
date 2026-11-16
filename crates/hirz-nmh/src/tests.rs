@@ -189,7 +189,6 @@ fn check_client_data(cdj: &[u8], ty: &str, challenge: &[u8]) {
     );
 }
 
-/// Checks a registration reply and returns the credential id and public key.
 fn registration(reply: &Json, challenge: &[u8]) -> (Vec<u8>, cose::PublicKey) {
     assert_eq!(reply.get("ok"), Some(&Json::Bool(true)), "{reply}");
     let cred = reply.get("credential").unwrap();
@@ -222,7 +221,6 @@ fn registration(reply: &Json, challenge: &[u8]) -> (Vec<u8>, cose::PublicKey) {
     (id, key)
 }
 
-/// Checks an authentication reply, including its signature.
 fn authentication(reply: &Json, challenge: &[u8], id: &[u8], key: &cose::PublicKey) {
     assert_eq!(reply.get("ok"), Some(&Json::Bool(true)), "{reply}");
     let cred = reply.get("credential").unwrap();
@@ -336,7 +334,6 @@ fn cancel_while_the_prompt_is_open() {
     h.send(&create_msg(1, &[1u8; 32]));
     h.send(&create_msg(2, &[2u8; 32]));
     open_rx.recv().unwrap();
-    // Cancel the running request and the queued one; cancels of unknown ids are ignored.
     h.send(r#"{"v":1,"id":1,"type":"cancel"}"#);
     h.send(r#"{"v":1,"id":2,"type":"cancel"}"#);
     h.send(r#"{"v":1,"id":99,"type":"cancel"}"#);

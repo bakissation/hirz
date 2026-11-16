@@ -4,7 +4,6 @@
 #   scripts/check.sh                 all sections
 #   scripts/check.sh clippy test     only the named sections
 #
-# Sections: versions fmt clippy test unsafe deps deny vet extension.
 # cargo-deny and cargo-vet are skipped when not installed, unless HIRZ_CHECK_STRICT=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."

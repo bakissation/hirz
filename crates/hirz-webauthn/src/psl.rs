@@ -1,13 +1,6 @@
-//! The Public Suffix List, compiled into the binary.
-//!
-//! Data: `data/public_suffix_list.dat`, VERSION 2026-11-15_20-28-43_UTC, COMMIT
-//! fd22c6c8b3fd7e854c1eff2194cfd4ebc9854b88, downloaded 2026-11-16 from
-//! <https://publicsuffix.org/list/public_suffix_list.dat>. Mozilla Public License 2.0.
-//!
-//! Rules from both the ICANN and the PRIVATE sections are used, as browsers do. Unicode
-//! rules are converted to punycode when the table is built, so lookups take hosts in the
-//! ASCII form browsers serialize. Lookups expect lowercase input; hosts with uppercase
-//! ASCII, non-ASCII characters or empty labels get no answer (`None` or `false`).
+//! The Public Suffix List, compiled into the binary (version and license:
+//! crates/hirz-webauthn/README.md). ICANN and PRIVATE rules are both used, as browsers do. Lookups
+//! expect lowercase ASCII; other hosts get no answer (`None` or `false`).
 
 use crate::punycode;
 use std::borrow::Cow;
@@ -22,7 +15,6 @@ const EXCEPTION: u8 = 4;
 
 #[derive(Debug)]
 struct Rules {
-    /// Rule body (without `*.` or `!`) to the kinds of rules with that body.
     map: HashMap<Cow<'static, str>, u8>,
 }
 
@@ -72,8 +64,7 @@ fn well_formed(host: &str) -> bool {
         && !host.split('.').any(str::is_empty)
 }
 
-/// The public suffix of `host` per the PSL algorithm, as a suffix of `host`. An unlisted
-/// top-level label is its own public suffix (the implicit `*` rule).
+/// An unlisted top-level label is its own public suffix (the implicit `*` rule).
 pub fn public_suffix(host: &str) -> Option<&str> {
     if !well_formed(host) {
         return None;
@@ -112,13 +103,11 @@ pub fn public_suffix(host: &str) -> Option<&str> {
     host.get(start..)
 }
 
-/// True when `host` is itself a public suffix.
 pub fn is_public_suffix(host: &str) -> bool {
     public_suffix(host).is_some_and(|ps| ps.len() == host.len())
 }
 
-/// The registrable domain (public suffix plus one label), or `None` when `host` is a
-/// public suffix or not well formed.
+/// `None` when `host` is a public suffix or not well formed.
 pub fn registrable_domain(host: &str) -> Option<&str> {
     let ps = public_suffix(host)?;
     let prefix_len = host.len().checked_sub(ps.len())?.checked_sub(1)?;

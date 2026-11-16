@@ -1,8 +1,6 @@
-//! Relays 64-byte reports between one client connection and one uhid device.
-//!
-//! The client sees nothing but report bytes: the uhid descriptor is never sent to it, and
-//! the client socket is only read with plain `read`, so file descriptors a client attaches
-//! as SCM_RIGHTS ancillary data are discarded by the kernel and never installed here.
+//! Relays 64-byte reports between one client connection and one uhid device. The client sees only
+//! report bytes: the descriptor is never sent, and the socket is read with plain `read`, so
+//! SCM_RIGHTS descriptors a client attaches are discarded by the kernel.
 
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
@@ -16,14 +14,12 @@ use crate::device::{REPORT_SIZE, create_params, output_report};
 const EIO: u16 = 5;
 const EINVAL: i32 = 22;
 
-/// Why a relay ended normally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayEnd {
     ClientClosed,
     DeviceClosed,
 }
 
-/// Counters for the end-of-connection log line. No report contents are kept.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     pub to_client: u64,
@@ -31,8 +27,7 @@ pub struct Stats {
     pub dropped: u64,
 }
 
-/// Creates the FIDO device on `uhid`, relays until either side closes, then destroys the
-/// device. `uhid` is `/dev/uhid` in production and a socket in tests.
+/// `uhid` is `/dev/uhid` in production and a socket in tests.
 pub fn run_device<U, C>(
     uhid: &mut U,
     client: &mut C,
@@ -239,13 +234,11 @@ mod tests {
         daemon.read_exact(&mut report).unwrap();
         assert_eq!(&report[..], &out[1..]);
 
-        // A malformed output (wrong size) is dropped; the next good one still arrives.
         kernel.write_all(&kernel_output(&[0u8; 10])).unwrap();
         kernel.write_all(&kernel_output(&[0x42u8; 64])).unwrap();
         daemon.read_exact(&mut report).unwrap();
         assert_eq!(report, [0x42u8; 64]);
 
-        // Device to host, written in two pieces.
         let input = [0x5au8; 64];
         daemon.write_all(&input[..20]).unwrap();
         std::thread::sleep(Duration::from_millis(20));
@@ -255,7 +248,6 @@ mod tests {
         assert_eq!(u16::from_ne_bytes([ev[4], ev[5]]), 64);
         assert_eq!(&ev[6..70], &input[..]);
 
-        // Feature report requests are refused with EIO.
         let mut get = kernel_event(event_type::GET_REPORT);
         get[4..8].copy_from_slice(&77u32.to_ne_bytes());
         kernel.write_all(&get).unwrap();

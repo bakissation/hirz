@@ -43,7 +43,6 @@ build() {
   cargo +"$TOOLCHAIN" fuzz build --debug-assertions
 }
 
-# run_target <target> <seconds> <log>
 run_target() {
   local t="$1" secs="$2" log="$3"
   mkdir -p "fuzz/corpus/$t" "fuzz/artifacts/$t" "fuzz/seeds/$t"

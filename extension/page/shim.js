@@ -1,16 +1,14 @@
-// MAIN world, document_start, every frame.
-// Everything in this file runs with the page's privileges and is visible to it.
-// It decides nothing that matters for security: the background takes the origin
-// and the frame ancestry from Firefox and the native host re-validates every field.
+// MAIN world, document_start, every frame: runs with the page's privileges and is visible to it,
+// so it decides nothing that matters for security. The background takes the origin and frame
+// ancestry from Firefox and the native host re-validates every field.
 "use strict";
 
 (() => {
   const w = window;
   if (!w.isSecureContext) return;
 
-  // Frames that are not same-origin with all their ancestors keep Firefox's API
-  // untouched (Permissions Policy, user activation). Only a shortcut: the background
-  // decides again from the frame tree.
+  // Frames not same-origin with all their ancestors keep Firefox's API untouched (Permissions
+  // Policy, user activation). Only a shortcut: the background decides again from the frame tree.
   try {
     const own = w.origin;
     let cur = w;
@@ -123,8 +121,6 @@
     throw PASS;
   };
 
-  // ---- small helpers that never touch page-modifiable prototypes ----
-
   function push(arr, value) {
     defineProperty(arr, arr.length, {
       value,
@@ -147,8 +143,6 @@
     return out;
   }
 
-  // ---- JSON text builders; the snapshot is serialized as it is read ----
-
   const q = (s) => JSONstringify(s);
 
   function jobj(entries) {
@@ -168,8 +162,6 @@
     for (let i = 0; i < items.length; i++) out += (i ? "," : "") + items[i];
     return out + "]";
   }
-
-  // ---- WebIDL-like conversions of page values (each property read once) ----
 
   function dict(v) {
     if (v === undefined || v === null) return EMPTY;
@@ -363,9 +355,8 @@
     return trunc(n > MAX_TIMEOUT_MS ? MAX_TIMEOUT_MS : n);
   }
 
-  // RP IDs that are not the page host or a parent of it are either invalid or
-  // need Related Origin Requests; Firefox handles both. The host does the
-  // authoritative public suffix check.
+  // RP IDs that are not the page host or a parent of it are invalid or need Related Origin
+  // Requests; Firefox handles both. The host does the authoritative public suffix check.
   function checkRpId(id) {
     if (id === undefined) return;
     const host = call(toLowerCase, loc.hostname);
@@ -520,8 +511,6 @@
     return { json: snap.json, timeout: snap.timeout, signal, conditional };
   }
 
-  // ---- result objects that look like the native ones ----
-
   function define(obj, name, value) {
     defineProperty(obj, name, { value, writable: false, enumerable: true, configurable: true });
   }
@@ -650,8 +639,6 @@
     return new DOMExc("The operation either timed out or was not allowed.", "NotAllowedError");
   }
 
-  // ---- private channel to content/relay.js ----
-
   const secret = hex(call(getRandomValues, crypto, new U8(16)));
   const REQ = "hirz-req-" + secret;
   const RES = "hirz-res-" + secret;
@@ -702,9 +689,8 @@
     });
   }
 
-  // A conditional request has no timeout: it stays pending until the user picks a
-  // suggestion, the signal aborts it, or the document goes away. When hirz has no
-  // account for the site, Firefox's own conditional request takes over at once.
+  // A conditional request has no timeout: it stays pending until the user picks a suggestion, the
+  // signal aborts it, or the document goes away. Without an account for the site Firefox takes over.
   function ceremony(kind, plan, fallback) {
     return new P((resolve, reject) => {
       const rid = nextRid++;
@@ -816,8 +802,6 @@
     return capsPromise;
   }
 
-  // ---- install ----
-
   function replace(target, name, fn) {
     const d = getOwnPropertyDescriptor(target, name);
     if (!d || typeof d.value !== "function") return;
@@ -856,8 +840,8 @@
       out.conditionalGet = true;
       return out;
     },
-    // With the host reachable, hirz offers its own suggestions, and falls back to
-    // Firefox's conditional request when it has none for the site.
+    // With the host reachable, hirz offers its own suggestions and falls back to Firefox's conditional
+    // request when it has none for the site.
     async isConditionalMediationAvailable() {
       if (await hostCapabilities()) return true;
       return apply(nativeCma, PKC, []);

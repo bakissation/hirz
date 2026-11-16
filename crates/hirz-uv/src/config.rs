@@ -1,21 +1,11 @@
-//! The approval configuration file and the default locations of config and state.
-//!
-//! Format: one `key = value` per line, `#` starts a comment line, blank lines are ignored.
-//! Unknown keys, repeated keys and malformed values are errors: a typo must not silently
-//! weaken approval.
-//!
-//! ```text
-//! methods = polkit, fingerprint, pin
-//! click_to_allow = example.com, other.example
-//! timeout = 120
-//! prompts_per_minute = 5
-//! ```
+//! The approval configuration file and the default locations of config and state. Format: one
+//! `key = value` per line; unknown keys, repeated keys and malformed values are errors, so a typo
+//! cannot silently weaken approval (docs/approval.md, "Configuration").
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Host-verified methods. Each one sets UV.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UvMethod {
     Polkit,
@@ -42,7 +32,6 @@ impl UvMethod {
     }
 }
 
-/// Order used when the config file does not set `methods`.
 pub const DEFAULT_METHODS: [UvMethod; 3] = [UvMethod::Polkit, UvMethod::Fingerprint, UvMethod::Pin];
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 pub const DEFAULT_PROMPTS_PER_MINUTE: u32 = 5;
@@ -54,10 +43,8 @@ const MAX_CLICK_TO_ALLOW: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Methods in order of preference. Methods that are not available on this system are
-    /// skipped at approval time.
     pub methods: Vec<UvMethod>,
-    /// RP ids (lowercase) for which a click is enough when the RP does not require UV.
+    /// Lowercase RP ids for which a click is enough when the RP does not require UV.
     pub click_to_allow: Vec<String>,
     /// Whole ceremony, all dialogs included.
     pub timeout: Duration,
@@ -217,7 +204,6 @@ fn parse_number(value: &str, min: u64, max: u64) -> Option<u64> {
     (min..=max).contains(&v).then_some(v)
 }
 
-/// Reads and parses the config file. A missing file means the defaults.
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     use std::io::Read;
     let f = match std::fs::File::open(path) {
@@ -235,12 +221,9 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     parse_config(&buf)
 }
 
-/// Where hirz-uv reads its config and keeps its state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
-    /// `$XDG_CONFIG_HOME/hirz/config`, or `~/.config/hirz/config`.
     pub config_file: PathBuf,
-    /// `$XDG_STATE_HOME/hirz`, or `~/.local/state/hirz`.
     pub state_dir: PathBuf,
 }
 

@@ -4,22 +4,18 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
-/// Result of polling one descriptor for input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PollStatus {
     /// Data (or end of file) can be read without blocking.
     pub readable: bool,
-    /// The peer hung up (POLLHUP or POLLRDHUP).
     pub hangup: bool,
-    /// POLLERR or POLLNVAL.
     pub error: bool,
 }
 
 const MAX_FDS: usize = 8;
 
-/// Waits until one of `fds` is readable or the timeout expires (`None` waits forever).
-/// Returns one status per descriptor, in order; all-default statuses mean a timeout.
-/// EINTR is reported as a timeout so callers re-check their deadlines.
+/// One status per descriptor, in order; all-default statuses mean a timeout. EINTR is reported
+/// as a timeout so callers re-check their deadlines.
 pub fn poll_readable(
     fds: &[BorrowedFd<'_>],
     timeout: Option<Duration>,

@@ -1,8 +1,7 @@
 #!/usr/bin/make -f
-# Builds hirz offline from the release source tarball plus the vendored crates, which the
-# source package carries as the "vendor" component tarball (hirz_VERSION.orig-vendor.tar.xz).
-# The compiler is the distribution's: rust-toolchain.toml only matters to rustup, which build
-# machines do not use. See docs/release.md for how the PPA upload is assembled.
+# Builds offline from the release source tarball plus the vendored crates (the "vendor" component
+# tarball hirz_VERSION.orig-vendor.tar.xz) with the distribution's compiler, since
+# rust-toolchain.toml only matters to rustup. PPA assembly: docs/release.md.
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=-lto
 

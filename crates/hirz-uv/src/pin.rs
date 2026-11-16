@@ -1,19 +1,6 @@
-//! The hirz PIN: a verifier kept in the state directory and checked by the host.
-//!
-//! File `<state_dir>/pin` (mode 0600, directory 0700), rewritten atomically:
-//!
-//! ```text
-//! hirz-pin 1
-//! kdf argon2id <m_cost_kib> <t_cost> <p_cost>
-//! salt <hex>
-//! hash <hex>
-//! failures <n>
-//! ```
-//!
-//! The failure counter is incremented and written to disk before the PIN is checked, so
-//! killing the process mid-check never yields a free guess. After [`MAX_FAILURES`] wrong PINs
-//! the PIN is locked until [`PinStore::reset`]. From [`FREE_FAILURES`] failures on, each check
-//! waits [`failure_delay`] first.
+//! The hirz PIN: a verifier kept in the state directory and checked by the host. The failure
+//! counter is written to disk before the PIN is checked, so killing the process mid-check never
+//! yields a free guess. File format and retry policy: docs/approval.md, "hirz PIN".
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -43,9 +30,7 @@ const MAX_P_COST: u32 = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinError {
-    /// Fewer than [`MIN_PIN_CODE_POINTS`] Unicode code points.
     TooShort,
-    /// More than [`MAX_PIN_BYTES`] bytes of UTF-8.
     TooLong,
     NotUtf8,
     NotSet,
@@ -55,7 +40,6 @@ pub enum PinError {
         remaining: u32,
     },
     Locked,
-    /// The verifier file does not parse or has out-of-range parameters.
     Corrupt,
     Io(std::io::ErrorKind),
     Crypto,
@@ -73,8 +57,7 @@ pub fn validate_pin(pin: &[u8]) -> Result<(), PinError> {
     Ok(())
 }
 
-/// Delay before checking a PIN when `failures` wrong attempts are already recorded:
-/// none below [`FREE_FAILURES`], then 1, 2, 4, 8, 16 seconds, capped at [`MAX_DELAY`].
+/// None below [`FREE_FAILURES`], then 1, 2, 4, 8, 16 seconds, capped at [`MAX_DELAY`].
 pub fn failure_delay(failures: u32) -> Duration {
     let Some(step) = failures.checked_sub(FREE_FAILURES) else {
         return Duration::ZERO;
@@ -172,7 +155,6 @@ pub fn serialize_verifier(v: &Verifier) -> String {
     )
 }
 
-/// Status for `hirz status` and similar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinStatus {
     pub failures: u32,
@@ -200,7 +182,6 @@ impl PinStore {
         }
     }
 
-    /// Replaces the function used for the failure delay (tests).
     pub fn with_sleep(mut self, sleep: fn(Duration)) -> Self {
         self.sleep = sleep;
         self
@@ -225,7 +206,6 @@ impl PinStore {
         }
     }
 
-    /// Sets the first PIN. Fails with `AlreadySet` when one exists; use `change_pin`.
     pub fn set_pin(&self, new_pin: &[u8]) -> Result<(), PinError> {
         validate_pin(new_pin)?;
         if self.path().exists() {
@@ -234,15 +214,14 @@ impl PinStore {
         self.write_new(new_pin)
     }
 
-    /// Checks `old_pin` (counting a failure like any other check), then replaces the PIN.
+    /// Counts a failure on a wrong `old_pin`, like any other check.
     pub fn change_pin(&self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), PinError> {
         validate_pin(new_pin)?;
         self.verify(old_pin)?;
         self.write_new(new_pin)
     }
 
-    /// Removes the verifier, which also clears a lock. The caller decides what proof the user
-    /// must give first.
+    /// Also clears a lock; the caller decides what proof the user must give first.
     pub fn reset(&self) -> Result<(), PinError> {
         match fs::remove_file(self.path()) {
             Ok(()) => Ok(()),
@@ -321,7 +300,6 @@ impl PinStore {
     }
 }
 
-/// Creates the state directory with mode 0700 and tightens an existing one.
 pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -382,7 +360,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// True once hirz-crypto has real implementations (the placeholder returns errors).
     pub(crate) fn crypto_ready() -> bool {
         let mut b = [0u8; 4];
         hirz_crypto::random_fill(&mut b).is_ok()
@@ -515,8 +492,7 @@ pub(crate) mod tests {
         let d = TempDir::new("counter");
         let s = store(&d);
         s.store(&sample(0)).unwrap();
-        // Wrong PIN with real crypto, or a KDF error with the placeholder: either way the
-        // attempt is counted on disk.
+        // Wrong PIN or a KDF error: either way the attempt is counted on disk.
         let r = s.verify(b"0000");
         assert!(
             matches!(

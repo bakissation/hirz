@@ -52,7 +52,6 @@ impl<'a> Obj<'a> {
             .transpose()
     }
 
-    /// An optional number; only its type is checked.
     pub(crate) fn opt_number(&self, key: &'static str) -> Result<()> {
         match self.get(key) {
             None | Some(Json::Number(_)) => Ok(()),
@@ -100,7 +99,6 @@ impl<'a> Obj<'a> {
             .ok_or(Error::InvalidOptions(key))
     }
 
-    /// An optional list of strings, each at most `max_chars` characters.
     pub(crate) fn opt_str_list(
         &self,
         key: &'static str,
@@ -114,7 +112,6 @@ impl<'a> Obj<'a> {
     }
 }
 
-/// A string of at most `max_chars` Unicode scalar values.
 pub(crate) fn text(v: &Json, max_chars: usize) -> Option<&str> {
     let s = v.as_str()?;
     // Cheap byte bound first so a huge string is not walked.
@@ -124,8 +121,7 @@ pub(crate) fn text(v: &Json, max_chars: usize) -> Option<&str> {
     Some(s)
 }
 
-/// Unpadded base64url decoding to `min..=max` bytes, with the encoded length bounded
-/// before decoding.
+/// The encoded length is bounded before decoding.
 pub(crate) fn b64(s: &str, min: usize, max: usize) -> Option<Vec<u8>> {
     let max_encoded = max.div_ceil(3).saturating_mul(4);
     if s.len() > max_encoded {

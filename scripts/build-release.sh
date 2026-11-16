@@ -90,8 +90,7 @@ hashes() {
 }
 
 if [ "$verify" = 1 ]; then
-  # Two clean builds at the same path, at different times. Path leaks are caught by the
-  # string check below rather than by varying the path.
+  # Two clean builds at the same path, at different times; path leaks are caught by the string check below.
   check_dir="$ROOT/target/repro-check"
   trap 'rm -rf "$check_dir"' EXIT
   rm -rf "$check_dir"

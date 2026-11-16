@@ -1,5 +1,3 @@
-//! Wall clock time as hirz stores it.
-
 /// Seconds since 1970-01-01 UTC; 0 when the system clock is set before 1970.
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()

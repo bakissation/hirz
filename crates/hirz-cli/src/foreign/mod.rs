@@ -1,10 +1,6 @@
-//! Passkeys from other password managers' export files: Bitwarden JSON exports and
-//! KeePassXC `.passkey` files.
-//!
-//! Pure functions over bytes that depend only on hirz library crates, so the fuzz targets
-//! can include this module as is. Only passkey fields are read; passwords, notes, TOTP
-//! secrets and every other field are skipped and never copied out of the parsed tree, which
-//! is wiped before it is dropped.
+//! Passkeys from other password managers' export files. Pure functions over bytes that depend only
+//! on hirz library crates, so the fuzz targets include this module as is. Only passkey fields are
+//! read; everything else is never copied out of the parsed tree, which is wiped before it is dropped.
 
 pub mod bitwarden;
 pub mod keepassxc;
@@ -14,12 +10,9 @@ use hirz_crypto::{Zeroize, Zeroizing};
 use hirz_proto::json::{Json, Limits};
 use hirz_vault::{CredentialRecord, MAX_PKCS8_LEN, MAX_STRING_LEN};
 
-/// Largest export file hirz reads.
 pub const MAX_FILE_LEN: usize = 64 * 1024 * 1024;
-/// Largest number of passkeys read from one import.
 pub const MAX_PASSKEYS: usize = 100_000;
 
-/// One passkey found in an export.
 #[derive(Debug)]
 pub enum Found {
     Ready(Box<CredentialRecord>),
@@ -30,15 +23,12 @@ pub enum Found {
     },
 }
 
-/// The passkeys of one export, and how many other entries it held.
 #[derive(Debug, Default)]
 pub struct Parsed {
     pub passkeys: Vec<Found>,
-    /// Entries without a passkey (passwords, notes, cards...).
     pub other_items: usize,
 }
 
-/// Overwrites every string and key of a JSON tree.
 pub fn wipe(v: &mut Json) {
     match v {
         Json::String(s) => s.zeroize(),
@@ -70,7 +60,6 @@ fn with_json<T>(
     out
 }
 
-/// base64 in either alphabet, with or without `=` padding.
 pub fn lenient_base64(s: &str) -> Option<Zeroizing<Vec<u8>>> {
     let trimmed = s.trim_end_matches('=');
     if s.len().saturating_sub(trimmed.len()) > 2 {
@@ -100,7 +89,6 @@ fn non_empty(s: Option<&str>) -> Option<String> {
     s.filter(|v| !v.is_empty()).map(str::to_string)
 }
 
-/// Bytes of a base64 field of at most `max` decoded bytes; empty for a missing field.
 fn base64_field(o: &Json, key: &str, max: usize) -> Result<Zeroizing<Vec<u8>>, String> {
     let s = match o.get(key) {
         None | Some(Json::Null) => return Ok(Zeroizing::new(Vec::new())),
@@ -129,7 +117,6 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// COSE algorithm of a PKCS#8 private key, if hirz supports it.
 pub fn identify_key(pkcs8: &[u8]) -> Result<i64, String> {
     if pkcs8.len() > MAX_PKCS8_LEN {
         return Err("its private key is too long".into());
@@ -174,7 +161,6 @@ pub fn identify_key(pkcs8: &[u8]) -> Result<i64, String> {
     ))
 }
 
-/// Days from 1970-01-01 to a proleptic Gregorian date (H. Hinnant's algorithm).
 fn days_from_civil(y: u64, m: u64, d: u64) -> Option<u64> {
     let y = if m <= 2 { y.checked_sub(1)? } else { y };
     let era = y / 400;
@@ -253,7 +239,6 @@ fn creation_time(at: Option<u64>, now: u64) -> u64 {
         .unwrap_or(now)
 }
 
-/// Checks a record built from an export, as every stored record is checked.
 /// Printable form of a short value from the file, for messages.
 fn shown(s: &str) -> String {
     let out: String = s

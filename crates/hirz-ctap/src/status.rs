@@ -2,7 +2,6 @@
 
 use hirz_core::{ApprovalError, CoreError};
 
-/// The first byte of every CTAP2 response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Status {
@@ -59,7 +58,6 @@ impl Status {
         self as u8
     }
 
-    /// A response that carries only this status byte.
     pub fn response(self) -> Vec<u8> {
         vec![self.code()]
     }
@@ -68,13 +66,11 @@ impl Status {
 impl From<&ApprovalError> for Status {
     fn from(e: &ApprovalError) -> Self {
         match e {
-            // With built-in UV, Firefox treats OPERATION_DENIED (and PIN_AUTH_INVALID) as a
-            // failed verification and resends the request at once, which loops forever on a
-            // user refusal. NOT_ALLOWED ends the ceremony with NotAllowedError.
+            // Firefox treats OPERATION_DENIED as a failed verification and resends at once, looping forever on
+            // a user refusal; NOT_ALLOWED ends the ceremony (docs/uhid.md, "Refusals end the ceremony").
             ApprovalError::Denied => Status::NotAllowed,
             ApprovalError::Timeout => Status::UserActionTimeout,
-            // hirz has no clientPin, so PIN_BLOCKED would point the platform at a PIN it
-            // cannot see; UV_BLOCKED is the built-in verification equivalent.
+            // No clientPin: PIN_BLOCKED would point the platform at a PIN it cannot see.
             ApprovalError::Locked => Status::UvBlocked,
             // UV_INVALID and OPERATION_DENIED make platforms retry built-in UV in a loop.
             ApprovalError::Unavailable => Status::NotAllowed,

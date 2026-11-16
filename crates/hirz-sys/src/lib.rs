@@ -1,8 +1,5 @@
-//! The only crate in hirz that contains `unsafe` code.
-//!
-//! Every `unsafe` block is a single libc call with a `SAFETY` comment. Anything that can be
-//! expressed with safe code (the uhid event encoding, environment parsing) is safe and unit
-//! tested.
+//! The only crate in hirz that contains `unsafe` code: single libc calls, each with a `SAFETY`
+//! comment. Anything expressible in safe code (uhid encoding, env parsing) is safe.
 #![allow(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 

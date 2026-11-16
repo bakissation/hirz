@@ -21,15 +21,12 @@ pub(crate) const USER_ID_MAX: usize = 64;
 const MAX_PARAMS: usize = 64;
 const MAX_ATTESTATION_FORMATS: usize = 16;
 
-/// A validated create ceremony, ready for the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePlan {
     pub request: MakeCredentialRequest,
     /// The exact clientDataJSON whose SHA-256 is `request.client_data_hash`.
     pub client_data_json: String,
-    /// The RP asked for credProps.
     pub cred_props: bool,
-    /// The RP asked for prf.
     pub prf: bool,
 }
 
@@ -68,7 +65,6 @@ fn algorithms(o: &Obj<'_>) -> Result<Vec<i64>> {
     Ok(algs)
 }
 
-/// Validates creation options for a top-level, same-origin call from `origin`.
 pub fn prepare_create(options: &Json, origin: &Origin) -> core::result::Result<CreatePlan, Error> {
     let o = Obj::new(options, "options")?;
 

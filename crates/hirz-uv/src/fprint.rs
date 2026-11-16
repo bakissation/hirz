@@ -1,20 +1,14 @@
 //! Fingerprint through the fprintd command line tools (no D-Bus library).
 
-/// Result of one `fprintd-verify` run that exited on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyOutcome {
     Match,
-    /// The finger was not recognised or not read well; another try may work.
     Retry(Retry),
-    /// No finger is enrolled for this user.
     NoFingers,
-    /// The reader reported an error or went away.
     ReaderError,
-    /// Output that does not follow the expected shape, or any other failure.
     Unavailable,
 }
 
-/// Why a scan did not match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Retry {
     NoMatch,
@@ -25,7 +19,6 @@ pub enum Retry {
 }
 
 impl Retry {
-    /// A short sentence for the fingerprint window.
     pub fn message(self) -> &'static str {
         match self {
             Retry::NoMatch => "Not recognised.",
@@ -89,13 +82,11 @@ fn parse_result(rest: &str) -> Option<(&str, bool)> {
     }
 }
 
-/// True when `fprintd-list` says in so many words that the user has no enrolled finger.
 pub fn says_no_fingers(stdout: &[u8]) -> bool {
     core::str::from_utf8(stdout).is_ok_and(|t| NO_FINGERS_MARKERS.iter().any(|m| t.contains(m)))
 }
 
-/// True when `fprintd-list <user>` succeeded and lists at least one finger
-/// (lines of the form ` - #0: right-index-finger`).
+/// True when `fprintd-list <user>` succeeded and lists at least one finger (` - #0: right-index-finger`).
 pub fn has_enrolled_fingers(code: Option<i32>, stdout: &[u8]) -> bool {
     if code != Some(0) {
         return false;

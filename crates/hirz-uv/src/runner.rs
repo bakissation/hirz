@@ -1,6 +1,5 @@
-//! Running helper programs (zenity, pkcheck, fprintd) and reading the few system facts the
-//! approval flow needs. The flow only talks to the [`CommandRunner`] trait so the decision
-//! logic can be tested with a scripted fake.
+//! Running helper programs (zenity, pkcheck, fprintd) and reading the few system facts the approval
+//! flow needs. The flow only talks to [`CommandRunner`], so tests use a scripted fake.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,6 @@ use hirz_crypto::Secret;
 
 use crate::polkit::{self, ProcessIdentity};
 
-/// The helper programs hirz-uv runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Zenity,
@@ -32,13 +30,11 @@ impl Tool {
     }
 }
 
-/// Which environment a child process gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvPolicy {
     /// Cleared environment with a fixed PATH and the C locale. Used for helpers that talk to
     /// the system bus, so a tampered `DBUS_SYSTEM_BUS_ADDRESS` cannot redirect them.
     System,
-    /// Only the variables a desktop dialog needs to reach the user's display.
     Desktop,
 }
 
@@ -48,7 +44,6 @@ pub struct CommandSpec {
     /// Passed as an argument vector, never through a shell.
     pub args: Vec<String>,
     pub env: EnvPolicy,
-    /// The child is killed when it runs longer than this.
     pub timeout: Duration,
 }
 
@@ -60,7 +55,6 @@ pub enum RunResult {
         stdout: Secret,
         stderr: Vec<u8>,
     },
-    /// Killed after `CommandSpec::timeout`.
     TimedOut,
     /// The program is not installed in a trusted system directory.
     NotFound,
@@ -87,30 +81,21 @@ impl core::fmt::Debug for RunResult {
     }
 }
 
-/// Which of two processes run side by side ended first; the other one was killed.
 #[derive(Debug)]
 pub enum Race {
     Main(RunResult),
     Dialog(RunResult),
 }
 
-/// Everything the approval flow needs from the operating system.
 pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> RunResult;
-    /// Runs `main` (for example `fprintd-verify`) while `dialog` is shown, and returns as soon
-    /// as either ends, after killing the other.
     fn run_with_dialog(&self, main: &CommandSpec, dialog: &CommandSpec) -> Race;
-    /// An icon for hirz's windows, from a fixed list of system paths.
     fn window_icon(&self) -> Option<PathBuf> {
         None
     }
-    /// True when the program exists in a trusted system directory.
     fn tool_available(&self, tool: Tool) -> bool;
-    /// True when the hirz polkit action file is installed.
     fn polkit_action_installed(&self) -> bool;
-    /// pid, start time and uid of the current process, for `pkcheck --process`.
     fn process_identity(&self) -> Option<ProcessIdentity>;
-    /// Login name of the current user, for `fprintd-list`.
     fn username(&self) -> Option<String>;
 }
 
@@ -163,7 +148,6 @@ pub fn resolve_tool(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// The real runner.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRunner;
 
@@ -207,7 +191,6 @@ impl Running {
         Ok(Running { child, out, err })
     }
 
-    /// `Ok(Some)` once the child exited.
     fn poll(&mut self) -> Result<Option<ExitStatus>, RunResult> {
         self.child.try_wait().map_err(|e| {
             self.kill();
@@ -407,7 +390,6 @@ pub fn valid_username(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// Finds the login name for `uid` in `/etc/passwd` content.
 pub fn passwd_name_for_uid(passwd: &[u8], uid: u32) -> Option<String> {
     let text = core::str::from_utf8(passwd).ok()?;
     text.lines().find_map(|line| {

@@ -6,10 +6,8 @@ pub const AAGUID: [u8; 16] = [
     0xc0, 0x49, 0xd0, 0x46, 0x0d, 0xe0, 0x4b, 0x9c, 0x82, 0x4f, 0x5b, 0x5e, 0xee, 0xff, 0x21, 0x8f,
 ];
 
-/// Length of every credential id hirz creates.
 pub const CREDENTIAL_ID_LEN: usize = 32;
 
-/// COSE algorithm identifiers hirz supports, in hirz's own preference order.
 pub const COSE_ALG_ES256: i64 = -7;
 pub const COSE_ALG_EDDSA: i64 = -8;
 
@@ -33,7 +31,6 @@ pub struct UserEntity {
     pub display_name: Option<String>,
 }
 
-/// CTAP credProtect levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredProtect {
     UserVerificationOptional = 1,
@@ -43,15 +40,12 @@ pub enum CredProtect {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MakeExtensions {
-    /// WebAuthn credProps: report whether the credential is discoverable.
     pub cred_props: bool,
-    /// CTAP hmac-secret / WebAuthn prf: create the per-credential secrets.
     pub hmac_secret: bool,
     pub cred_protect: Option<CredProtect>,
 }
 
-/// Salts for hmac-secret, already decrypted by the transport layer (CTAP path) or
-/// derived from the prf inputs (extension path).
+/// Already decrypted (CTAP) or derived from the prf inputs (extension).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HmacSecretSalts {
     pub salt1: [u8; 32],
@@ -68,11 +62,10 @@ pub struct MakeCredentialRequest {
     pub client_data_hash: [u8; 32],
     pub rp: RpEntity,
     pub user: UserEntity,
-    /// COSE algorithm ids in the relying party's preference order.
+    /// In the relying party's preference order.
     pub algorithms: Vec<i64>,
     pub exclude_list: Vec<Vec<u8>>,
-    /// What the RP asked for. hirz stores every credential in the vault either way;
-    /// this sets the record's discoverable flag, which credProps reports.
+    /// Every credential is stored in the vault; this only sets the discoverable flag.
     pub resident_key: bool,
     pub uv: UvRequirement,
     pub extensions: MakeExtensions,
@@ -84,23 +77,18 @@ pub struct GetAssertionRequest {
     pub rp_id: String,
     pub allow_list: Vec<Vec<u8>>,
     pub uv: UvRequirement,
-    /// False only for CTAP silent probes (`up: false`): the engine answers without a prompt
-    /// and signs with UP=0, which relying parties reject for sign-in.
+    /// False only for CTAP silent probes: no prompt, signed with UP=0.
     pub up: bool,
     pub extensions: GetExtensions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MakeCredentialResponse {
-    /// Full authenticatorData including attested credential data.
     pub auth_data: Vec<u8>,
     pub credential_id: Vec<u8>,
-    /// COSE_Key encoding of the public key.
     pub public_key_cose: Vec<u8>,
     pub algorithm: i64,
-    /// True when hmac-secret was requested and enabled.
     pub hmac_secret: bool,
-    /// The credential's discoverable flag (equal to the request's `resident_key`).
     pub resident_key: bool,
 }
 
@@ -110,9 +98,8 @@ pub struct AssertionResponse {
     pub auth_data: Vec<u8>,
     pub signature: Vec<u8>,
     pub user_handle: Vec<u8>,
-    /// Present for discoverable-credential flows (CTAP `user` member).
     pub user: Option<UserEntity>,
-    /// hmac-secret output(s): 32 or 64 bytes, before transport encryption.
+    /// 32 or 64 bytes, before transport encryption.
     pub hmac_secret_output: Option<Vec<u8>>,
 }
 
@@ -122,7 +109,6 @@ pub enum Ceremony {
     Get,
 }
 
-/// One account the user can choose during a Get ceremony.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateAccount {
     pub credential_id: Vec<u8>,
@@ -135,13 +121,12 @@ pub struct ApprovalContext<'a> {
     pub ceremony: Ceremony,
     pub rp_id: &'a str,
     pub rp_name: Option<&'a str>,
-    /// Get: accounts to choose from (never empty when the approver is called).
+    /// Never empty when the approver is called.
     pub candidates: &'a [CandidateAccount],
-    /// Create: the account being created.
     pub new_account: Option<&'a UserEntity>,
-    /// True when the RP requires user verification; click-to-allow must refuse.
+    /// Click-to-allow must refuse.
     pub uv_required: bool,
-    /// Extension path only, for display. Already validated by the host.
+    /// Extension path only, already validated by the host; display only.
     pub origin: Option<&'a str>,
 }
 
@@ -154,65 +139,50 @@ pub struct Approval {
     pub selected: Option<usize>,
 }
 
-/// A new device asks to join the vault (device pairing). Shown to the user before a UV method
-/// runs; see `docs/vault-format.md`, section 11.
+/// A new device asks to join the vault; shown before a UV method (docs/vault-format.md, section 11).
 #[derive(Debug)]
 pub struct PairingApprovalContext<'a> {
-    /// Chosen by the new device and stored in the synced folder: untrusted.
+    /// Untrusted: chosen by the new device.
     pub device_name: &'a str,
-    /// The four verification words computed on this device.
     pub words: &'a [&'a str],
     /// Unix seconds, as stated in the request.
     pub requested_at: u64,
 }
 
-/// The user removes another device from the vault (`hirz remove-device`). Shown to the user
-/// before a UV method runs.
+/// The user removes another device from the vault; shown before a UV method.
 #[derive(Debug)]
 pub struct RemovalApprovalContext<'a> {
-    /// The device's name from the vault: untrusted.
+    /// Untrusted: read from the vault.
     pub device_name: &'a str,
-    /// The start of the device id in hex, as `hirz devices` shows it.
     pub device_id_short: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalError {
-    /// The user cancelled or closed the prompt.
     Denied,
-    /// No approval within the ceremony timeout.
     Timeout,
-    /// The required verification is not available on this system.
     Unavailable,
-    /// Too many failed attempts; locked for a while.
     Locked,
     Internal(String),
 }
 
-/// CTAP path only: encrypts the hmac-secret output for the platform (PIN/UV auth protocol
-/// shared secret) so the engine can embed it in authData extensions before signing.
-/// When `None` is passed (extension path), the engine leaves authData without the
-/// hmac-secret extension and returns the raw output in `AssertionResponse`.
+/// CTAP path only: encrypts the hmac-secret output with the PIN/UV protocol shared secret.
+/// Without it (extension path) the raw output is returned in `AssertionResponse`.
 pub trait HmacSecretWrap {
     fn wrap(&self, output: &[u8]) -> Result<Vec<u8>, CoreError>;
 }
 
-/// Implemented by hirz-uv. The engine never signs with the user-present flag unless `approve`
-/// returns `Ok`; silent probes (`up: false`) sign with UP=0 without asking.
+/// Implemented by hirz-uv. Nothing is signed with UP=1 unless `approve` returns `Ok`;
+/// silent probes (`up: false`) sign with UP=0 without asking.
 pub trait Approver {
     fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError>;
 
-    /// CTAP authenticatorSelection: the user only confirms that this authenticator should
-    /// handle the platform's next request. No site, account or signature is involved; only
-    /// `user_present` of the result is used. The default refuses, so an approver that cannot
-    /// show such a prompt never reports presence it did not observe.
+    /// The default refuses so an approver that cannot prompt never reports presence it did not observe.
     fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
         Err(ApprovalError::Unavailable)
     }
 
-    /// Device pairing: the user confirms that the words match those on the new device and then
-    /// passes a user verification method. Click-to-allow never counts, so callers act only on
-    /// `user_verified`. The default refuses, so an approver without such a method fails closed.
+    /// Click-to-allow never counts: callers act only on `user_verified`. The default refuses (fails closed).
     fn confirm_pairing(
         &self,
         _ctx: &PairingApprovalContext<'_>,
@@ -220,9 +190,7 @@ pub trait Approver {
         Err(ApprovalError::Unavailable)
     }
 
-    /// Device removal: the user confirms which device is removed and then passes a user
-    /// verification method. Click-to-allow never counts, so callers act only on
-    /// `user_verified`. The default refuses, so an approver without such a method fails closed.
+    /// Click-to-allow never counts: callers act only on `user_verified`. The default refuses (fails closed).
     fn confirm_removal(
         &self,
         _ctx: &RemovalApprovalContext<'_>,
@@ -231,18 +199,11 @@ pub trait Approver {
     }
 }
 
-/// Errors the engine reports; frontends map them to CTAP status codes or DOMException names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreError {
-    /// A credential in the exclude list already exists (CTAP2_ERR_CREDENTIAL_EXCLUDED,
-    /// InvalidStateError).
     CredentialExcluded,
-    /// No usable credential (CTAP2_ERR_NO_CREDENTIALS, NotAllowedError).
     NoCredentials,
-    /// None of the requested algorithms is supported (CTAP2_ERR_UNSUPPORTED_ALGORITHM,
-    /// NotSupportedError).
     UnsupportedAlgorithm,
-    /// The RP requires UV and only click-to-allow is possible (NotAllowedError).
     UvRequiredUnavailable,
     Approval(ApprovalError),
     InvalidRequest(&'static str),

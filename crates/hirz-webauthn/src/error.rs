@@ -32,19 +32,15 @@ impl ErrorName {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The envelope itself is malformed (not an object, missing `origin`, bad `id`).
     BadEnvelope(&'static str),
-    /// A request hirz does not take on in v0.1; Firefox handles it instead.
     NotHandled(&'static str),
     /// The options violate the WebAuthn JSON grammar or a hirz size limit. Firefox gets
     /// the request so the page sees the browser's own TypeError or SyntaxError.
     InvalidOptions(&'static str),
-    /// A spec-mandated NotSupportedError.
     NotSupported(&'static str),
     Origin(OriginError),
     RpId(RpIdError),
     Core(CoreError),
-    /// The engine returned data inconsistent with the request.
     EngineOutput(&'static str),
 }
 
@@ -81,7 +77,6 @@ impl Error {
     }
 }
 
-/// Maps engine errors to DOMException names.
 pub fn core_error_name(e: &CoreError) -> ErrorName {
     match e {
         CoreError::CredentialExcluded => ErrorName::InvalidStateError,

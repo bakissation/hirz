@@ -16,8 +16,7 @@ optdepends=(
 install=hirz.install
 # AWS-LC (C code built by aws-lc-sys) is not built with makepkg's LTO flags.
 options=('!lto' '!debug')
-# The release's source tarball and its vendored crates (both signed and attested, see
-# docs/release.md), so the build needs no network.
+# The release's signed source tarball and vendored crates (docs/release.md), so the build needs no network.
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz"
         "$url/releases/download/v$pkgver/$pkgname-$pkgver-vendor.tar.xz")
 noextract=("$pkgname-$pkgver-vendor.tar.xz")

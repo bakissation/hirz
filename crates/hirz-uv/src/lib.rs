@@ -1,18 +1,6 @@
-//! Approval methods and trusted prompts for hirz.
-//!
-//! [`HirzApprover`] implements [`hirz_core::Approver`]. Methods:
-//!
-//! | Method | Flags | Check |
-//! |---|---|---|
-//! | System password | UP + UV | `pkcheck` on the `dev.hirz.authenticate` polkit action (`auth_self`) |
-//! | Fingerprint | UP + UV | `fprintd-verify` |
-//! | hirz PIN | UP + UV | Argon2id verifier in the state directory, retry limit |
-//! | Click-to-allow | UP only | zenity question; opt-in per RP id, refused when UV is required |
-//!
-//! Approving a new device ([`hirz_core::Approver::confirm_pairing`]) shows the verification
-//! words and then needs one of the UV methods; click-to-allow never applies to it.
-//!
-//! Prompts use zenity through argument vectors (never a shell). See `docs/approval.md`.
+//! Approval methods and trusted prompts for hirz: [`HirzApprover`] implements
+//! [`hirz_core::Approver`] with polkit, fprintd, a hirz PIN and click-to-allow. Prompts use zenity
+//! through argument vectors, never a shell. See `docs/approval.md`.
 #![forbid(unsafe_code)]
 
 pub mod approver;

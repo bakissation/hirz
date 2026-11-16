@@ -17,9 +17,7 @@ pub struct Ctx<'a> {
     /// Argon2id cost for new export envelopes and PINs (the RFC 9106 default outside tests).
     pub kdf: Argon2Params,
     pub vault_flag: Option<PathBuf>,
-    /// How to write this program in commands for this computer (see `env::command_name`).
     pub program: String,
-    /// Standard output is a terminal, so the screen may be cleared.
     pub out_is_terminal: bool,
 }
 
@@ -53,7 +51,6 @@ impl Ctx<'_> {
         self.say(&text)
     }
 
-    /// The vault folder for commands that use an existing vault.
     pub fn vault_dir(&self) -> CliResult<PathBuf> {
         self.env.vault_dir(self.vault_flag.as_deref())
     }

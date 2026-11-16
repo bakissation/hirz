@@ -6,8 +6,7 @@ use crate::error::VaultError;
 use core::fmt;
 use hirz_crypto::Zeroizing;
 
-/// WebAuthn limit on credential id length. hirz creates 32-byte ids; imported passkeys keep
-/// the id their original authenticator chose.
+/// hirz creates 32-byte ids; imported passkeys keep the id their original authenticator chose.
 pub const MAX_CREDENTIAL_ID_LEN: usize = hirz_proto::auth_data::MAX_CREDENTIAL_ID_LEN;
 pub const MAX_USER_ID_LEN: usize = hirz_proto::MAX_USER_ID_LEN;
 pub const MAX_STRING_LEN: usize = 1024;
@@ -22,7 +21,7 @@ const V1: u8 = 1;
 const V1_CREDENTIAL_ID_LEN: usize = 32;
 const EVENT_VERSION: u8 = 1;
 
-/// The two CTAP hmac-secret values of a credential (CredRandomWithUV / WithoutUV).
+/// The two CTAP hmac-secret values (CredRandomWithUV and CredRandomWithoutUV).
 #[derive(Clone, PartialEq, Eq)]
 pub struct HmacSecretPair {
     pub cred_random_with_uv: Zeroizing<[u8; 32]>,
@@ -35,22 +34,18 @@ impl fmt::Debug for HmacSecretPair {
     }
 }
 
-/// One passkey as stored in the vault.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialRecord {
-    /// 1 to 1023 bytes. Lookups compare the full id.
+    /// Lookups compare the full id.
     pub credential_id: Vec<u8>,
     pub rp_id: String,
     pub rp_name: Option<String>,
-    /// WebAuthn user handle, at most 64 bytes.
     pub user_id: Vec<u8>,
     pub user_name: Option<String>,
     pub user_display_name: Option<String>,
-    /// COSE algorithm identifier (-7 ES256, -8 EdDSA).
     pub algorithm: i64,
-    /// PKCS#8 DER private key.
     pub private_key_pkcs8: Zeroizing<Vec<u8>>,
-    /// Unix time in seconds.
+    /// Unix seconds.
     pub created_at: u64,
     /// CTAP credProtect level (1 to 3).
     pub cred_protect: Option<u8>,
@@ -88,7 +83,6 @@ fn valid_credential_id(id: &[u8]) -> bool {
     !id.is_empty() && id.len() <= MAX_CREDENTIAL_ID_LEN
 }
 
-/// Reads a credential id field of a version 1 (exactly 32 bytes) or version 2 body.
 fn credential_id_value(v: &[u8], version: u8) -> Result<Vec<u8>, VaultError> {
     let ok = if version == V1 {
         v.len() == V1_CREDENTIAL_ID_LEN
@@ -238,7 +232,6 @@ impl CredentialRecord {
     }
 }
 
-/// A device as announced in the vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceAnnouncement {
     pub(crate) device_id: DeviceId,
@@ -278,7 +271,6 @@ pub(crate) struct Event {
 }
 
 impl Event {
-    /// Encodes the event without the author tag; the caller appends it.
     pub(crate) fn encode_body(&self) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         let payload = self.encode_payload()?;
         let mut w = Writer::new(EVENT_VERSION);
@@ -407,7 +399,6 @@ impl Event {
     }
 }
 
-/// Appends the author tag field to an encoded event body.
 pub(crate) fn append_tag(body: &mut Zeroizing<Vec<u8>>, tag: &[u8; 32]) {
     body.push(0x7f);
     body.extend_from_slice(&32u16.to_be_bytes());

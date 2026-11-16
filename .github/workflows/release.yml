@@ -1,10 +1,8 @@
 name: release
 
-# Runs for a tag vX.Y.Z (created by release-plz when the release PR is merged into main) or
-# vX.Y.Z-rc.N (pushed by a maintainer, on main). Builds every package twice where it can and
-# requires identical bytes, writes SHA256SUMS, GitHub artifact attestations and Sigstore
-# (cosign) bundles, and publishes the GitHub Release. Stable tags then update each package
-# channel whose secrets exist; rc tags only make a GitHub pre-release. See docs/release.md.
+# Runs for a tag vX.Y.Z (created by release-plz) or vX.Y.Z-rc.N (pushed on main by a maintainer):
+# reproducible builds, signing and the GitHub Release; stable tags then update each package
+# channel whose secrets exist (docs/release.md).
 
 on:
   push:
@@ -155,7 +153,6 @@ jobs:
               echo "Verify downloads as described in docs/release.md before installing."
             } >notes.md
           else
-            # The section of CHANGELOG.md for this version, written by release-plz.
             awk -v v="$VERSION" '
               /^## / { if (p) exit; if (index($0, "[" v "]") || index($0, " " v " ")) { p = 1; next } }
               p { print }
@@ -189,8 +186,7 @@ jobs:
               --notes-file notes.md dist/*
           fi
 
-  # Which package channels this release updates: stable tags only, and only channels whose
-  # secrets exist. Each channel job below is skipped otherwise.
+  # Stable tags only, and only channels whose secrets exist; each channel job is skipped otherwise.
   channels:
     name: package channels
     needs: [meta, publish]

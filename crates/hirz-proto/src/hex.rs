@@ -4,7 +4,6 @@ use crate::{Error, Result};
 
 const DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-/// Encodes bytes as lowercase hex.
 pub fn encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len().saturating_mul(2));
     for b in bytes {
@@ -25,8 +24,7 @@ fn nibble(c: u8) -> Result<u8> {
     }
 }
 
-/// Decodes lowercase hex of even length; uppercase digits, whitespace and odd lengths are
-/// rejected.
+/// Lowercase and even length only: uppercase digits, whitespace and odd lengths are rejected.
 pub fn decode(s: &str) -> Result<Vec<u8>> {
     let (pairs, rest) = s.as_bytes().as_chunks::<2>();
     if !rest.is_empty() {
@@ -38,7 +36,6 @@ pub fn decode(s: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-/// Strict lowercase hex of exactly `N` bytes.
 pub fn decode_array<const N: usize>(s: &str) -> Result<[u8; N]> {
     if s.len() != N.checked_mul(2).ok_or(Error::LimitExceeded)? {
         return Err(Error::InvalidValue);

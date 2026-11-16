@@ -4,9 +4,8 @@ Documentation=https://github.com/bakissation/hirz/blob/main/docs/uhid.md
 
 [Socket]
 ListenStream=/run/hirz/uhid.sock
-# Any local user may connect. The broker checks the peer uid (SO_PEERCRED), allows one
-# device per uid, and the udev rule makes each hidraw node accessible only to its creator.
-# See docs/uhid.md for why this is acceptable and for the group-based alternative.
+# Any local user may connect: the broker checks the peer uid and the udev rule restricts each
+# hidraw node to its creator. See docs/uhid.md, "Socket permissions".
 SocketMode=0666
 SocketUser=root
 SocketGroup=root

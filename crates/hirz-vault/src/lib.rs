@@ -1,10 +1,6 @@
-//! Encrypted, folder-synced credential vault.
-//!
-//! A vault is a directory the user syncs with any file-sync tool. Every file is written once
-//! and never modified, so sync tools never produce conflict copies; changes are events merged
-//! deterministically. Records are encrypted under a random 256-bit vault key that is never
-//! derived from a password, so a copy of the folder is not an offline guessing target.
-//! The byte-level format is specified in `docs/vault-format.md`.
+//! Encrypted, folder-synced credential vault. Every file is written once and never modified, so
+//! sync tools never produce conflict copies; changes are events merged deterministically. The vault
+//! key is random, never derived from a password. Byte-level format: docs/vault-format.md.
 #![forbid(unsafe_code)]
 
 mod backup;
@@ -20,7 +16,6 @@ mod vault;
 #[cfg(test)]
 mod tests;
 
-/// Random 16-byte device identifier.
 pub type DeviceId = [u8; 16];
 
 pub use backup::{IMPORT_LIMIT, import_backup};
@@ -35,14 +30,10 @@ pub use record::{
 pub use recovery::RecoveryPhrase;
 pub use vault::{DeviceInfo, ScanReport, SkippedFile, Vault};
 
-/// Name of the vault header file inside the vault directory (`docs/vault-format.md`, section 3).
 pub const HEADER_FILE: &str = format::HEADER_NAME;
-/// Name of the device state file inside the local state directory (`docs/vault-format.md`,
-/// section 7).
 pub const DEVICE_STATE_FILE: &str = format::STATE_DEVICE;
 
-/// Fuzzing entry point, not a stable API. Decodes a credential record body; on success
-/// returns the result of encoding the decoded record again.
+/// Fuzzing entry point, not a stable API.
 #[doc(hidden)]
 pub fn fuzz_decode_record_body(
     data: &[u8],
@@ -50,8 +41,7 @@ pub fn fuzz_decode_record_body(
     record::CredentialRecord::decode(data).map(|rec| rec.encode())
 }
 
-/// Fuzzing entry point, not a stable API. Decodes an event (body and author tag); on success
-/// returns the result of encoding the decoded event and its tag again.
+/// Fuzzing entry point, not a stable API.
 #[doc(hidden)]
 pub fn fuzz_decode_event(
     data: &[u8],

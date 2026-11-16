@@ -149,6 +149,19 @@ asks for it with a hidden-text zenity entry that also shows the site and account
 - Within one request you may try again after a wrong PIN; the dialog shows how many
   attempts are left. When the PIN is locked, hirz moves on to the next configured method.
 
+The verifier file is rewritten atomically and has this layout:
+
+```
+hirz-pin 1
+kdf argon2id <m_cost_kib> <t_cost> <p_cost>
+salt <hex>
+hash <hex>
+failures <n>
+```
+
+Argon2id parameters that are out of range, or below the ones hirz would use for a new PIN,
+make the file corrupt, so a replaced file cannot weaken the check.
+
 The PIN protects against someone at your keyboard who does not know it. It does not protect
 against a program running as you: such a program can read the verifier file and guess
 offline (Argon2id makes this slow, not impossible), or replace the file.

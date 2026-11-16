@@ -1,51 +1,35 @@
-//! authenticatorData (WebAuthn Level 3 section 6.1) builder and parser.
-//!
-//! Layout: rpIdHash (32) | flags (1) | signCount (u32 BE) | attested credential data
-//! (AAGUID 16, credentialIdLength u16 BE, credentialId, COSE_Key) | extensions (CBOR map).
+//! authenticatorData (WebAuthn Level 3 section 6.1) builder and parser. Layout: rpIdHash (32) |
+//! flags (1) | signCount (u32 BE) | attested credential data (AAGUID 16, credentialIdLength u16 BE,
+//! credentialId, COSE_Key) | extensions (CBOR map).
 
 use crate::cbor::{self, Limits, Value};
 use crate::{Error, Result};
 
-/// User Present.
 pub const FLAG_UP: u8 = 0x01;
-/// User Verified.
 pub const FLAG_UV: u8 = 0x04;
-/// Backup Eligible.
 pub const FLAG_BE: u8 = 0x08;
-/// Backup State.
 pub const FLAG_BS: u8 = 0x10;
-/// Attested credential data included.
 pub const FLAG_AT: u8 = 0x40;
-/// Extension data included.
 pub const FLAG_ED: u8 = 0x80;
 const FLAGS_RESERVED: u8 = 0x22;
 
-/// Largest credential id WebAuthn allows.
+/// WebAuthn's limit for a credential id.
 pub const MAX_CREDENTIAL_ID_LEN: usize = 1023;
 
-/// Attested credential data of a registration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttestedCredentialData {
-    /// Authenticator model identifier.
     pub aaguid: [u8; 16],
-    /// Credential id, 1 to 1023 bytes.
     pub credential_id: Vec<u8>,
-    /// Encoded COSE_Key of the credential public key.
     pub public_key: Vec<u8>,
 }
 
-/// Decoded or to-be-encoded authenticatorData.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatorData {
-    /// SHA-256 of the RP ID, computed by the caller.
     pub rp_id_hash: [u8; 32],
     /// Flag bits; AT and ED are derived from the optional parts when encoding.
     pub flags: u8,
-    /// Signature counter.
     pub sign_count: u32,
-    /// Present for registrations.
     pub attested_credential: Option<AttestedCredentialData>,
-    /// Authenticator extension outputs, a CBOR map.
     pub extensions: Option<Value>,
 }
 

@@ -6,13 +6,11 @@ use hirz_crypto::Zeroizing;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
 
-/// Longest line accepted from the terminal.
 const MAX_LINE: u64 = 4096;
 
 pub trait Prompter {
     /// Shows `prompt` and reads one line without the line break. `None` at end of input.
     fn line(&mut self, prompt: &str) -> io::Result<Option<String>>;
-    /// Like `line`, but hides the typed text when the terminal allows it.
     fn secret(&mut self, prompt: &str) -> io::Result<Option<Zeroizing<String>>>;
 }
 
@@ -27,7 +25,6 @@ pub fn confirm(p: &mut dyn Prompter, question: &str) -> CliResult<bool> {
     ))
 }
 
-/// Asks the user to type an exact word to go on (for steps that are hard to undo).
 pub fn confirm_word(p: &mut dyn Prompter, question: &str, word: &str) -> CliResult<bool> {
     let answer = p
         .line(&format!("{question} Type {word} to continue: "))
@@ -146,7 +143,6 @@ pub const NOTE_TERMINAL: &str =
 pub const NOTE_NOT_TERMINAL: &str =
     "Note: standard input is not a terminal, so hirz cannot hide this input.";
 
-/// The note printed once before a secret is read without hiding it.
 pub fn visibility_note(echo_off: bool, stdin_is_terminal: bool) -> Option<&'static str> {
     match (echo_off, stdin_is_terminal) {
         (true, _) => None,

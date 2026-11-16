@@ -1,7 +1,6 @@
 //! Device pairing without the recovery phrase. A new device writes a request into the synced
-//! folder; a device that holds the vault key approves it after the user has compared four
-//! words on both screens, and seals the key generations to the new device's X25519 key.
-//! See docs/vault-format.md, section 11.
+//! folder; a device holding the vault key approves it after the user compared four words on both
+//! screens, and seals the key generations to the new device's X25519 key (docs/vault-format.md, 11).
 
 use crate::DeviceId;
 use crate::codec::{self, Fields, Reader, Writer, aad, hex, unhex};
@@ -23,7 +22,6 @@ const REQUEST_SUFFIX: &str = ".req";
 const APPROVAL_SUFFIX: &str = ".ok";
 const REQUEST_VERSION: u8 = 1;
 
-/// How long a pairing request can be approved.
 pub const PAIRING_LIFETIME_SECS: u64 = 15 * 60;
 /// Requests dated this far in the future still count (clocks of two devices differ).
 const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
@@ -31,7 +29,6 @@ const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
 const APPROVAL_KEEP_SECS: u64 = 60 * 60;
 /// A pairing file that stays unreadable this long is not an incomplete sync: it is deleted.
 const UNREADABLE_KEEP_SECS: u64 = 20 * 60;
-/// Number of verification words.
 pub const PAIRING_WORDS: usize = 4;
 const CHAIN_ENTRY_LEN: usize = 52;
 const MAX_CHAIN: usize = 10_000;
@@ -40,13 +37,12 @@ const MAX_CHAIN: usize = 10_000;
 /// 2^43 Argon2id evaluations instead of 2^43 hashes.
 const WORDS_KDF: Argon2Params = kdf::DEFAULT;
 
-/// A new device asking to join, as written in `pairing/<request id>.req`. All fields are
-/// public; they are authenticated by the user comparing the words derived from them.
+/// All fields are public; the user authenticates them by comparing the words derived from them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingRequest {
     pub request_id: [u8; 16],
     pub device_id: DeviceId,
-    /// Chosen by the new device; clean it before display.
+    /// Untrusted, chosen by the new device; clean before display.
     pub name: String,
     pub public_key: [u8; 32],
     /// Unix seconds, by the new device's clock.
@@ -72,7 +68,6 @@ impl PairingRequest {
         Ok(out)
     }
 
-    /// Parses a request file.
     pub(crate) fn decode(data: &[u8]) -> Result<PairingRequest, VaultError> {
         let mut f = Fields::new(
             strip_prefix(data, FileType::PairingRequest)?,
@@ -119,10 +114,7 @@ fn parse_name(name: &str, suffix: &str) -> Option<[u8; 16]> {
     unhex::<16>(name.strip_suffix(suffix)?)
 }
 
-/// The four verification words as indices into the BIP-39 English list.
-///
-/// `words = first 44 bits of Argon2id(password = aad("hirz pairing words v1", [version,
-/// vault_id, genesis_fingerprint, request fields...]), salt = request_id)`.
+/// The four verification words as BIP-39 indices; derivation in docs/vault-format.md, 11.2.
 pub(crate) fn word_indices(
     vault_id: &[u8; 16],
     genesis_fingerprint: &[u8; 32],
@@ -188,8 +180,8 @@ pub(crate) fn genesis_fingerprint(
     Ok(hirz_crypto::sha256(&data))
 }
 
-/// The single genesis generation in the folder. Several mean the folder was tampered with;
-/// none means it is not completely synced yet.
+/// The single genesis generation. Several mean the folder was tampered with; none means it is
+/// not completely synced yet.
 fn find_genesis(vault_dir: &Path) -> Result<GenId, VaultError> {
     let keys = vault_dir.join(KEYS_DIR);
     let mut found = None;
@@ -245,13 +237,11 @@ pub(crate) fn seal_approval(
     Ok(out)
 }
 
-/// The plaintext expiry of an approval file, for cleanup.
 fn approval_expiry(data: &[u8]) -> Result<u64, VaultError> {
     Reader::new(strip_prefix(data, FileType::PairingApproval)?).u64()
 }
 
-/// Opens an approval and returns the key chain, genesis first. Checks only the encoding;
-/// the caller verifies the keys against the vault.
+/// Checks only the encoding; the caller verifies the keys against the vault.
 pub(crate) fn open_approval(
     data: &[u8],
     vault_id: &[u8; 16],
@@ -301,9 +291,8 @@ fn remove_if_old(path: &Path, now: u64) {
     }
 }
 
-/// Valid requests that can still be approved, oldest first. Deletes requests that expired or
-/// name a device the vault already knows, approvals nobody picked up, and files that stayed
-/// unreadable for longer than a request lives.
+/// Valid requests that can still be approved, oldest first. Also deletes expired or known-device
+/// requests, approvals nobody picked up, and files unreadable for longer than a request lives.
 pub(crate) fn list_requests(
     vault_dir: &Path,
     now: u64,
@@ -342,8 +331,8 @@ pub(crate) fn list_requests(
     Ok(out)
 }
 
-/// Fails unless the request file still holds exactly `req` and it can still be approved, so
-/// the key is never sealed to a request the user did not see.
+/// Fails unless the file still holds exactly `req` and it can still be approved, so the key is
+/// never sealed to a request the user did not see.
 pub(crate) fn check_unchanged(
     vault_dir: &Path,
     req: &PairingRequest,
@@ -386,19 +375,14 @@ pub(crate) fn remove_request(vault_dir: &Path, request_id: &[u8; 16]) -> Result<
     Ok(existed)
 }
 
-/// What a poll of a pending join found.
 #[derive(Debug)]
 pub enum PairingPoll {
-    /// No usable approval yet (none written, or its files are still being synced).
     Waiting,
-    /// An approval file exists but does not open this vault: forged by someone with access
-    /// to the folder, or still incomplete. Nothing was changed; polling may continue.
+    /// Forged by someone with access to the folder, or incomplete; nothing changed, polling may continue.
     Invalid(&'static str),
-    /// This device joined the vault.
     Joined(Box<Vault>),
 }
 
-/// The new device's side of pairing: holds the device keys in memory until approved.
 pub struct PendingJoin {
     vault_dir: PathBuf,
     header: Header,
@@ -417,7 +401,6 @@ impl core::fmt::Debug for PendingJoin {
 }
 
 impl PendingJoin {
-    /// Creates this device's keys and writes a pairing request into the vault folder.
     /// Nothing is written to `state_dir` until the request is approved.
     pub fn start(
         vault_dir: &Path,
@@ -471,13 +454,11 @@ impl PendingJoin {
         &self.request
     }
 
-    /// The four verification words, separated by single spaces.
     pub fn words(&self) -> &str {
         &self.words
     }
 
-    /// Looks for the approval. On success this device's state is written to `state_dir`
-    /// and the request files are removed.
+    /// On success writes this device's state to `state_dir` and removes the request files.
     pub fn poll(&self, state_dir: &Path) -> Result<PairingPoll, VaultError> {
         if Vault::is_set_up(state_dir) {
             return Err(VaultError::AlreadyExists);
@@ -540,7 +521,6 @@ impl PendingJoin {
         }
     }
 
-    /// Withdraws the request (for example after it expired without an approval).
     pub fn cancel(&self) -> Result<(), VaultError> {
         remove_request(&self.vault_dir, &self.request.request_id).map(|_| ())
     }

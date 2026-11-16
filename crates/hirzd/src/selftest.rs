@@ -1,10 +1,6 @@
-//! `hirzd --self-test`: plays the browser against the daemon over an in-process socketpair
-//! (the fake broker), with a fresh vault in a temporary folder. Needs no root, no
-//! `/dev/uhid` and no desktop.
-//!
-//! The approver used here approves everything without asking. It is private to this
-//! module, only ever sees the temporary vault created below, and no setting or variable can
-//! put it in front of the real vault or the broker.
+//! `hirzd --self-test`: plays the browser against the daemon over an in-process socketpair with a
+//! fresh vault in a temporary folder; needs no root, no `/dev/uhid` and no desktop. Its approver
+//! approves everything and is private to this module: no setting can put it in front of the real vault.
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::DirBuilderExt;
@@ -31,7 +27,6 @@ const CLIENT_DATA_HASH: [u8; 32] = [0x5a; 32];
 const STATUS_OK: u8 = 0x00;
 const STATUS_NOT_ALLOWED: u8 = 0x30;
 
-/// Approves every request with presence and verification, choosing the first account.
 #[derive(Debug)]
 struct ApproveAll;
 
@@ -45,7 +40,6 @@ impl Approver for ApproveAll {
     }
 }
 
-/// A private temporary folder, removed on drop.
 #[derive(Debug)]
 pub struct ScratchDir(PathBuf);
 
@@ -84,7 +78,6 @@ fn fail(what: &str) -> io::Error {
     io::Error::other(what.to_owned())
 }
 
-/// Speaks CTAPHID to the daemon end of a socketpair.
 struct Host {
     stream: UnixStream,
     cid: u32,
@@ -120,7 +113,6 @@ impl Host {
         Ok(())
     }
 
-    /// Reads one complete message for our channel, skipping keepalives.
     fn receive(&mut self) -> io::Result<Vec<u8>> {
         let mut packet = [0u8; hid::REPORT_SIZE];
         loop {
@@ -157,7 +149,6 @@ impl Host {
         }
     }
 
-    /// One CTAP2 request; returns the status byte and the CBOR body.
     fn cbor(&mut self, command: u8, params: Option<&Value>) -> io::Result<(u8, Vec<u8>)> {
         let mut request = vec![command];
         if let Some(p) = params {
@@ -230,7 +221,6 @@ fn limits() -> Limits {
     }
 }
 
-/// Registration: checks the attestation object and returns the credential id and key.
 fn check_registration(body: &[u8]) -> io::Result<(Vec<u8>, cose::PublicKey)> {
     let att = attestation::parse_ctap(body, &limits()).map_err(|_| fail("bad attestation"))?;
     if att.fmt != attestation::FMT_NONE {
@@ -306,8 +296,6 @@ fn expect(cond: bool, what: &str) -> io::Result<()> {
     if cond { Ok(()) } else { Err(fail(what)) }
 }
 
-/// Runs the transport for `authenticator` on one end of a socketpair and `script` on the
-/// other.
 fn with_daemon<A: Approver + Send + 'static>(
     authenticator: VaultAuthenticator<A>,
     script: impl FnOnce(&mut Host) -> io::Result<()>,
@@ -373,7 +361,6 @@ pub fn run() -> io::Result<()> {
         },
     )?;
 
-    // Without a vault every ceremony is refused.
     let empty = dir.path().join("empty");
     let session = Session::new(settings_for(&empty.join("vault"), &empty), ApproveAll);
     with_daemon(

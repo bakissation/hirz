@@ -1,21 +1,6 @@
-//! CTAP2 authenticator commands (CTAP 2.2 section 6) for an authenticator with built-in
-//! user verification and no clientPin.
-//!
-//! Requests are decoded with the strict canonical CBOR decoder into `hirz_core` types,
-//! handed to an [`Authenticator`] (the engine adapter) and the results encoded as canonical
-//! CBOR. The parsers are pure functions over `&[u8]` so they can be fuzzed directly.
-//!
-//! Policy notes:
-//! - The `uv` option maps to [`UvRequirement::Required`] when true and to
-//!   [`UvRequirement::Discouraged`] when false or absent. Discouraged does not forbid UV:
-//!   when the approval method verifies the user anyway, the UV flag is set.
-//! - hirz shows its own account picker during approval, so a discoverable getAssertion
-//!   returns exactly one credential with `userSelected` and authenticatorGetNextAssertion
-//!   is never needed.
-//! - authenticatorReset is refused: credentials are managed with the hirz CLI.
-//! - hmac-secret: the handler decrypts the salts and passes an [`HmacSecretWrap`] to the
-//!   engine, which encrypts its output through it and embeds the result in authData
-//!   before signing.
+//! CTAP2 authenticator commands (CTAP 2.2 section 6) for an authenticator with built-in user
+//! verification and no clientPin. Parsers are pure functions over `&[u8]` so they can be fuzzed.
+//! Policy notes: docs/uhid.md, "CTAP2 command policy".
 
 use std::sync::Mutex;
 
@@ -32,7 +17,6 @@ use crate::hid::{CborHandler, KeepaliveStatus, MAX_MESSAGE_SIZE, RequestContext}
 use crate::pin_uv::{self, HmacSecretWrapper, KeyAgreementKeys, PinUvAuthProtocol};
 use crate::status::Status;
 
-/// CTAP2 command bytes.
 pub mod command {
     pub const MAKE_CREDENTIAL: u8 = 0x01;
     pub const GET_ASSERTION: u8 = 0x02;
@@ -47,7 +31,6 @@ pub mod command {
     pub const CONFIG: u8 = 0x0d;
 }
 
-/// authenticatorClientPIN subcommands.
 pub mod client_pin {
     pub const GET_PIN_RETRIES: u64 = 0x01;
     pub const GET_KEY_AGREEMENT: u64 = 0x02;
@@ -59,29 +42,24 @@ pub mod client_pin {
     pub const GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS: u64 = 0x09;
 }
 
-/// getInfo maxCredentialCountInList: allow and exclude list entries per request that
-/// platforms may send, so their silent pre-flight probes need few round trips.
+/// Entries per list that platforms may send, so their silent pre-flight probes need few round trips.
 pub const MAX_CREDENTIAL_COUNT_IN_LIST: u64 = 16;
 
-/// Advertised maxCredentialIdLength. hirz creates 32-byte ids, but imported passkeys keep
-/// their original ids (up to 1023 bytes) and browsers drop longer allow-list ids before
-/// sending them.
+/// hirz creates 32-byte ids, but imported passkeys keep theirs (up to 1023) and browsers drop longer
+/// allow-list ids before sending them.
 pub const MAX_ACCEPTED_CREDENTIAL_ID_LEN: u64 = MAX_CREDENTIAL_ID_LEN as u64;
 
 /// getInfo firmwareVersion: the package version as `major << 16 | minor << 8 | patch`.
 pub const FIRMWARE_VERSION: u64 = 0x00_01_00;
 
-/// Longest user handle (WebAuthn `user.id`).
 pub const MAX_USER_ID_LEN: usize = hirz_proto::MAX_USER_ID_LEN;
 
 const PUBLIC_KEY: &str = "public-key";
 const MAX_ITEMS: usize = 2048;
 const MAX_DEPTH: usize = 8;
 
-/// Decoder limits for CTAP2 parameters within one CTAPHID message. Map key order is not
-/// enforced: Firefox sends getAssertion options as `{"uv": .., "up": ..}`, which is not
-/// canonical, and hardware keys accept it. Everything else stays strict (shortest-form
-/// integers, definite lengths, no duplicate keys, no floats or tags).
+/// Map key order is not enforced: Firefox sends getAssertion options as `{"uv": .., "up": ..}`,
+/// which is not canonical. Everything else stays strict.
 pub fn limits() -> Limits {
     Limits {
         max_len: MAX_MESSAGE_SIZE,
@@ -91,8 +69,7 @@ pub fn limits() -> Limits {
     }
 }
 
-/// The engine as the CTAP layer sees it. hirzd implements it over `hirz-core`; the methods
-/// may block on the approval prompt and should give up once `ctx.is_cancelled()`.
+/// Methods may block on the approval prompt and should give up once `ctx.is_cancelled()`.
 pub trait Authenticator: Send {
     fn make_credential(
         &mut self,
@@ -100,9 +77,6 @@ pub trait Authenticator: Send {
         ctx: &RequestContext,
     ) -> Result<MakeCredentialResponse, CoreError>;
 
-    /// With `hmac` set, the engine computes the hmac-secret output from
-    /// `req.extensions.hmac_secret`, passes it through `wrap` and embeds the result under
-    /// "hmac-secret" in the authData extensions before signing.
     fn get_assertion(
         &mut self,
         req: &GetAssertionRequest,
@@ -110,8 +84,7 @@ pub trait Authenticator: Send {
         ctx: &RequestContext,
     ) -> Result<AssertionResponse, CoreError>;
 
-    /// Waits for a user gesture without any ceremony (authenticatorSelection and the
-    /// zero-length pinUvAuthParam probe).
+    /// Waits for a user gesture without any ceremony (authenticatorSelection, zero-length pinUvAuthParam probe).
     fn select(&mut self, ctx: &RequestContext) -> Result<(), CoreError>;
 }
 
@@ -171,10 +144,8 @@ fn client_data_hash(v: Option<&Value>) -> Res<[u8; 32]> {
     <[u8; 32]>::try_from(b).map_err(|_| Status::InvalidParameter)
 }
 
-/// PublicKeyCredentialDescriptor lists; descriptors of other types are skipped. Ids of any
-/// length up to the WebAuthn limit are kept: imported credentials keep the id their original
-/// authenticator chose, which need not be the 32 bytes hirz creates. Longer ids are refused
-/// rather than dropped, so a list never turns into an empty (discoverable) one.
+/// Descriptors of other types are skipped. Longer ids than WebAuthn allows are refused rather
+/// than dropped, so a list never turns into an empty (discoverable) one.
 fn descriptor_ids(v: &Value) -> Res<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     for item in as_array(v)? {
@@ -198,7 +169,7 @@ pub struct Options {
     pub uv: Option<bool>,
 }
 
-/// Option keys that are not understood are treated as absent (6.1.2 step 5).
+/// Unknown option keys are treated as absent (6.1.2 step 5).
 fn options(v: Option<&Value>) -> Res<Options> {
     let Some(v) = v else {
         return Ok(Options::default());
@@ -220,8 +191,7 @@ fn uv_requirement(uv: Option<bool>) -> UvRequirement {
     }
 }
 
-/// Steps shared by makeCredential and getAssertion (6.1.2 / 6.2.2 step 2, then the
-/// verify() of the later UV step). hirz never issues a pinUvAuthToken, so a non-empty
+/// Shared by makeCredential and getAssertion. hirz never issues a pinUvAuthToken, so a non-empty
 /// pinUvAuthParam with a supported protocol can never verify.
 fn check_pin_uv_auth(param: Option<&[u8]>, protocol: Option<u64>) -> Res<()> {
     if param.is_none() {
@@ -232,7 +202,6 @@ fn check_pin_uv_auth(param: Option<&[u8]>, protocol: Option<u64>) -> Res<()> {
     Ok(())
 }
 
-/// Decoded authenticatorMakeCredential parameters, before the policy checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MakeCredentialParams {
     pub client_data_hash: [u8; 32],
@@ -270,8 +239,7 @@ pub fn parse_make_credential(params: &[u8]) -> Res<MakeCredentialParams> {
         display_name: opt_text(user, "displayName")?,
     };
 
-    // 6.1.2 step 3: validate every element, pick supported algorithms in RP order and
-    // skip unknown credential types.
+    // 6.1.2 step 3: validate every element, pick supported algorithms in RP order, skip unknown types.
     let mut algorithms = Vec::new();
     for p in as_array(required(m.get_int(0x04))?)? {
         let p = as_map(p)?;
@@ -331,16 +299,12 @@ pub fn parse_make_credential(params: &[u8]) -> Res<MakeCredentialParams> {
 }
 
 impl MakeCredentialParams {
-    /// True for the zero-length pinUvAuthParam probe of 6.1.2 step 1.
     pub fn is_touch_probe(&self) -> bool {
         self.pin_uv_auth_param.as_ref().is_some_and(Vec::is_empty)
     }
 
-    /// 6.1.2 steps 2 to 11 that need no engine, in the order of the specification.
-    ///
-    /// Step 7 (CTAP2_ERR_PUAT_REQUIRED when uv is false on a UV-protected authenticator)
-    /// is not applied: hirz lets the approval method decide, and click-to-allow without
-    /// UV stays possible when the platform does not ask for UV.
+    /// Step 7 (PUAT_REQUIRED when uv is false on a UV-protected authenticator) is not applied: the
+    /// approval method decides, so click-to-allow without UV stays possible.
     pub fn into_request(self) -> Res<MakeCredentialRequest> {
         check_pin_uv_auth(self.pin_uv_auth_param.as_deref(), self.pin_uv_auth_protocol)?;
         if self.algorithms.is_empty() {
@@ -368,7 +332,6 @@ impl MakeCredentialParams {
     }
 }
 
-/// The hmac-secret input of getAssertion, still encrypted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HmacSecretInput {
     pub key_agreement: KeyAgreementKey,
@@ -378,7 +341,6 @@ pub struct HmacSecretInput {
     pub pin_uv_auth_protocol: u64,
 }
 
-/// Decoded authenticatorGetAssertion parameters, before the policy checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetAssertionParams {
     pub rp_id: String,
@@ -405,7 +367,6 @@ fn hmac_secret_input(v: &Value) -> Res<HmacSecretInput> {
     })
 }
 
-/// Decodes the CBOR parameters of authenticatorGetAssertion (without the command byte).
 pub fn parse_get_assertion(params: &[u8]) -> Res<GetAssertionParams> {
     let m = decode_params(params)?;
     let rp_id = as_text(required(m.get_int(0x01))?)?.to_owned();
@@ -442,13 +403,11 @@ pub fn parse_get_assertion(params: &[u8]) -> Res<GetAssertionParams> {
 }
 
 impl GetAssertionParams {
-    /// True for the zero-length pinUvAuthParam probe of 6.2.2 step 1.
     pub fn is_touch_probe(&self) -> bool {
         self.pin_uv_auth_param.as_ref().is_some_and(Vec::is_empty)
     }
 
-    /// 6.2.2 steps 2 to 6 that need no engine. Returns the request without hmac-secret
-    /// salts and the validated hmac-secret input with its protocol.
+    /// Steps that need no engine; returns the request without salts and the validated hmac-secret input.
     pub fn into_request(
         self,
     ) -> Res<(
@@ -482,7 +441,6 @@ impl GetAssertionParams {
     }
 }
 
-/// Decoded authenticatorClientPIN parameters this authenticator looks at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientPinParams {
     pub pin_uv_auth_protocol: Option<u64>,
@@ -510,7 +468,6 @@ fn algorithm(alg: i64) -> Value {
         .build()
 }
 
-/// The authenticatorGetInfo map.
 pub fn get_info_value() -> Value {
     MapBuilder::new()
         .int(0x01, text_array(&["FIDO_2_0", "FIDO_2_1"]))
@@ -546,12 +503,10 @@ fn ok_with(value: &Value) -> Res<Vec<u8>> {
     Ok(out)
 }
 
-/// Status byte CTAP2_OK followed by the getInfo map.
 pub fn get_info_response() -> Vec<u8> {
     ok_with(&get_info_value()).unwrap_or_else(|s| s.response())
 }
 
-/// Encodes the makeCredential response `{1: "none", 2: authData, 3: {}}`.
 pub fn encode_make_credential(resp: &MakeCredentialResponse) -> Res<Vec<u8>> {
     let v = MapBuilder::new()
         .int(0x01, hirz_proto::attestation::FMT_NONE)
@@ -561,9 +516,8 @@ pub fn encode_make_credential(resp: &MakeCredentialResponse) -> Res<Vec<u8>> {
     ok_with(&v)
 }
 
-/// Encodes a getAssertion response. `user` carries only the id: hirz selects the account
-/// itself, so the platform never needs name or displayName for its own picker.
-/// `userSelected` is set for discoverable flows where the user picked the account.
+/// `user` carries only the id: hirz picks the account itself, so the platform needs no name for
+/// its picker. `userSelected` is set for discoverable flows.
 pub fn encode_get_assertion(resp: &AssertionResponse, user_selected: bool) -> Res<Vec<u8>> {
     let credential = MapBuilder::new()
         .text("id", resp.credential_id.as_slice())
@@ -588,7 +542,6 @@ pub fn encode_get_assertion(resp: &AssertionResponse, user_selected: bool) -> Re
     ok_with(&m.build())
 }
 
-/// Implements [`CborHandler`]: decodes, dispatches to the engine and encodes.
 #[derive(Debug)]
 pub struct Ctap2Handler<A> {
     engine: Mutex<A>,
@@ -603,15 +556,13 @@ impl<A: Authenticator> Ctap2Handler<A> {
         }
     }
 
-    /// Drops the key-agreement keys, for example after a long idle period.
     pub fn regenerate_key_agreement(&self) {
         if let Ok(mut keys) = self.keys.lock() {
             keys.regenerate();
         }
     }
 
-    /// `request` is the command byte followed by the CBOR parameters; returns the status
-    /// byte followed by the CBOR response.
+    /// `request` is the command byte plus CBOR parameters; returns the status byte plus CBOR response.
     pub fn process(&self, request: &[u8], ctx: &RequestContext) -> Vec<u8> {
         let result = self.dispatch(request, ctx);
         if ctx.is_cancelled() {
@@ -662,7 +613,7 @@ impl<A: Authenticator> Ctap2Handler<A> {
         self.with_engine(ctx, |e| e.select(ctx))
     }
 
-    /// 6.1.2 / 6.2.2 step 1: after a gesture, report that no PIN is set.
+    /// After a gesture, report that no PIN is set (6.1.2 / 6.2.2 step 1).
     fn touch_probe(&self, ctx: &RequestContext) -> Res<Vec<u8>> {
         self.touch(ctx)?;
         Err(Status::PinNotSet)
@@ -704,9 +655,8 @@ impl<A: Authenticator> Ctap2Handler<A> {
         encode_get_assertion(&resp, user_selected)
     }
 
-    /// Only getKeyAgreement is supported. Every other subcommand needs clientPin or
-    /// pinUvAuthToken, neither of which getInfo advertises, so it is unsupported
-    /// (CTAP2_ERR_INVALID_SUBCOMMAND).
+    /// Only getKeyAgreement: other subcommands need clientPin or a pinUvAuthToken, which getInfo
+    /// does not advertise (CTAP2_ERR_INVALID_SUBCOMMAND).
     fn client_pin(&self, params: &[u8]) -> Res<Vec<u8>> {
         let p = parse_client_pin(params)?;
         if p.sub_command != client_pin::GET_KEY_AGREEMENT {

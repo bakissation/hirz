@@ -1,9 +1,8 @@
 #![no_main]
 
-//! Native messaging framing. The first byte picks how many bytes each `read` call returns
-//! (0: as many as asked), the second the frame size cap (0: `INBOUND_MAX`); the rest is the
-//! stream. Every frame read has a length from 1 to the cap, the bytes consumed are exactly
-//! the headers plus bodies, and `write_frame` of a frame reads back to the same frame.
+//! Native messaging framing. First byte: bytes per `read` call (0: as many as asked); second:
+//! frame size cap (0: `INBOUND_MAX`); the rest is the stream. Frames read have length 1..=cap,
+//! consumption is exact, and `write_frame` round-trips.
 
 use std::io::{self, Cursor, Read};
 

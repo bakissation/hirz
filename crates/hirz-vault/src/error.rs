@@ -1,49 +1,34 @@
 use core::fmt;
 
-/// Errors from recovery phrase parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhraseError {
-    /// A recovery phrase has exactly 24 words.
     WordCount(usize),
-    /// The word at this zero-based position is not in the word list.
+    /// Zero-based position of the word.
     UnknownWord(usize),
-    /// All words are valid but the checksum does not match (a typo or swapped words).
     Checksum,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultError {
-    /// File system error (kind and the operation that failed).
     Io(std::io::ErrorKind, &'static str),
-    /// A cryptographic operation failed (not an authentication failure of a file).
+    /// Not an authentication failure of a file; see `Corrupt`.
     Crypto,
     /// A file is malformed or failed authentication.
     Corrupt(&'static str),
-    /// A file uses a format version this build does not understand.
     UnsupportedVersion,
-    /// A value could not be encoded (too long or out of order).
     Encode,
-    /// The record fails validation (field sizes, algorithm, missing data).
     InvalidRecord(&'static str),
-    /// `create` found an existing vault, or `join` found an existing device state.
     AlreadyExists,
-    /// No vault header, or no device state for this vault.
     NotFound,
-    /// The device state belongs to a different vault.
     WrongVault,
     Phrase(PhraseError),
-    /// The recovery phrase is valid but does not belong to this vault.
     WrongRecoveryKey,
-    /// No key generation of this vault can be opened with the available keys.
     NoAccess,
-    /// The local state lock could not be taken in time.
     LockTimeout,
     UnknownDevice,
-    /// A device cannot remove itself.
     CannotRemoveSelf,
     /// Two key rotations removed each other's creators; see `ScanReport::rotation_conflict`.
     RotationConflict,
-    /// Backup export or import parameters are out of bounds.
     InvalidParameters,
 }
 

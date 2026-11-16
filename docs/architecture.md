@@ -115,6 +115,52 @@ signature and the user handle; frontends wrap them in CTAP2 CBOR or WebAuthn JSO
 - Credential ids: 32 random bytes. All credentials are stored in the vault, including
   non-discoverable ones, so they sync.
 
+### Engine policy
+
+Policy of `hirz-core` relative to CTAP 2.2 section 6. Every ceremony first reloads the
+vault, so credentials another frontend or the folder sync tool wrote meanwhile are visible.
+
+- **Silent probes** (`up: false`): platforms send getAssertion with `up: false` to find out
+  which entries of an allow list or exclude list exist here before the real request (CTAP 2.2
+  section 6.2.2, "pre-flight"). With a non-empty allow list the engine signs for the first
+  applicable credential without calling the approver: flags UP=0 and UV=0, BE and BS as
+  usual, no hmac-secret output and no user entity. Relying parties reject assertions without
+  UP for sign-in, so a probe result cannot log anyone in. Credentials with credProtect level 3
+  are not applicable without UV and are skipped. An empty allow list, or a probe that asks for
+  UV, never reaches a credential (`NoCredentials` and `UvRequiredUnavailable`). A probe
+  reveals to local processes whether a credential exists for a site, which processes of the
+  same user can learn from the vault anyway.
+- **excludeList**: a listed credential of this RP still asks the user (a Create prompt)
+  before `CredentialExcluded` is returned, so a page cannot probe for credentials without a
+  gesture. If the user declines or the prompt times out, the approval error is returned
+  instead, exactly as for a declined creation (WebAuthn section 6.3.2 step 3). Excluded
+  credentials with credProtect level 3 only count when the approval included UV, as in CTAP.
+- **credProtect**: level 3 needs UV; level 2 needs UV when there is no allow list. CTAP
+  decides UV before looking up credentials, hirz decides it during the approval. So when a
+  shown candidate needs UV the approver is asked with `uv_required`. If UV turns out to be
+  unavailable and the RP did not require it, the protected candidates are dropped and the
+  approver is asked again with the rest, or `NoCredentials` is returned: protected credentials
+  stay invisible without UV, as in CTAP.
+- **No applicable credential**: `NoCredentials` at once, without a prompt (CTAP 2.2
+  getAssertion step 7). A client role that must hide this from pages (WebAuthn privacy
+  considerations) has to delay or prompt on its own.
+- **Allow list**: the first applicable credential in allow-list order is used, without a
+  choice (CTAP: "select any credential"). Without an allow list the user picks among the
+  discoverable credentials, newest first.
+- **Same account again**: creating a discoverable credential replaces older discoverable
+  credentials of the same RP id and user id (CTAP makeCredential, `rk`), after the new one
+  is stored. The delete is best effort: a leftover older credential only shows up as an
+  extra account.
+- **User entity**: returned for flows without an allow list; name and display name only when
+  the approval included UV (CTAP getAssertion, user identifiable information).
+- **Machine login**: RP ids starting with `pam://` (pam-u2f for login, sudo and screen
+  unlock) are refused with `ApprovalError::Unavailable` (CTAP2_ERR_NOT_ALLOWED) before any
+  prompt or vault access, silent probes included. hirz passkeys are synced software keys and
+  must not become a login factor for the computer they run on, and an unlock that waits for a
+  hirz approval could deadlock.
+- **hmac-secret**: with a wrap (CTAP path) the output is encrypted into the authData
+  extensions; without one (extension path) it is returned raw in `hmac_secret_output`.
+
 ## Trust boundaries
 
 1. Web page: hostile. Never a source of origin, RP ID truth or approval.
@@ -140,3 +186,22 @@ signature and the user handle; frontends wrap them in CTAP2 CBOR or WebAuthn JSO
   every ceremony and hirz-nmh hands every ceremony back to Firefox.
 - Device state (never synced): `$XDG_STATE_HOME/hirz/` holds the device secret, the
   wrapped vault key, PIN verifier, retry counters and rate-limit state (files 0600, dir 0700).
+
+## Implementation notes
+
+- **CBOR (`hirz-proto`).** The decoder accepts unsigned and negative integers, byte and text
+  strings, arrays, maps, booleans and null, all with definite lengths. Floats, tags,
+  `undefined`, other simple values and indefinite lengths are rejected, and map keys must be
+  integers or text. Canonical form follows CTAP2 section 8: shortest-form arguments and map
+  keys sorted by major type, then encoded length, then bytewise. Within one major type this
+  matches the length-first ordering of RFC 8949 section 4.2.3; across major types all integer
+  keys come before text keys.
+- **Origins (`hirz-webauthn`).** Only tuple origins that can be a WebAuthn caller are
+  accepted: `https` with a domain host, or `http` with `localhost` or a subdomain of it
+  (potentially trustworthy per the secure contexts rules). The input must already be in the
+  browser's serialization (lowercase ASCII, punycode for IDN labels, no default port) and
+  anything else is rejected rather than normalized, because the string is copied verbatim
+  into `clientDataJSON`. IP literals are rejected: WebAuthn requires the effective domain to
+  be a valid domain, and an IP address is not one. The Public Suffix List is compiled in
+  (version and license: `crates/hirz-webauthn/README.md`); rules from both the ICANN and
+  PRIVATE sections are used, as browsers do.

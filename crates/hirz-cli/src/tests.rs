@@ -59,7 +59,6 @@ impl Drop for Tmp {
     }
 }
 
-/// One simulated computer: its own home, state and config directories.
 struct Machine {
     tmp: Tmp,
     env: Env,
@@ -118,14 +117,11 @@ const VERIFIED: Approval = Approval {
     selected: None,
 };
 
-/// What a pairing confirmation was shown: device name, words, request time.
 type SeenPairing = (String, Vec<String>, u64);
 
-/// Stands in for the hirz-uv window and the user's password, fingerprint or PIN.
 struct FakeApprover<'a> {
     result: Result<Approval, ApprovalError>,
     seen: Option<&'a RefCell<Vec<SeenPairing>>>,
-    /// Device name and id shown by removal confirmations.
     removals: Option<&'a RefCell<Vec<(String, String)>>>,
 }
 
@@ -171,8 +167,8 @@ impl SharedBuf {
     }
 }
 
-/// Scripted answers. "Press Enter" prompts get an empty line, and "Word N" prompts are
-/// answered from the recovery phrase printed so far (or wrongly when `wrong_words`).
+/// Scripted answers: "Press Enter" prompts get an empty line, "Word N" prompts are answered from
+/// the phrase printed so far (wrongly when `wrong_words`).
 struct Script {
     answers: VecDeque<String>,
     out: SharedBuf,
@@ -209,7 +205,6 @@ impl Prompter for Script {
     }
 }
 
-/// Reads the 24 numbered words of the first phrase shown in `out`.
 fn phrase_words(out: &str) -> Vec<String> {
     let start = out.find("RECOVERY PHRASE").expect("phrase shown");
     let tokens: Vec<&str> = out[start..].split_whitespace().collect();
@@ -311,7 +306,6 @@ fn run(m: &Machine, args: &[&str], answers: &[&str]) -> Run {
     run_with(m, args, answers, false)
 }
 
-/// `hirz init --yes-i-saved-it`, returning the recovery phrase.
 fn init(m: &Machine) -> String {
     let r = run(m, &["init", "--yes-i-saved-it"], &[]);
     r.ok();
@@ -357,8 +351,6 @@ fn records(m: &Machine, vault: &Path) -> Vec<CredentialRecord> {
     all.sort_by(|a, b| a.credential_id.cmp(&b.credential_id));
     all
 }
-
-// ---- argument parsing ----
 
 fn inv(vault: Option<&str>, command: Command) -> Invocation {
     Invocation {
@@ -665,8 +657,6 @@ fn help_texts_exist() {
     assert!(run(&m, &["--help"], &[]).ok().contains("Getting started"));
 }
 
-// ---- init and join ----
-
 #[test]
 fn init_checks_the_phrase_and_refuses_to_overwrite() {
     let m = Machine::new("init");
@@ -797,8 +787,6 @@ fn join_second_device_with_retries() {
     assert!(r.message().contains("already set up"));
 }
 
-// ---- list and delete ----
-
 #[test]
 fn list_and_delete() {
     let m = Machine::new("list");
@@ -902,8 +890,6 @@ fn delete_by_whole_id_when_it_prefixes_another() {
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].credential_id, vec![10u8; 32]);
 }
-
-// ---- export and import ----
 
 #[test]
 fn encrypted_export_imports_into_a_fresh_vault() {
@@ -1050,7 +1036,6 @@ fn import_from_another_provider() {
     assert_eq!(bob.user_id, b"user-bob-0000002");
     assert_eq!(bob.user_display_name, None);
     assert!(bob.hmac_secret.is_none());
-    // Ids of other lengths than the 32 bytes hirz creates are kept as they are.
     let frank = &recs[2];
     assert_eq!(frank.credential_id, vec![4u8; 16]);
     assert_eq!(frank.rp_id, "example.org");
@@ -1069,7 +1054,6 @@ fn import_from_another_provider() {
     assert_eq!(r.exit(), Exit::Partial);
     assert!(r.out.contains("4 passkeys were already in hirz"));
 
-    // Export and re-import keep the short ids.
     let out_file = m.tmp.path("short-ids.json");
     let o = out_file.to_str().unwrap();
     let r = run(&m, &["export", "--plain", "--cxf", o], &["yes", "y"]);
@@ -1083,7 +1067,6 @@ fn import_from_another_provider() {
         records(&c, &c.default_vault())
     );
 
-    // Ids over the WebAuthn limit of 1023 bytes are refused.
     let mut long: Value = serde_json::from_str(FIXTURE).unwrap();
     long["accounts"][0]["items"][1]["credentials"][0]["credentialId"] =
         Value::from(hirz_proto::base64url::encode(&[7u8; 1024]));
@@ -1333,8 +1316,6 @@ fn import_rejects_bad_documents() {
     assert_eq!(r.exit(), Exit::Failed);
 }
 
-// ---- devices ----
-
 #[test]
 fn remove_device_reports_exposed_sites() {
     let a = Machine::new("rm-a");
@@ -1383,8 +1364,6 @@ fn remove_device_reports_exposed_sites() {
     let r = run(&a, &["remove-device", &b_id[..8]], &["y"]);
     assert_eq!(r.exit(), Exit::Failed);
 
-    // The removed device can still open the folder but cannot read new generations, and it
-    // stops using the vault.
     let st = run(&b, &["status"], &[]);
     assert_ne!(st.exit(), Exit::Ok);
     assert!(st.out.contains(crate::app::REMOVED), "{}", st.out);
@@ -1408,7 +1387,6 @@ fn remove_device_reports_exposed_sites() {
         assert!(r.out.is_empty());
     }
 
-    // forget-local deletes only this computer's keys.
     let vault_files = tree(&vault);
     let r = run(&b, &["forget-local"], &["n"]);
     assert_eq!(r.exit(), Exit::Cancelled);
@@ -1427,7 +1405,6 @@ fn remove_device_reports_exposed_sites() {
     assert_eq!(records(&a, &vault).len(), 3);
 }
 
-/// Every file under `dir` with its size, sorted.
 fn tree(dir: &Path) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -1483,7 +1460,6 @@ fn remove_device_requires_user_verification() {
             .count()
     };
 
-    // No method at all: refused before any question.
     let none = UvSys::new(&[], Ok(VERIFIED));
     let r = run_sys(&a, &none, &["remove-device", &b_id[..8]], &["y"]);
     assert_eq!(r.exit(), Exit::Failed);
@@ -1495,7 +1471,6 @@ fn remove_device_requires_user_verification() {
     assert!(r.prompts.is_empty());
     assert!(none.removals.borrow().is_empty());
 
-    // Answering no in the terminal never opens the window.
     let uv = UvSys::new(&[UvMethod::Polkit], Ok(VERIFIED));
     let r = run_sys(&a, &uv, &["remove-device", &b_id[..8]], &["n"]);
     assert_eq!(r.exit(), Exit::Cancelled);
@@ -1524,7 +1499,6 @@ fn remove_device_requires_user_verification() {
             "could not verify",
         ),
     ] {
-        // --yes skips only the terminal question, never the verification.
         let uv = UvSys::new(&[UvMethod::Pin], result);
         let r = run_sys(&a, &uv, &["remove-device", &b_id[..8], "--yes"], &[]);
         assert_eq!(r.exit(), exit, "{}", r.message());
@@ -1595,8 +1569,6 @@ fn backup_confirm_sets_backup_state() {
     );
 }
 
-// ---- pin ----
-
 #[test]
 fn pin_lifecycle() {
     let m = Machine::new("pin");
@@ -1631,8 +1603,6 @@ fn pin_lifecycle() {
     run(&m, &["pin", "reset"], &[&phrase]).ok();
     assert!(!m.state().join("pin").exists());
 }
-
-// ---- status and setup ----
 
 #[test]
 fn status_before_and_after_setup() {
@@ -1757,8 +1727,6 @@ fn commands_need_setup() {
     }
 }
 
-// ---- recovery phrase screen and program name ----
-
 #[test]
 fn command_name_uses_argv0_only_when_hirz_is_not_on_path() {
     use crate::env::command_name;
@@ -1850,8 +1818,7 @@ fn init_warns_and_clears_the_phrase_on_a_terminal() {
     let clear = "\x1b[2J\x1b[3J\x1b[H";
     let after = &out[out.find(clear).expect("screen cleared") + clear.len()..];
     let words = phrase_words(out);
-    // Phrase words are common English words that may occur in later text, so look for the
-    // numbered layout of the phrase rather than for single words.
+    // Phrase words are common English words, so look for the numbered layout of the phrase.
     assert!(
         words
             .iter()
@@ -1863,7 +1830,6 @@ fn init_warns_and_clears_the_phrase_on_a_terminal() {
     assert!(after.contains("./bin/hirz devices approve"));
     assert!(after.contains("hirz join --vault DIR --request"));
 
-    // Not a terminal, or no check: nothing is cleared.
     let m2 = Machine::new("noclear");
     let out = run(&m2, &["init"], &[]).ok().to_string();
     assert!(!out.contains(clear));
@@ -1884,10 +1850,7 @@ fn init_warns_and_clears_the_phrase_on_a_terminal() {
     assert!(!r.ok().contains(clear));
 }
 
-// ---- pairing ----
-
-/// A system whose clock advances on every poll and that runs `on_sleep` while the joining
-/// command waits, standing in for the user at the other device.
+/// The clock advances on every poll and `on_sleep` runs while the joining command waits (the user at the other device).
 struct PairSys<'a> {
     clock: std::cell::Cell<u64>,
     step: u64,
@@ -1944,7 +1907,6 @@ fn join_request(m: &Machine, vault: &str, sys: &dyn System) -> Run {
     )
 }
 
-/// The line with the four upper-case verification words.
 fn words_line(out: &str) -> String {
     out.lines()
         .find(|l| {
@@ -1981,7 +1943,6 @@ fn pairing_adds_a_device_without_the_phrase() {
     let approved = RefCell::new(String::new());
     let sys = PairSys::new(2, |n| match n {
         1 => {
-            // A forged approval appears first: the new device warns and keeps waiting.
             let dir = vault.join("pairing");
             let req = pairing_dir_files(&vault)
                 .into_iter()
@@ -2034,7 +1995,6 @@ fn pairing_mismatch_deny_and_expiry_change_nothing() {
     let vault = a.default_vault();
     let vs = vault.to_str().unwrap().to_string();
 
-    // The user says the words differ: nothing is approved and the request is removed.
     let b = Machine::new("pair-no-b");
     let refused = RefCell::new(None);
     let sys = PairSys::new(60, |n| {
@@ -2058,7 +2018,6 @@ fn pairing_mismatch_deny_and_expiry_change_nothing() {
         1
     );
 
-    // Denied by id; then the request runs out.
     let c = Machine::new("pair-no-c");
     let sys = PairSys::new(60, |n| {
         if n == 1 {
@@ -2080,7 +2039,6 @@ fn pairing_mismatch_deny_and_expiry_change_nothing() {
     assert!(!c.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
     assert!(pairing_dir_files(&vault).is_empty());
 
-    // A request nobody answers expires and is withdrawn.
     let d = Machine::new("pair-no-d");
     let sys = PairSys::new(60, |_| {});
     let r = join_request(&d, &vs, &sys);
@@ -2094,7 +2052,6 @@ fn pairing_mismatch_deny_and_expiry_change_nothing() {
     assert_eq!(r.exit(), Exit::NotSetUp);
 }
 
-/// `devices approve` with a chosen user verification outcome and set of methods.
 struct UvSys {
     methods: Vec<UvMethod>,
     result: Result<Approval, ApprovalError>,
@@ -2165,7 +2122,6 @@ fn pairing_approval_requires_user_verification() {
                 .count()
         };
 
-        // No method at all: refused before the words are compared.
         let none = UvSys::new(&[], Ok(VERIFIED));
         let r = approve_with(&a, &none, &["yes"]);
         assert_eq!(r.exit(), Exit::Failed);

@@ -1,20 +1,14 @@
-//! Small strict JSON (RFC 8259) reader and writer for untrusted messages.
-//!
-//! The reader accepts only UTF-8 input without a byte order mark, rejects duplicate object
-//! keys, lone surrogate escapes, raw control characters in strings, non-finite numbers and
-//! anything after the top-level value except whitespace.
+//! Small strict JSON (RFC 8259) reader and writer for untrusted messages. Rejects a byte order
+//! mark, duplicate object keys, lone surrogate escapes, raw control characters, non-finite
+//! numbers and anything after the top-level value except whitespace.
 
 use crate::{Error, Result};
 use core::fmt;
 
-/// Parser limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum input length in bytes.
     pub max_len: usize,
-    /// Maximum nesting of arrays and objects.
     pub max_depth: usize,
-    /// Maximum total number of values.
     pub max_items: usize,
 }
 
@@ -36,7 +30,6 @@ pub struct Number {
 }
 
 impl Number {
-    /// Wraps a finite `f64`; `None` for NaN and infinities.
     pub fn from_f64(value: f64) -> Option<Number> {
         value.is_finite().then_some(Number { value, exact: None })
     }
@@ -84,25 +77,18 @@ impl From<i64> for Number {
     }
 }
 
-/// A JSON value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
-    /// `null`.
     Null,
-    /// `true` or `false`.
     Bool(bool),
-    /// A finite number.
     Number(Number),
-    /// A string.
     String(String),
-    /// An array.
     Array(Vec<Json>),
     /// An object with members in document order and unique keys.
     Object(Vec<(String, Json)>),
 }
 
 impl Json {
-    /// Looks up a member of an object.
     pub fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Object(m) => m.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -110,7 +96,6 @@ impl Json {
         }
     }
 
-    /// Returns the string value.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Json::String(s) => Some(s),
@@ -118,7 +103,6 @@ impl Json {
         }
     }
 
-    /// Returns the boolean value.
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Json::Bool(b) => Some(*b),
@@ -126,7 +110,6 @@ impl Json {
         }
     }
 
-    /// Returns the number.
     pub fn as_number(&self) -> Option<&Number> {
         match self {
             Json::Number(n) => Some(n),
@@ -134,17 +117,14 @@ impl Json {
         }
     }
 
-    /// Returns an exact non-negative integer.
     pub fn as_u64(&self) -> Option<u64> {
         self.as_number()?.as_u64()
     }
 
-    /// Returns an exact integer.
     pub fn as_i64(&self) -> Option<i64> {
         self.as_number()?.as_i64()
     }
 
-    /// Returns the array items.
     pub fn as_array(&self) -> Option<&[Json]> {
         match self {
             Json::Array(a) => Some(a),
@@ -152,7 +132,6 @@ impl Json {
         }
     }
 
-    /// Returns the object members.
     pub fn as_object(&self) -> Option<&[(String, Json)]> {
         match self {
             Json::Object(m) => Some(m),
@@ -160,7 +139,6 @@ impl Json {
         }
     }
 
-    /// True for `null`.
     pub fn is_null(&self) -> bool {
         matches!(self, Json::Null)
     }
@@ -196,7 +174,6 @@ impl From<i64> for Json {
     }
 }
 
-/// Parses one JSON text from `input`.
 pub fn parse(input: &[u8], limits: &Limits) -> Result<Json> {
     if input.len() > limits.max_len {
         return Err(Error::LimitExceeded);

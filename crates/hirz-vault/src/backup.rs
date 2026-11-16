@@ -45,8 +45,6 @@ fn backup_key(
 }
 
 impl Vault {
-    /// Exports every live credential, protected by the recovery phrase and an optional
-    /// passphrase (Argon2id with the RFC 9106 second recommended parameters).
     pub fn export_backup(
         &self,
         phrase: &RecoveryPhrase,
@@ -112,7 +110,6 @@ fn within_import_limit(p: Argon2Params) -> bool {
         && p.p_cost <= IMPORT_LIMIT.p_cost
 }
 
-/// Decrypts a backup made by `Vault::export_backup`.
 pub fn import_backup(
     data: &[u8],
     phrase: &RecoveryPhrase,

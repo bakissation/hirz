@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Largest file the vault reads. Records are a few hundred bytes; backups hold many.
+/// Records are a few hundred bytes; backups hold many.
 pub(crate) const MAX_FILE_LEN: u64 = 1 << 20;
 pub(crate) const MAX_BACKUP_LEN: u64 = 64 << 20;
 
@@ -24,7 +24,7 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), VaultError> {
     Ok(())
 }
 
-/// Creates the state directory and forces mode 0700 even if it already existed.
+/// Forces mode 0700 even if the directory already existed.
 pub(crate) fn state_dir(path: &Path) -> Result<(), VaultError> {
     private_dir(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
@@ -43,8 +43,8 @@ fn random_suffix() -> Result<String, VaultError> {
     Ok(hex(&r))
 }
 
-/// Writes `data` to `dir/name` atomically: temp file in the same directory (a dot-name that
-/// readers skip), fsync, rename, fsync the directory. Files are created with mode 0600.
+/// Temp file in the same directory (a dot-name that readers skip), fsync, rename, fsync the
+/// directory. Files are created with mode 0600.
 pub(crate) fn write_atomic(dir: &Path, name: &str, data: &[u8]) -> Result<(), VaultError> {
     private_dir(dir)?;
     let tmp = dir.join(format!(".{name}.tmp-{}", random_suffix()?));
@@ -66,7 +66,7 @@ pub(crate) fn write_atomic(dir: &Path, name: &str, data: &[u8]) -> Result<(), Va
     result
 }
 
-/// Reads a regular file of at most `max` bytes. Never allocates more than `max + 1`.
+/// Never allocates more than `max + 1`.
 pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, VaultError> {
     let f = File::open(path).map_err(io("open file"))?;
     let meta = f.metadata().map_err(io("stat file"))?;
@@ -112,12 +112,9 @@ pub(crate) fn list(dir: &Path) -> Result<Vec<String>, VaultError> {
     Ok(names)
 }
 
-/// File in the local state directory where `hirz init` and `hirz join` record the vault
-/// folder, so every frontend finds the same vault.
 pub const VAULT_POINTER_FILE: &str = "vault-path";
 const MAX_VAULT_POINTER_LEN: u64 = 4096;
 
-/// Why the recorded vault folder cannot be used.
 #[derive(Debug)]
 pub enum VaultPointerError {
     Io(std::io::Error),
@@ -125,8 +122,6 @@ pub enum VaultPointerError {
     Invalid,
 }
 
-/// Reads the vault folder recorded in the pointer file at `path`; `Ok(None)` when there is
-/// none.
 pub fn read_vault_pointer(path: &Path) -> Result<Option<PathBuf>, VaultPointerError> {
     use std::os::unix::ffi::OsStrExt;
     let f = match File::open(path) {
@@ -146,10 +141,8 @@ pub fn read_vault_pointer(path: &Path) -> Result<Option<PathBuf>, VaultPointerEr
     Ok(Some(p))
 }
 
-/// Cross-process lock on the local state directory, held for counter and key file updates.
-///
-/// A `create_new` lock file, because `File::lock` is newer than the workspace MSRV. A lock
-/// whose owner process is gone, or that is older than a minute, is considered stale.
+/// Cross-process lock on the local state directory. A `create_new` file, because `File::lock`
+/// is newer than the MSRV; stale when its owner process is gone or it is older than a minute.
 #[derive(Debug)]
 pub(crate) struct StateLock {
     path: PathBuf,
@@ -189,8 +182,7 @@ impl Drop for StateLock {
     }
 }
 
-/// Moves the lock aside before deleting it, so a lock that a live process re-created in the
-/// meantime is put back instead of being removed.
+/// Moves the lock aside before deleting it, so a lock a live process re-created meanwhile is put back.
 fn break_stale(path: &Path) -> Result<(), VaultError> {
     let aside = path.with_file_name(format!("{LOCK_NAME}.stale-{}", random_suffix()?));
     if fs::rename(path, &aside).is_err() {

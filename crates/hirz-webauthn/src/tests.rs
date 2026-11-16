@@ -248,7 +248,6 @@ impl Engine for Fake {
 
 fn run(req: &Json, engine: &mut Fake) -> Json {
     let reply = handle(req, engine);
-    // Every reply must serialize to JSON the strict reader accepts.
     assert_eq!(j(&reply.to_string()), reply);
     reply
 }
@@ -512,7 +511,6 @@ fn get_discoverable_without_prf() {
     assert_eq!(req.extensions.hmac_secret, None);
     assert_eq!(cred.get("clientExtensionResults").unwrap(), &j("{}"));
 
-    // A discoverable assertion must carry the user handle.
     let mut options = get_options();
     set(&mut options, &["allowCredentials"], None);
     let mut fake = Fake {
@@ -587,7 +585,6 @@ fn prf_eval_by_credential() {
         })
     );
 
-    // Two allowed credentials whose effective inputs differ cannot be expressed.
     let mut two = options.clone();
     set(
         &mut two,
@@ -600,7 +597,6 @@ fn prf_eval_by_credential() {
     );
     assert_eq!(get_error(two.clone()), "NotHandled");
 
-    // ... unless both resolve to the same salts.
     set(
         &mut two,
         &["extensions", "prf", "eval"],
@@ -612,7 +608,6 @@ fn prf_eval_by_credential() {
         prf_salt(b"per credential")
     );
 
-    // A key that is not in allowCredentials.
     let mut stray = get_options();
     set(
         &mut stray,
@@ -621,7 +616,6 @@ fn prf_eval_by_credential() {
     );
     assert_eq!(get_error(stray), "NotHandled");
 
-    // A key that is not base64url.
     let mut bad = get_options();
     set(
         &mut bad,
@@ -630,7 +624,6 @@ fn prf_eval_by_credential() {
     );
     assert_eq!(get_error(bad), "NotHandled");
 
-    // evalByCredential needs allowCredentials.
     let mut no_allow = options;
     set(&mut no_allow, &["allowCredentials"], None);
     assert_eq!(get_error(no_allow), "NotSupportedError");
@@ -669,7 +662,6 @@ fn not_handled_decisions() {
         set(&mut options, path, value.clone());
         assert_eq!(create_error(options), "NotHandled", "{path:?} = {value:?}");
     }
-    // Accepted variants of the same members.
     let origin = Origin::parse(ORIGIN).unwrap();
     for (path, value) in [
         (&["hints"][..], j(r#"["client-device", "security-key"]"#)),
@@ -835,7 +827,6 @@ fn inconsistent_engine_output_is_rejected() {
     let reply = run(&envelope("get", ORIGIN, get_options()), &mut fake);
     assert_eq!(error_of(&reply), "UnknownError");
 
-    // UV required by the RP but not set by the engine.
     let mut fake = Fake {
         flags: FLAG_UP | FLAG_BE,
         ..Fake::default()
@@ -843,7 +834,6 @@ fn inconsistent_engine_output_is_rejected() {
     let reply = run(&envelope("create", ORIGIN, create_options()), &mut fake);
     assert_eq!(error_of(&reply), "UnknownError");
 
-    // Algorithm the RP did not ask for.
     let mut options = create_options();
     set(
         &mut options,
@@ -1317,7 +1307,6 @@ fn list_engine_errors() {
     }
 }
 
-/// An engine that keeps the default `list_accounts`.
 struct NoList;
 
 impl Engine for NoList {

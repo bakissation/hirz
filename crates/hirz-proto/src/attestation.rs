@@ -3,17 +3,12 @@
 use crate::cbor::{self, Limits, Value};
 use crate::{Error, Result};
 
-/// Attestation statement format identifier `none`.
 pub const FMT_NONE: &str = "none";
 
-/// A parsed attestation object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttestationObject {
-    /// Attestation statement format.
     pub fmt: String,
-    /// Attestation statement, a CBOR map.
     pub att_stmt: Value,
-    /// Raw authenticatorData.
     pub auth_data: Vec<u8>,
 }
 

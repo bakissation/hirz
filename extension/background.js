@@ -1,7 +1,6 @@
-// Background event page. The only part of the extension that talks to the
-// native host, and the only place the request origin comes from: Firefox sets
-// MessageSender.origin in the parent process, so page scripts cannot forge it.
-// The frame ancestry of subframes comes from webNavigation, also parent-side.
+// Background event page: the only part of the extension that talks to the native host, and the
+// only place the origin comes from (MessageSender.origin, set by Firefox in the parent process, so
+// the page cannot forge it). Frame ancestry comes from webNavigation, also parent-side.
 
 const HOST_NAME = "hirz";
 const PROTOCOL_VERSION = 1;
@@ -41,9 +40,6 @@ const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
 const isB64u = (v) =>
   typeof v === "string" && v.length <= MAX_B64_CHARS && v.length % 4 !== 1 && /^[A-Za-z0-9_-]*$/.test(v);
 const optB64u = (v) => v === undefined || v === null || isB64u(v);
-
-// ---------------------------------------------------------------------------
-// Native host connection: one long-lived port, multiplexed by request id.
 
 let host = null;
 let nextHostId = 1;
@@ -125,12 +121,11 @@ function cancelHostCall(h, id) {
   try {
     h.port.postMessage({ v: PROTOCOL_VERSION, id, type: "cancel" });
   } catch {
-    // The host is gone; nothing left to cancel.
+    // Host gone; nothing to cancel.
   }
   scheduleIdle(h);
 }
 
-// Resolves to the connected host, or null when it is not available.
 async function openHost() {
   if (host) return (await host.ready) ? host : null;
   if (Date.now() - hostFailedAt < HOST_RETRY_MS) return null;
@@ -187,9 +182,6 @@ async function hostCapabilities() {
   return value;
 }
 
-// ---------------------------------------------------------------------------
-// Validation of what the host returns, before it reaches the page.
-
 function cleanCredential(kind, c) {
   if (!isObject(c) || c.type !== "public-key" || !isB64u(c.id) || c.rawId !== c.id) return null;
   const r = c.response;
@@ -222,7 +214,6 @@ function cleanCredential(kind, c) {
   return out;
 }
 
-// Accounts for the conditional mediation overlay. Only ids and names, capped.
 function cleanAccounts(list) {
   const out = [];
   if (!Array.isArray(list)) return out;
@@ -249,8 +240,6 @@ function canonicalB64u(s) {
   }
 }
 
-// The request a conditional selection turns into: the page's own options with the
-// allow list narrowed to the chosen credential.
 function narrowOptions(options, id) {
   const out = { ...options, allowCredentials: [{ type: "public-key", id }] };
   const ext = out.extensions;
@@ -264,9 +253,6 @@ function narrowOptions(options, id) {
   }
   return out;
 }
-
-// ---------------------------------------------------------------------------
-// Pages.
 
 const busyTabs = new Set();
 
@@ -296,11 +282,8 @@ function urlOrigin(url) {
   }
 }
 
-// Everything here comes from Firefox, not from the page. The caller's origin is
-// sender.origin (parent process). For a subframe, the ancestors come from the frame
-// tree webNavigation keeps in the parent process; the frame counts as same-origin only
-// when every ancestor's URL has exactly its origin. Ancestors without an origin in their
-// URL count as cross-origin.
+// From Firefox, not the page: sender.origin and the frame tree. Same-origin only when every
+// ancestor's URL has exactly this origin; ancestors with no origin count as cross-origin.
 async function frameContext(sender) {
   if (!sender || sender.id !== browser.runtime.id) return null;
   const tab = sender.tab;
@@ -376,8 +359,7 @@ async function ceremony(state, kind, rid, options) {
   if (busyTabs.has(ctx.tabId)) return { ok: false, error: "NotAllowedError" };
   busyTabs.add(ctx.tabId);
   try {
-    // Firefox only runs WebAuthn for the active tab of the focused window;
-    // when that does not hold, let Firefox give its own answer.
+    // Firefox only runs WebAuthn for the active tab of the focused window; otherwise it answers itself.
     if (!(await tabIsFocused(ctx.tabId))) return PASS;
     const h = await openHost();
     if (!h) return PASS;
@@ -413,9 +395,8 @@ async function ceremony(state, kind, rid, options) {
   }
 }
 
-// Conditional mediation: one pending request per document. The account list goes to
-// the relay, which draws the suggestions; it is never passed on to the page. Returns
-// the final reply, or null when the request stays pending.
+// One pending request per document. The account list goes to the relay and is never passed to the
+// page. Returns null while the request stays pending.
 async function startConditional(state, rid, options) {
   if (!optionsOk(options)) return PASS;
   const ctx = await sameOriginContext(state);
@@ -464,8 +445,7 @@ async function selectAccount(state, rid, id) {
     reply(state, rid, result);
     return;
   }
-  // The user cancelled the prompt or it failed: the request stays pending, as a
-  // conditional request does when the user dismisses the browser's own suggestions.
+  // Prompt cancelled or failed: the request stays pending, like a dismissed browser suggestion.
   reply(state, rid, { phase: "retry" });
 }
 

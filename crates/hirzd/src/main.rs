@@ -1,8 +1,6 @@
-//! hirzd: the user daemon behind the hirz virtual security key.
-//!
-//! Connects to hirz-uhid-broker, runs CTAPHID and CTAP2 (`hirz-ctap`) and answers with the
-//! authenticator engine over the user's vault, asking `hirz-uv` for every approval. When the
-//! broker goes away, hirzd reconnects with a growing delay.
+//! hirzd: the user daemon behind the hirz virtual security key. CTAPHID and CTAP2 over the broker's
+//! socket, answered by the engine over the user's vault, with `hirz-uv` approving each request
+//! (docs/uhid.md).
 #![forbid(unsafe_code)]
 
 mod authenticator;
@@ -28,7 +26,6 @@ const SOCKET_ENV: &str = "HIRZ_BROKER_SOCKET";
 const MLOCK_ENV: &str = "HIRZ_MLOCK";
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// A connection that lasted this long resets the reconnect delay.
 const STABLE_CONNECTION: Duration = Duration::from_secs(30);
 
 pub(crate) fn log(msg: std::fmt::Arguments<'_>) {
@@ -87,7 +84,6 @@ impl hid::CborHandler for DebugHandler {
     }
 }
 
-/// Serves the broker until the process is stopped, reconnecting whenever it goes away.
 fn serve(path: &Path, handler: Arc<dyn hid::CborHandler>) {
     let mut delay = MIN_BACKOFF;
     loop {

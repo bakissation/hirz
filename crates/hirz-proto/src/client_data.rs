@@ -1,22 +1,16 @@
-//! clientDataJSON serialization per WebAuthn Level 3 section 5.8.1.1.
-//!
-//! The output is the exact byte sequence the limited verification algorithm of section
-//! 5.8.1.2 expects, with no fields after `crossOrigin` and `topOrigin`.
+//! clientDataJSON serialization per WebAuthn Level 3 section 5.8.1.1: the exact bytes the limited
+//! verification algorithm (section 5.8.1.2) expects, with no fields after `crossOrigin` and `topOrigin`.
 
 use crate::base64url;
 use core::fmt::Write;
 
-/// The `type` member of CollectedClientData.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CeremonyType {
-    /// `webauthn.create`
     Create,
-    /// `webauthn.get`
     Get,
 }
 
 impl CeremonyType {
-    /// The string used in clientDataJSON.
     pub fn as_str(self) -> &'static str {
         match self {
             CeremonyType::Create => "webauthn.create",

@@ -1,9 +1,7 @@
-# DRAFT. Read packaging/snap/README.md first: hirz needs classic confinement as a snap, and
-# classic needs a manual Snap Store review before any upload is accepted.
-#
-# The release workflow copies this file to snap/snapcraft.yaml and the hooks to snap/hooks/
-# at the repository root, then runs "snapcraft pack --destructive-mode" on an Ubuntu 24.04
-# runner (the core24 base). Locally: the same, or "snapcraft pack" with LXD.
+# DRAFT (packaging/snap/README.md): hirz needs classic confinement, which needs a manual Snap Store
+# review before any upload is accepted. The release workflow copies this file and the hooks to
+# snap/ and runs "snapcraft pack --destructive-mode" on an Ubuntu 24.04 runner (core24); locally
+# the same, or "snapcraft pack" with LXD.
 name: hirz
 title: hirz
 icon: assets/brand/hirz-app-icon.svg

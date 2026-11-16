@@ -84,8 +84,6 @@ fn gen_dirs(vault: &Path) -> Vec<String> {
     v
 }
 
-// ---- recovery phrase ----
-
 #[test]
 fn wordlist_is_bip39_english() {
     let list = crate::recovery::wordlist_for_tests();
@@ -161,7 +159,6 @@ fn phrase_errors() {
     last[23] = "abandon";
     assert!(RecoveryPhrase::parse(&last.join(" ")).is_err());
 
-    // Case, extra whitespace and four-letter prefixes are accepted.
     let loose: Vec<String> = words
         .iter()
         .map(|w| w.chars().take(4).collect::<String>().to_uppercase())
@@ -169,8 +166,6 @@ fn phrase_errors() {
     let parsed = RecoveryPhrase::parse(&format!("  {}\n", loose.join("   "))).unwrap();
     assert_eq!(parsed.entropy(), &[0x80; 32]);
 }
-
-// ---- records ----
 
 #[test]
 fn record_round_trip_and_validation() {
@@ -235,7 +230,6 @@ fn record_credential_id_lengths() {
         assert!(matches!(r.validate(), Err(VaultError::InvalidRecord(_))));
         assert!(r.encode().is_err());
     }
-    // A version 2 body carrying an out-of-range id is refused on read.
     let mut r = cred(4, "example.com");
     r.credential_id = vec![1; 1023];
     let mut enc = r.encode().unwrap().to_vec();
@@ -252,14 +246,11 @@ fn version_1_records_and_tombstones_still_read() {
     use crate::codec::Writer;
     use crate::record::{Event, EventKind};
 
-    // Version 1 bodies are byte-identical to version 2 apart from the version byte when the
-    // id has 32 bytes.
     let r = cred(5, "example.com");
     let mut v1 = r.encode().unwrap().to_vec();
     v1[0] = 1;
     assert_eq!(CredentialRecord::decode(&v1).unwrap(), r);
 
-    // Version 1 fixes the id at 32 bytes.
     let mut short = cred(5, "example.com");
     short.credential_id = vec![5; 16];
     let mut v1_short = short.encode().unwrap().to_vec();
@@ -308,7 +299,6 @@ fn version_1_records_and_tombstones_still_read() {
         VaultError::UnsupportedVersion
     );
 
-    // New tombstones are written as version 2.
     let fresh = Event {
         kind: EventKind::Tombstone(vec![5; 16]),
         origin_author: [7; 16],
@@ -351,14 +341,12 @@ fn imported_ids_of_other_lengths_merge_by_exact_id() {
     assert!(a.get(&long_id).is_some());
     assert_eq!(a.list_all().len(), 2);
 
-    // File names never carry credential ids.
     for f in record_files(&vdir) {
         let name = f.file_name().unwrap().to_str().unwrap().to_string();
         assert!(!name.contains(&hex(&prefix_id)), "{name}");
         assert!(!name.contains(&hex(&max_id[..8])), "{name}");
     }
 
-    // A rotation re-writes every winner, including long ids and the tombstone.
     let b_id = b.device_id();
     a.remove_device(&b_id).unwrap();
     let a2 = Vault::open(&vdir, &t.path("a")).unwrap();
@@ -390,7 +378,6 @@ fn presence_helpers_and_recovery_check() {
     let wrong = RecoveryPhrase::from_entropy([9; 32]);
     assert!(!Vault::check_recovery_phrase(&vdir, &wrong).unwrap());
 
-    // Still true after a rotation, and for a phrase of another vault false.
     let b = Vault::join_with_recovery(&vdir, &t.path("b"), &phrase, "b").unwrap();
     a.remove_device(&b.device_id()).unwrap();
     assert!(Vault::check_recovery_phrase(&vdir, &phrase).unwrap());
@@ -398,8 +385,6 @@ fn presence_helpers_and_recovery_check() {
     assert!(!Vault::check_recovery_phrase(&vdir, &other).unwrap());
     assert!(Vault::check_recovery_phrase(&t.path("other"), &other).unwrap());
 }
-
-// ---- vault lifecycle ----
 
 #[test]
 fn create_open_put_get() {
@@ -439,7 +424,6 @@ fn create_open_put_get() {
         assert_eq!(mode(&f), 0o600);
     }
 
-    // Updating a credential replaces it.
     let mut updated = cred(1, "example.com");
     updated.user_display_name = Some("Alice B".into());
     a.put(updated).unwrap();
@@ -494,7 +478,6 @@ fn join_with_recovery_and_backup_state() {
     a.reload().unwrap();
     assert_eq!(a.list_all().len(), 2);
 
-    // A state directory of another vault is refused.
     let (_, _) = Vault::create(&t.path("other"), &t.path("o"), "o").unwrap();
     assert!(matches!(
         Vault::open(&vdir, &t.path("o")),
@@ -521,7 +504,6 @@ fn concurrent_puts_merge() {
     let mut b = Vault::join_with_recovery(&vdir, &t.path("b"), &phrase, "b").unwrap();
     a.reload().unwrap();
 
-    // Neither device sees the other's write before writing.
     a.put(cred(1, "example.com")).unwrap();
     b.put(cred(2, "example.com")).unwrap();
     let mut on_a = cred(3, "example.com");
@@ -539,7 +521,6 @@ fn concurrent_puts_merge() {
     let wb = b.get(&[3; 32]).unwrap().user_name.clone();
     assert_eq!(wa, wb, "both devices pick the same winner");
 
-    // Lamport: a write after seeing the other device's events wins.
     let mut later = cred(3, "example.com");
     later.user_name = Some("later".into());
     a.put(later).unwrap();
@@ -565,11 +546,9 @@ fn tombstones() {
     assert!(a.get(&[1; 32]).is_none());
     assert_eq!(a.list_all().len(), 1);
 
-    // A stale put with an older counter does not resurrect a deleted credential.
     let c = Vault::open(&vdir, &t.path("a")).unwrap();
     assert!(c.get(&[1; 32]).is_none());
 
-    // Re-creating after a delete works (newer counter).
     a.put(cred(1, "example.com")).unwrap();
     b.reload().unwrap();
     assert!(b.get(&[1; 32]).is_some());
@@ -586,7 +565,6 @@ fn tamper_detection_is_per_file() {
     let files = record_files(&vdir);
     assert_eq!(files.len(), 4);
 
-    // Flip one ciphertext byte of the newest record.
     let victim = files.last().unwrap().clone();
     let mut data = fs::read(&victim).unwrap();
     let last = data.len() - 1;
@@ -597,7 +575,6 @@ fn tamper_detection_is_per_file() {
     assert_eq!(report.skipped[0].reason, "record does not authenticate");
     assert_eq!(a.list_all().len(), 2);
 
-    // Moving a valid record to another name fails too (the path is authenticated).
     let moved = victim.with_file_name("00000000000000000999-0011223344556677.rec");
     fs::remove_file(&victim).unwrap();
     fs::copy(&files[1], &moved).unwrap();
@@ -607,10 +584,8 @@ fn tamper_detection_is_per_file() {
             .ends_with("00000000000000000999-0011223344556677.rec")
     }));
 
-    // Garbage with a valid name is skipped, not fatal.
     fs::write(&moved, b"HIRZ").unwrap();
     assert!(a.reload().is_ok());
-    // A truncated gen.info is reported; the keyring keeps the vault usable for this device.
     assert!(Vault::open(&vdir, &t.path("a")).is_ok());
 }
 
@@ -712,7 +687,6 @@ fn rotation_locks_out_removed_device() {
         Err(VaultError::NoAccess)
     ));
 
-    // No key the removed device holds opens a record of the new generation.
     let data = fs::read(&new_file).unwrap();
     let gen_id = format::record_gen(&data).unwrap();
     assert_eq!(gen_id.number, 2);
@@ -726,7 +700,6 @@ fn rotation_locks_out_removed_device() {
         assert!(format::open_record(&data, &e.key, &c.vault_id(), &gen_id, &rel).is_err());
         assert!(format::open_record(&data, &e.key, &c.vault_id(), &e.gen_id, &rel).is_err());
     }
-    // The removed device has no slot in the new generation.
     let gen2 = gen_dirs(&vdir)
         .into_iter()
         .find(|d| d.starts_with("0000000002-"))
@@ -739,13 +712,11 @@ fn rotation_locks_out_removed_device() {
             .exists()
     );
 
-    // A device joining later with the recovery phrase walks the chain to generation 2.
     let d = Vault::join_with_recovery(&vdir, &t.path("d"), &phrase, "d").unwrap();
     assert_eq!(d.report().generation, 2);
     assert_eq!(d.list_all().len(), 4);
     assert!(!d.report().this_device_removed);
 
-    // The removed device forgets its local state; the vault folder stays as it was.
     let before = record_files(&vdir).len();
     fs::write(t.path("c").join("unrelated"), b"x").unwrap();
     assert!(Vault::forget_local(&t.path("c")).unwrap());
@@ -783,7 +754,6 @@ fn garbage_collection_after_rotation() {
         assert_eq!(g.number, 2);
     }
     assert_eq!(a.list_all().len(), 1);
-    // gen.info and recovery.slot of generation 1 stay for the recovery chain.
     let gen1 = vdir.join(KEYS_DIR).join(&gen_dirs(&vdir)[0]);
     assert!(gen1.join("gen.info").exists());
     assert!(gen1.join("recovery.slot").exists());
@@ -792,7 +762,6 @@ fn garbage_collection_after_rotation() {
     assert_eq!(e.list_all().len(), 1);
 }
 
-/// Hides a generation directory as if the sync tool had not delivered it yet.
 fn hide(vault: &Path, number: u32) -> (PathBuf, PathBuf) {
     let name = gen_dirs(vault)
         .into_iter()
@@ -821,7 +790,6 @@ fn concurrent_rotations_converge() {
     b.remove_device(&d.device_id()).unwrap();
     fs::rename(&hidden, &back).unwrap();
 
-    // Each reload may migrate or rotate; a few rounds converge.
     for _ in 0..3 {
         a.reload().unwrap();
         b.reload().unwrap();
@@ -857,7 +825,6 @@ fn straggler_write_is_carried_forward() {
     a.reload().unwrap();
     a.remove_device(&c.device_id()).unwrap();
 
-    // b has not seen the rotation yet and writes under generation 1.
     let (hidden, back) = hide(&vdir, 2);
     b.reload().unwrap();
     b.put(cred(9, "example.net")).unwrap();
@@ -885,13 +852,11 @@ fn mutual_removal_race_is_rejected_until_the_user_decides() {
     a.reload().unwrap();
     x.reload().unwrap();
 
-    // a removes x while x, not yet seeing that, removes a.
     a.remove_device(&x.device_id()).unwrap();
     let (hidden, back) = hide(&vdir, 2);
     x.remove_device(&a.device_id()).unwrap();
     fs::rename(&hidden, &back).unwrap();
 
-    // Every device reaches the same verdict: both rotations are rejected.
     for v in [&mut a, &mut x, &mut b] {
         let r = v.reload().unwrap().clone();
         assert_eq!(r.rejected_generations, 2, "{r:?}");
@@ -903,7 +868,6 @@ fn mutual_removal_race_is_rejected_until_the_user_decides() {
         Err(VaultError::RotationConflict)
     ));
 
-    // The user decides on a that x is the untrusted one.
     a.remove_device(&x.device_id()).unwrap();
     assert_eq!(a.report().generation, 2);
     assert!(!a.report().rotation_conflict);
@@ -925,8 +889,6 @@ fn forged_generation_without_chain_is_ignored() {
     a.put(cred(1, "example.com")).unwrap();
     let a_id = a.device_id();
     let vault_id = a.vault_id();
-    // Anyone with folder access can seal a key to a device public key. Without a gen.info
-    // authenticated by the previous generation's key, the generation is not used.
     let pubkey = hirz_crypto::x25519::public_key(&a.device.x25519_private).unwrap();
     let fake = GenId {
         number: 2,
@@ -1026,7 +988,6 @@ fn backup_export_import() {
     tampered[n] ^= 1;
     assert!(import_backup(&tampered, &phrase, Some(b"correct horse")).is_err());
 
-    // Hostile Argon2 parameters are refused before any work is done.
     let mut hostile = protected.clone();
     let m_offset = 6 + 16 + 1 + 16;
     hostile[m_offset..m_offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
@@ -1087,8 +1048,6 @@ fn concurrent_processes_share_counter() {
     assert!(!sdir.join("lock").exists());
 }
 
-// ---- device pairing ----
-
 use crate::pairing::{PAIRING_DIR, PendingJoin, seal_approval};
 use crate::{PAIRING_LIFETIME_SECS, PairingPoll, PairingRequest};
 
@@ -1116,7 +1075,6 @@ fn pairing_joins_and_shares_credentials() {
     let vdir = t.path("vault");
     let (mut a, phrase) = Vault::create(&vdir, &t.path("a"), "laptop").unwrap();
     a.put(cred(1, "example.com")).unwrap();
-    // A rotation first, so the approval has to carry a chain of two generations.
     let c = Vault::join_with_recovery(&vdir, &t.path("c"), &phrase, "old").unwrap();
     a.reload().unwrap();
     a.remove_device(&c.device_id()).unwrap();
@@ -1153,7 +1111,6 @@ fn pairing_joins_and_shares_credentials() {
     a.reload().unwrap();
     assert_eq!(a.get(&[2; 32]).unwrap().rp_id, "example.org");
 
-    // The joined state is complete: it opens on its own and survives a rotation.
     let b2 = Vault::open(&vdir, &sb).unwrap();
     assert_eq!(b2.list_all().len(), 2);
     let d = Vault::join_with_recovery(&vdir, &t.path("d"), &phrase, "spare").unwrap();
@@ -1175,7 +1132,6 @@ fn pairing_request_is_approved_once_and_can_be_denied() {
     let req = a.pairing_requests().unwrap().remove(0);
     a.approve_pairing(&req).unwrap();
     assert!(matches!(a.approve_pairing(&req), Err(VaultError::NotFound)));
-    // A copy of the used request that comes back is not offered again and is deleted.
     let req_file = format!("{}.req", hex(&req.request_id));
     fs::write(
         vdir.join(PAIRING_DIR).join(&req_file),
@@ -1234,8 +1190,7 @@ fn pairing_requests_expire_and_junk_is_cleaned() {
 
     assert!(a.pairing_requests_at(now).unwrap().is_empty());
     let left = pairing_files(&vdir);
-    // Expired and long-unreadable files are deleted; a request from a device whose clock
-    // runs ahead and a file that may still be syncing stay.
+    // Two files survive: a request from a device whose clock runs ahead, and one still syncing.
     assert_eq!(left.len(), 2, "{left:?}");
     assert!(left.contains(&format!("{}.req", hex(&future.request().request_id))));
     assert!(fresh_junk.exists());
@@ -1265,7 +1220,6 @@ fn tampered_pairing_request_changes_the_words() {
     let seen = a.pairing_requests().unwrap().remove(0);
     assert_eq!(a.pairing_words(&seen).unwrap(), pending.words());
 
-    // Someone with write access swaps in their own key: the words differ.
     let (_, attacker_pub) = hirz_crypto::x25519::generate().unwrap();
     let mut forged = pending.request().clone();
     forged.public_key = attacker_pub;
@@ -1273,7 +1227,6 @@ fn tampered_pairing_request_changes_the_words() {
     let listed = a.pairing_requests().unwrap().remove(0);
     assert_eq!(listed.public_key, attacker_pub);
     assert_ne!(a.pairing_words(&listed).unwrap(), pending.words());
-    // Swapping the file after the user compared the words does not redirect the approval.
     assert!(matches!(
         a.approve_pairing(&seen),
         Err(VaultError::Corrupt(_))
@@ -1283,7 +1236,6 @@ fn tampered_pairing_request_changes_the_words() {
     renamed.name = "desk2".into();
     assert_ne!(a.pairing_words(&renamed).unwrap(), pending.words());
 
-    // A request that reuses an existing device id is never offered.
     let mut takeover = pending.request().clone();
     takeover.device_id = a.device_id();
     fs::write(&path, takeover.encode().unwrap()).unwrap();
@@ -1316,7 +1268,6 @@ fn forged_or_replayed_approval_is_rejected() {
         root: true,
     };
 
-    // Sealed to the right key, but without the vault key.
     fs::write(
         &ok_path,
         seal_approval(&a.vault_id(), &req, &[entry(genesis, [0x42; 32])]).unwrap(),
@@ -1328,7 +1279,6 @@ fn forged_or_replayed_approval_is_rejected() {
     ));
     assert!(!Vault::is_set_up(&sb));
 
-    // A whole fake vault start planted next to the real one.
     let fake = GenId {
         number: 1,
         rotator: [0x77; 16],
@@ -1343,7 +1293,6 @@ fn forged_or_replayed_approval_is_rejected() {
         PairingPoll::Invalid(_)
     ));
 
-    // A genuine approval of another request, copied to this one's name.
     let other = PendingJoin::start(&vdir, &t.path("e"), "tablet").unwrap();
     let other_req = a
         .pairing_requests()
@@ -1362,7 +1311,6 @@ fn forged_or_replayed_approval_is_rejected() {
     ));
     assert!(!Vault::is_set_up(&sb));
 
-    // The genuine approval still works after the forgeries.
     a.approve_pairing(&req).unwrap();
     let b = joined(pending.poll(&sb).unwrap());
     assert_eq!(b.list_all().len(), 1);

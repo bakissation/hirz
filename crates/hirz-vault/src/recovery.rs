@@ -130,7 +130,6 @@ impl RecoveryPhrase {
         Ok(RecoveryPhrase { entropy })
     }
 
-    /// The 24 words separated by single spaces.
     pub fn to_words(&self) -> Zeroizing<String> {
         let indices = Zeroizing::new(to_indices(&self.entropy));
         let mut s = Zeroizing::new(String::with_capacity(WORD_COUNT.saturating_mul(9)));
@@ -158,7 +157,6 @@ impl RecoveryPhrase {
         Ok(out)
     }
 
-    /// X25519 private key that recovery slots are sealed to.
     pub(crate) fn x25519_private(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
         self.derive(INFO_X25519)
     }
@@ -167,12 +165,10 @@ impl RecoveryPhrase {
         Ok(hirz_crypto::x25519::public_key(&*self.x25519_private()?)?)
     }
 
-    /// MAC key that authenticates the genesis generation.
     pub(crate) fn auth_key(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
         self.derive(INFO_AUTH)
     }
 
-    /// Input key material for backup exports.
     pub(crate) fn backup_ikm(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
         self.derive(INFO_BACKUP)
     }

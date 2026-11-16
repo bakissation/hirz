@@ -452,7 +452,6 @@ fn vault_and_uv_seeds(o: &mut Out) {
     }
 }
 
-/// The vault's field encoding: version byte, then `tag || u16 length || value` in tag order.
 fn tlv(version: u8, fields: &[(u8, &[u8])]) -> Vec<u8> {
     let mut out = vec![version];
     for (tag, value) in fields {

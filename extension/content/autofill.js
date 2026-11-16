@@ -1,18 +1,6 @@
-// ISOLATED world, document_start, every frame, loaded before content/relay.js.
-// The suggestion list for conditional mediation (passkey autofill). It is only a
-// hint: choosing an account starts a normal hirz request, and the native host still
-// asks the user in its own prompt before anything is signed.
-//
-// What the page can and cannot see:
-// - The list lives in a closed shadow root of an element this script creates and
-//   attaches before the page holds a reference to it. Page scripts cannot reach the
-//   nodes inside, and the names are drawn as CSS generated content, which the
-//   page's find and selection APIs do not see.
-// - Only trusted events count. The page can dispatch events at the element, but they
-//   are untrusted and never reach the rows.
-// - The element is only added after the user clicks into a field marked
-//   autocomplete="webauthn", tabs into it, or presses an arrow key in it. From then
-//   on the page can see that it exists and how large it is.
+// ISOLATED world, document_start, every frame, before content/relay.js. The suggestion list for
+// conditional mediation is only a hint: the native host still asks the user before anything is
+// signed. What the page can and cannot see: docs/extension.md, "Conditional mediation".
 "use strict";
 
 globalThis.hirzAutofill = (() => {
@@ -318,14 +306,12 @@ globalThis.hirzAutofill = (() => {
     return out;
   }
 
-  // A conditional request with accounts to offer. Replaces any earlier one.
   function start(rid, accounts, onSelect) {
     if (req) stop(req.rid);
     req = { rid, accounts: clean(accounts), onSelect, busy: false };
     listen(true);
   }
 
-  // The request ended: resolved, aborted, superseded or the document is going away.
   function stop(rid) {
     if (!req || req.rid !== rid) return;
     listen(false);
@@ -334,7 +320,6 @@ globalThis.hirzAutofill = (() => {
     ui = null;
   }
 
-  // The chosen account was not used (prompt cancelled or failed): offer the list again.
   function resume(rid) {
     if (req && req.rid === rid) req.busy = false;
   }

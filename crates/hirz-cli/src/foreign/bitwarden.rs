@@ -14,7 +14,6 @@ use hirz_crypto::{Secret, Zeroizing, aes_cbc_hmac};
 use hirz_proto::json::{Json, Limits};
 use hirz_vault::{CredentialRecord, MAX_CREDENTIAL_ID_LEN, MAX_PKCS8_LEN, MAX_USER_ID_LEN};
 
-/// Largest number of vault items (of any kind) in one export.
 pub const MAX_ITEMS: usize = 200_000;
 
 const LIMITS: Limits = Limits {
@@ -31,7 +30,6 @@ const ARGON2_PARALLELISM: core::ops::RangeInclusive<u64> = 1..=16;
 
 const NOT_BITWARDEN: &str = "The file is not valid JSON, so it is not a Bitwarden JSON export.";
 
-/// Key derivation of a password protected export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kdf {
     Pbkdf2 {
@@ -90,7 +88,6 @@ impl EncString {
     }
 }
 
-/// The encryption and MAC keys derived from the file password.
 #[derive(Debug)]
 pub struct StretchedKey {
     enc: Zeroizing<[u8; 32]>,
@@ -105,8 +102,7 @@ impl StretchedKey {
         }
     }
 
-    /// HKDF-Expand of the KDF output with the infos "enc" and "mac", as Bitwarden stretches
-    /// keys.
+    /// HKDF-Expand of the KDF output with the infos "enc" and "mac", as Bitwarden stretches keys.
     fn stretch(master: &[u8]) -> Result<StretchedKey, hirz_crypto::CryptoError> {
         let mut key = StretchedKey::from_parts([0; 32], [0; 32]);
         hirz_crypto::hkdf_sha256_expand(master, b"enc", key.enc.as_mut_slice())?;
@@ -115,14 +111,12 @@ impl StretchedKey {
     }
 }
 
-/// Why a password protected export could not be opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenError {
     WrongPassword,
     Damaged,
 }
 
-/// A password protected export, before the password is known.
 #[derive(Debug, Clone)]
 pub struct Protected {
     salt: String,
@@ -159,7 +153,6 @@ impl Protected {
         derive(&self.salt, self.kdf, password)
     }
 
-    /// Checks the key against the validation value, then decrypts the inner export.
     pub fn decrypt_with(&self, key: &StretchedKey) -> Result<Secret, OpenError> {
         self.validation.open(key).map_err(|e| match e {
             hirz_crypto::CryptoError::Auth => OpenError::WrongPassword,
@@ -176,7 +169,6 @@ impl Protected {
     }
 }
 
-/// What an export file holds.
 #[derive(Debug)]
 pub enum Export {
     Plain(Parsed),
@@ -250,13 +242,10 @@ fn classify(doc: &Json, now: u64) -> Result<Export, String> {
     items(doc, now).map(Export::Plain)
 }
 
-/// Reads an export file: the passkeys of an unencrypted export, or the parameters of a
-/// password protected one.
 pub fn read(data: &[u8], now: u64) -> Result<Export, String> {
     with_json(data, &LIMITS, NOT_BITWARDEN, |doc| classify(doc, now))
 }
 
-/// Reads the decrypted contents of a password protected export.
 pub fn read_decrypted(data: &[u8], now: u64) -> Result<Parsed, String> {
     with_json(
         data,
@@ -385,7 +374,6 @@ fn passkey(c: &Json, now: u64) -> Result<CredentialRecord, String> {
     })
 }
 
-/// Encrypts an export as a password protected Bitwarden export, for tests.
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub fn protect(plain: &[u8], password: &str, salt: &str, kdf: Kdf) -> String {
@@ -425,7 +413,6 @@ pub fn protect(plain: &[u8], password: &str, salt: &str, kdf: Kdf) -> String {
     )
 }
 
-/// One `fido2Credentials` entry as Bitwarden exports it, for tests.
 #[cfg(test)]
 pub fn fido2_entry(id: &str, rp: &str, user: &str, curve: &str, pkcs8: &[u8]) -> String {
     format!(
@@ -438,7 +425,6 @@ pub fn fido2_entry(id: &str, rp: &str, user: &str, curve: &str, pkcs8: &[u8]) ->
     )
 }
 
-/// An unencrypted export with one login per entry list and one secure note, for tests.
 #[cfg(test)]
 pub fn plain_export(logins: &[Vec<String>]) -> String {
     let mut items: Vec<String> = logins

@@ -1,7 +1,5 @@
-//! systemd socket activation (the `sd_listen_fds` protocol) without libsystemd.
-//!
-//! systemd passes listening sockets starting at fd 3 and sets `LISTEN_PID` to the pid of
-//! the service process and `LISTEN_FDS` to their count.
+//! systemd socket activation (the `sd_listen_fds` protocol) without libsystemd. Descriptors
+//! start at fd 3, `LISTEN_PID` must be our pid, `LISTEN_FDS` is the count.
 
 use std::fmt;
 use std::io;
@@ -14,7 +12,6 @@ pub const MAX_LISTEN_FDS: usize = 16;
 
 static TAKEN: AtomicBool = AtomicBool::new(false);
 
-/// Why the activation environment was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListenEnvError {
     InvalidPid,
@@ -34,8 +31,7 @@ impl fmt::Display for ListenEnvError {
 
 impl std::error::Error for ListenEnvError {}
 
-/// Pure parser of `LISTEN_PID` and `LISTEN_FDS`. Returns the number of passed descriptors,
-/// or 0 when the variables are absent or meant for another process.
+/// 0 when the variables are absent or meant for another process.
 pub fn parse_listen_env(
     listen_pid: Option<&str>,
     listen_fds: Option<&str>,
@@ -61,10 +57,8 @@ pub fn parse_listen_env(
     Ok(count)
 }
 
-/// Takes ownership of the descriptors passed by systemd and marks them close-on-exec.
-/// Returns an empty list when the process was not socket activated. Only the first call
-/// can return descriptors; later calls return an empty list, so no descriptor is ever owned
-/// twice.
+/// Takes ownership and sets close-on-exec. Only the first call returns descriptors, so none
+/// is ever owned twice.
 pub fn listen_fds() -> io::Result<Vec<OwnedFd>> {
     let pid_var = std::env::var("LISTEN_PID").ok();
     let fds_var = std::env::var("LISTEN_FDS").ok();
@@ -85,9 +79,8 @@ pub fn listen_fds() -> io::Result<Vec<OwnedFd>> {
         if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: systemd passed this open descriptor to this pid (LISTEN_PID matched) and
-        // nothing else in the process owns it: the TAKEN flag guarantees that this loop runs
-        // at most once per process, so the OwnedFd is the unique owner.
+        // SAFETY: systemd passed this open descriptor to this pid and the TAKEN flag makes this loop
+        // run at most once per process, so the OwnedFd is the unique owner.
         out.push(unsafe { OwnedFd::from_raw_fd(fd) });
         fd = fd.saturating_add(1);
     }

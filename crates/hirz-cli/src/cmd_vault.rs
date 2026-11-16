@@ -104,7 +104,6 @@ fn word_matches(typed: &str, word: &str) -> bool {
     t == word || (t.chars().count() >= 4 && word.starts_with(&t))
 }
 
-/// Asks for a few words of the phrase. Returns false when the user gave up.
 fn quiz(ctx: &mut Ctx<'_>, words: &[&str]) -> CliResult<bool> {
     for round in 0..QUIZ_ROUNDS {
         if round > 0 {
@@ -233,7 +232,6 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
     Ok(Exit::Ok)
 }
 
-/// The vault folder and device name for `join`, after the checks both join modes share.
 pub(crate) fn join_target(
     ctx: &Ctx<'_>,
     name: Option<String>,
@@ -311,7 +309,6 @@ pub fn join(ctx: &mut Ctx<'_>, name: Option<String>, request: bool) -> CliResult
     Ok(Exit::Ok)
 }
 
-/// Said once this computer has joined, by either join mode.
 pub(crate) fn say_sync_hint(ctx: &mut Ctx<'_>) -> CliResult {
     ctx.say(&format!(
         "Passkeys you add on any device appear on the others once your sync tool has copied\n\
@@ -541,7 +538,6 @@ pub fn devices(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
     Ok(Exit::Ok)
 }
 
-/// Distinct sites with the number of passkeys for each, sorted by site.
 pub fn sites(records: &[&CredentialRecord]) -> Vec<(String, usize)> {
     let mut map: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for r in records {
@@ -643,7 +639,6 @@ pub fn remove_device(ctx: &mut Ctx<'_>, prefix: &str, yes: bool) -> CliResult<Ex
     Ok(Exit::Ok)
 }
 
-/// Deletes this device's keys from the state folder. The vault folder is never touched.
 pub fn forget_local(ctx: &mut Ctx<'_>) -> CliResult<Exit> {
     let state = ctx.env.state_dir().to_path_buf();
     if !ctx.env.device_state_exists() {

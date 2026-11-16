@@ -19,11 +19,8 @@ use hirz_proto::auth_data::{AttestedCredentialData, AuthenticatorData, FLAG_BE, 
 use hirz_proto::cbor::{MapBuilder, Value};
 use hirz_proto::cose;
 
-/// Credential id the fakes report when the request names none.
 pub const FAKE_CREDENTIAL_ID: [u8; 32] = [0x11; 32];
-/// User handle the fakes report.
 pub const FAKE_USER_HANDLE: &[u8] = b"user-0001";
-/// Placeholder signature bytes; nothing is ever signed.
 pub const FAKE_SIGNATURE: &[u8] = &[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
 
 fn public_key(alg: i64) -> Vec<u8> {
@@ -93,7 +90,6 @@ fn hmac_output(req: &GetAssertionRequest) -> Option<Vec<u8>> {
     })
 }
 
-/// CTAP engine adapter that approves everything without a prompt and never signs.
 #[derive(Debug, Default)]
 pub struct NoSignAuthenticator;
 
@@ -144,7 +140,6 @@ impl Authenticator for NoSignAuthenticator {
     }
 }
 
-/// WebAuthn engine that approves everything with UP, UV and BE set and never signs.
 #[derive(Debug, Default)]
 pub struct NoSignEngine;
 
@@ -187,7 +182,6 @@ impl hirz_webauthn::Engine for NoSignEngine {
     }
 }
 
-/// Origins the webauthn targets pick from with one input byte.
 pub const ORIGINS: [&str; 4] = [
     "https://login.example.com",
     "https://example.com",

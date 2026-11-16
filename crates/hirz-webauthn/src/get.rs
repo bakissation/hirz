@@ -16,19 +16,16 @@ use hirz_crypto::sha256;
 use hirz_proto::client_data::{self, CeremonyType};
 use hirz_proto::json::Json;
 
-/// A validated get ceremony, ready for the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetPlan {
     pub request: GetAssertionRequest,
     /// The exact clientDataJSON whose SHA-256 is `request.client_data_hash`.
     pub client_data_json: String,
-    /// The RP asked for prf.
     pub prf: bool,
 }
 
-/// Resolves the prf inputs to one salt set for the engine. `evalByCredential` entries
-/// override `eval` per credential; the engine contract carries a single salt set, so
-/// requests whose allowed credentials would need different salts are left to Firefox.
+/// `evalByCredential` entries override `eval` per credential; the engine takes a single salt set,
+/// so requests whose allowed credentials need different salts are left to Firefox.
 fn prf_salts(
     prf: &Obj<'_>,
     allow_list: &[Vec<u8>],
@@ -78,7 +75,6 @@ fn prf_salts(
     Ok(chosen.flatten())
 }
 
-/// Validates request options for a top-level, same-origin call from `origin`.
 pub fn prepare_get(options: &Json, origin: &Origin) -> core::result::Result<GetPlan, Error> {
     let o = Obj::new(options, "options")?;
 
@@ -125,15 +121,13 @@ pub fn prepare_get(options: &Json, origin: &Origin) -> core::result::Result<GetP
     })
 }
 
-/// A validated account lookup for conditional mediation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListPlan {
     pub rp_id: String,
     pub allow_list: Vec<Vec<u8>>,
 }
 
-/// Validates `{rpId?, allowCredentials?}` for a top-level, same-origin call from
-/// `origin`, with the same RP ID rules as [`prepare_get`]. Other members are ignored.
+/// Same RP ID rules as [`prepare_get`]; other members are ignored.
 pub fn prepare_list(options: &Json, origin: &Origin) -> core::result::Result<ListPlan, Error> {
     let o = Obj::new(options, "options")?;
     let rp_id = o.opt_str("rpId", MAX_RP_ID_CHARS)?;

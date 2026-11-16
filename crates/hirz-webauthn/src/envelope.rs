@@ -1,23 +1,6 @@
-//! The message envelope shared with the Firefox extension, and the pure entry point the
-//! native host calls for every request.
-//!
-//! Request: `{"v":1,"id":n,"type":"create"|"get"|"list"|"hello"|"capabilities","origin":s,
-//! "topOrigin"?:s|null,"crossOrigin"?:bool,"options":{...}}`.
-//! Success: `{"v":1,"id":n,"ok":true,...}` with `credential`, `accounts`, `version` or
-//! `capabilities`. Failure: `{"v":1,"id":n|null,"ok":false,"error":name,"message":s}`.
-//!
-//! `list` backs the extension's conditional mediation suggestions: `options` is
-//! `{rpId?, allowCredentials?}`, validated like `get`, and the reply carries
-//! `accounts: [{id, name, displayName}]`. It never returns key material.
-//!
-//! Decisions:
-//! - An unknown `v` gets `NotHandled`: a newer extension then falls back to Firefox
-//!   instead of failing the page.
-//! - An unknown `type` (and any other malformed envelope) gets `UnknownError`: it is a
-//!   bug in the caller, not a ceremony Firefox could run instead.
-//! - `origin` is the parent-process `sender.origin`. `topOrigin` and `crossOrigin` are
-//!   only used to refuse frames: any request not same-origin with its top-level
-//!   document gets `NotHandled`.
+//! The message envelope shared with the Firefox extension, and the pure entry point the native
+//! host calls for every request. Wire format, errors and fallbacks: docs/extension.md, "Native
+//! messaging protocol".
 
 use crate::common::{MAX_DESCRIPTORS, MAX_NAME_CHARS};
 use crate::create::prepare_create;
@@ -33,13 +16,11 @@ use hirz_proto::json::Json;
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
-/// Largest integer that survives a round trip through a JavaScript number.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The authenticator as seen by the extension frontend. `origin_for_display` is the
-/// validated origin, for the approval prompt only.
+/// `origin_for_display` is the validated origin, for the approval prompt only.
 pub trait Engine {
     fn make_credential(
         &mut self,
@@ -53,14 +34,11 @@ pub trait Engine {
         origin_for_display: &str,
     ) -> Result<AssertionResponse, CoreError>;
 
-    /// True when a host-verified method (polkit, fprintd, PIN) is configured, so that
-    /// `userVerifyingPlatformAuthenticator` is reported honestly.
+    /// True when a host-verified method is configured, so `userVerifyingPlatformAuthenticator` is reported honestly.
     fn user_verification_available(&self) -> bool;
 
-    /// The accounts a `get` for `rp_id` could offer without user verification: with an
-    /// empty `allow_list` the discoverable credentials of the RP, otherwise the listed
-    /// ones that belong to the RP; credProtect 3 never, credProtect 2 only when listed.
-    /// No prompt, no signature. The default lists nothing, so Firefox keeps the request.
+    /// Accounts a `get` could offer without user verification: credProtect 3 never, credProtect 2 only
+    /// when listed. No prompt, no signature. The default lists nothing, so Firefox keeps the request.
     fn list_accounts(
         &mut self,
         rp_id: &str,
@@ -81,7 +59,6 @@ fn reply(id: Option<u64>, ok: bool, body: Vec<(&str, Json)>) -> Json {
     obj(members)
 }
 
-/// The error reply for `err`.
 pub fn error_reply(id: Option<u64>, err: &Error) -> Json {
     reply(
         id,
@@ -128,7 +105,6 @@ fn accounts(list: &[CandidateAccount]) -> Json {
     )
 }
 
-/// Handles one request and returns the reply to send back. Never panics.
 pub fn handle(request: &Json, engine: &mut dyn Engine) -> Json {
     let id = request
         .get("id")

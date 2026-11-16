@@ -39,50 +39,34 @@ fn to_key(secret: &[u8]) -> Result<VaultKey, VaultError> {
     Ok(Zeroizing::new(arr))
 }
 
-/// A file the scan could not use, with the reason. Never fatal for the vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedFile {
-    /// Path relative to the vault directory.
     pub path: String,
     pub reason: &'static str,
 }
 
-/// What the last `reload` found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
-    /// Number of the key generation in use.
     pub generation: u32,
-    /// Live credentials.
     pub credentials: usize,
-    /// Events merged into the view.
     pub events: usize,
-    /// Files and directories that are not part of the format (temp files, sync-tool conflict
-    /// copies, unknown names). Ignored.
+    /// Temp files, sync-tool conflict copies and unknown names; ignored.
     pub ignored_files: usize,
-    /// Files with a valid name that are corrupt or fail authentication. Ignored.
+    /// Valid name but corrupt or failing authentication; ignored.
     pub skipped: Vec<SkippedFile>,
-    /// Record files under a key generation other than the current one.
     pub other_generation_files: usize,
-    /// Key generations rejected because they conflict with a device removal.
     pub rejected_generations: usize,
     /// Rejected generations exist above the current one: two rotations removed each other's
-    /// creators. Content writes are refused until the user removes the untrusted device
-    /// again (after revoking its access to the synced folder).
+    /// creators. Content writes are refused until the user removes the untrusted device again.
     pub rotation_conflict: bool,
-    /// A newer key generation exists that this device holds no key for (it was removed, or
-    /// was not yet known when the vault key was rotated).
+    /// A newer key generation exists that this device holds no key for.
     pub locked_out: bool,
-    /// A key generation this device can authenticate lists this device as removed: another
-    /// device ran `remove-device` for it. An honest frontend stops using the vault then.
+    /// Another device ran `remove-device` for this one; an honest frontend stops using the vault.
     pub this_device_removed: bool,
-    /// The highest event counter in the folder is lower than one this device saw before:
-    /// files were withheld or rolled back.
+    /// The highest event counter in the folder is lower than one seen before: files were withheld or rolled back.
     pub rollback_suspected: bool,
-    /// Own events re-written under the current generation during this reload.
     pub migrated: usize,
-    /// This reload rotated the vault key (a removed device still held a key slot).
     pub rotated: bool,
-    /// Superseded files of older generations deleted during this reload.
     pub collected: usize,
     /// Maintenance writes failed (for example a read-only folder); reading still worked.
     pub maintenance_error: Option<VaultError>,
@@ -98,7 +82,6 @@ impl ScanReport {
     }
 }
 
-/// A device of the vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub id: DeviceId,
@@ -141,8 +124,8 @@ struct Loaded {
     own: bool,
 }
 
-/// Merge order: origin counter, origin device, tombstone over put, then the file path so the
-/// result is deterministic even for exact duplicates.
+/// Merge order: origin counter, origin device, tombstone over put, then file path, so even exact
+/// duplicates resolve deterministically.
 type OrderKey = (u64, DeviceId, u8, String);
 
 fn order_key(event: &Event, rel: &str) -> OrderKey {
@@ -166,7 +149,6 @@ struct View {
     devices: BTreeMap<DeviceId, (OrderKey, Event)>,
     removals: BTreeMap<DeviceId, (OrderKey, Event)>,
     backup: Option<(OrderKey, Event)>,
-    /// Removed per the key generation chain.
     removed_by_gen: BTreeSet<DeviceId>,
     max_lamport: u64,
     events: usize,
@@ -209,7 +191,6 @@ impl View {
         }
     }
 
-    /// The order key the view already holds for the entity this event is about.
     fn existing_key(&self, event: &Event) -> Option<(u64, DeviceId, u8)> {
         let found = match &event.kind {
             EventKind::Put(rec) => self.creds.get(&rec.credential_id),
@@ -247,7 +228,6 @@ impl View {
         })
     }
 
-    /// Every winning event, for re-writing under a new generation.
     fn winners(&self) -> Vec<Event> {
         let mut out: Vec<Event> = Vec::new();
         out.extend(self.creds.values().map(|(_, e)| e.clone()));
@@ -272,10 +252,9 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, VaultError> {
     }
 }
 
-/// Result of resolving the key generation chain.
 #[derive(Debug, Default)]
 struct Resolved {
-    /// Authentic, non-rejected generations. `key` is None where this device has no slot.
+    /// `key` is None where this device has no slot.
     nodes: BTreeMap<GenId, GenNode>,
     rejected: BTreeSet<GenId>,
 }
@@ -330,11 +309,9 @@ fn open_candidate_key(
     }
 }
 
-/// Builds the generation graph. A generation is authentic when its gen.info opens under its
-/// parent's key (or, for the genesis, is anchored in the keyring or the recovery key). Its
-/// own key comes from the keyring or this device's slot and must match the commitment.
-/// Generations without a key for this device still take part in conflict detection, so all
-/// devices that hold the parent key reach the same decision.
+/// Authentic means gen.info opens under the parent's key (genesis: anchored in the keyring or the
+/// recovery key). Generations without a key for this device still take part in conflict detection,
+/// so every device holding the parent key reaches the same decision.
 fn resolve(
     vault_dir: &Path,
     vault_id: &[u8; 16],
@@ -484,11 +461,8 @@ fn ancestors(nodes: &BTreeMap<GenId, GenNode>, id: GenId) -> BTreeSet<GenId> {
     out
 }
 
-/// A generation is rejected when a generation outside its own line of descent removed the
-/// device that created it (a removed device racing the rotation that removed it), and so is
-/// everything built on top of a rejected generation. All accusations count at once, so two
-/// generations that remove each other's creators are both rejected: hirz cannot tell which
-/// device is the legitimate one, and the user has to decide.
+/// Rejects a generation whose creator was removed by a generation outside its line of descent, and
+/// everything built on it; all accusations count at once. See docs/vault-format.md, 9.3.
 fn reject_conflicting(res: &mut Resolved) {
     let nodes = &res.nodes;
     let ids: Vec<GenId> = nodes.keys().copied().collect();
@@ -620,7 +594,6 @@ fn is_complete(node: &GenNode, loaded: &[Loaded]) -> bool {
     u64::try_from(found.len()).is_ok_and(|n| n == node.info.reemit_count)
 }
 
-/// Everything a scan learned, before it becomes the vault's view.
 #[derive(Debug)]
 struct Snapshot {
     resolved: Resolved,
@@ -679,7 +652,6 @@ fn read_counter(state_dir: &Path) -> Result<Counter, VaultError> {
     }
 }
 
-/// An encrypted, folder-synced credential vault opened by one device.
 pub struct Vault {
     vault_dir: PathBuf,
     state_dir: PathBuf,
@@ -688,17 +660,13 @@ pub struct Vault {
     pub(crate) keyring: Keyring,
     current: GenId,
     current_key: VaultKey,
-    /// Devices that hold a slot in the current generation.
     slot_holders: BTreeSet<DeviceId>,
     current_created_at: u64,
-    /// The current generation and its ancestors.
     current_chain: BTreeSet<GenId>,
-    /// Record files under older or sibling generations, candidates for garbage collection.
     old_files: Vec<Loaded>,
-    /// Seconds a generation must be current before superseded older files are deleted, so a
-    /// device that receives the deletions before the new files never sees an empty vault.
+    /// Seconds a generation must be current before superseded files are deleted, so a device that
+    /// receives the deletions before the new files never sees an empty vault.
     pub(crate) gc_grace: u64,
-    /// Own events under other generations that may need to be carried forward.
     stale_own: Vec<Loaded>,
     view: View,
     report: ScanReport,
@@ -721,19 +689,16 @@ enum Origin {
 }
 
 impl Vault {
-    /// True when `vault_dir` holds a vault header. Says nothing about whether it is valid.
+    /// Says nothing about whether the header is valid.
     pub fn exists(vault_dir: &Path) -> bool {
         vault_dir.join(HEADER_NAME).exists()
     }
 
-    /// True when `state_dir` holds the local state of a device (this machine joined a vault).
     pub fn is_set_up(state_dir: &Path) -> bool {
         state_dir.join(STATE_DEVICE).exists()
     }
 
-    /// Deletes this device's local state (device secret, keyring, event counter) from
-    /// `state_dir`. The vault folder is never touched, and other files in `state_dir` stay.
-    /// Returns whether anything was deleted.
+    /// The vault folder is never touched, and other files in `state_dir` stay.
     pub fn forget_local(state_dir: &Path) -> Result<bool, VaultError> {
         if !state_dir.is_dir() {
             return Ok(false);
@@ -750,9 +715,8 @@ impl Vault {
         Ok(found)
     }
 
-    /// Checks that `phrase` is the recovery phrase of the vault in `vault_dir`, without local
-    /// device state and without reading any credential: it walks the key generations with
-    /// the recovery key, as joining does. Errors only when the header is missing or unreadable.
+    /// Walks the key generations with the recovery key, as joining does, without local device state
+    /// or reading any credential. Errors only when the header is missing or unreadable.
     pub fn check_recovery_phrase(
         vault_dir: &Path,
         phrase: &RecoveryPhrase,
@@ -770,8 +734,7 @@ impl Vault {
         Ok(resolved.keyed().next().is_some())
     }
 
-    /// Creates a new vault in `vault_dir` and registers this device with its local state in
-    /// `state_dir`. Returns the recovery phrase, which must be shown to the user once.
+    /// Returns the recovery phrase, which must be shown to the user once.
     pub fn create(
         vault_dir: &Path,
         state_dir: &Path,
@@ -852,7 +815,6 @@ impl Vault {
         Ok((vault, phrase))
     }
 
-    /// Opens an existing vault with this device's local state.
     pub fn open(vault_dir: &Path, state_dir: &Path) -> Result<Vault, VaultError> {
         let header = read_header(vault_dir)?;
         let device = match read_optional(&state_dir.join(STATE_DEVICE))? {
@@ -872,7 +834,6 @@ impl Vault {
         Ok(vault)
     }
 
-    /// Adds this machine as a new device of an existing vault, using the recovery phrase.
     pub fn join_with_recovery(
         vault_dir: &Path,
         state_dir: &Path,
@@ -979,8 +940,7 @@ impl Vault {
         self.write(vec![(EventKind::DeviceAdded(ann), Origin::Fresh)])
     }
 
-    /// Re-reads the folder (after the sync tool brought new files), then carries this device's
-    /// own events forward to the current key generation and finishes a pending rotation.
+    /// Re-reads the folder, carries own events forward to the current generation and finishes a pending rotation.
     pub fn reload(&mut self) -> Result<&ScanReport, VaultError> {
         self.scan()?;
         self.maintain();
@@ -988,8 +948,8 @@ impl Vault {
     }
 
     fn maintain(&mut self) {
-        // During a rotation conflict the current key may be held by the device being
-        // removed, so nothing is done automatically until the user removes it again.
+        // During a rotation conflict the current key may be held by the device being removed, so
+        // nothing is automatic until the user removes it again.
         if self.report.rotation_conflict {
             return;
         }
@@ -1143,8 +1103,7 @@ impl Vault {
         Ok(())
     }
 
-    /// Content writes also stop during a rotation conflict: the current key may be held by
-    /// the device the user is trying to remove.
+    /// Content writes also stop during a rotation conflict: the current key may be held by the device being removed.
     fn content_writable(&self) -> Result<(), VaultError> {
         self.writable()?;
         if self.report.rotation_conflict {
@@ -1153,7 +1112,6 @@ impl Vault {
         Ok(())
     }
 
-    /// Reserves `n` consecutive event counters under the state lock.
     fn allocate(&self, n: u64) -> Result<u64, VaultError> {
         let _lock = StateLock::acquire(&self.state_dir)?;
         let mut c = read_counter(&self.state_dir)?;
@@ -1164,7 +1122,6 @@ impl Vault {
         Ok(start)
     }
 
-    /// Writes events under `gen_id`, consuming counters from `start`.
     fn write_under(
         &self,
         gen_id: &GenId,
@@ -1203,7 +1160,6 @@ impl Vault {
         Ok(written)
     }
 
-    /// Writes events under the current generation and merges them into the view.
     fn write(&mut self, events: Vec<(EventKind, Origin)>) -> Result<(), VaultError> {
         self.writable()?;
         let n = u64::try_from(events.len()).map_err(|_| VaultError::InvalidParameters)?;
@@ -1226,9 +1182,8 @@ impl Vault {
             .is_some_and(|existing| existing >= key)
     }
 
-    /// Carries this device's own events from other generations into the current one, keeping
-    /// their merge identity. Only events whose author tag verifies are carried, so a removed
-    /// device holding an old key cannot plant events for this device to adopt.
+    /// Only events whose author tag verifies are carried, so a removed device holding an old key
+    /// cannot plant events for this device to adopt.
     fn migrate_stale(&mut self) -> Result<usize, VaultError> {
         self.writable()?;
         let stale = core::mem::take(&mut self.stale_own);
@@ -1248,8 +1203,8 @@ impl Vault {
         Ok(n)
     }
 
-    /// Deletes files of older generations whose content the current generation already holds
-    /// (or supersedes), and device slots of older generations, once the grace period passed.
+    /// Deletes older-generation files the current generation already holds or supersedes, and old
+    /// device slots, once the grace period passed.
     fn collect_garbage(&mut self) -> Result<usize, VaultError> {
         if self.current.number <= 1 || now() < self.current_created_at.saturating_add(self.gc_grace)
         {
@@ -1273,8 +1228,7 @@ impl Vault {
             && self.slot_holders.iter().any(|d| removed.contains(d))
     }
 
-    /// Creates the next key generation without `extra_removed` and every device already
-    /// removed, re-writes every winning event under it, then deletes the superseded files.
+    /// The next generation excludes `extra_removed` and every already removed device.
     fn rotate(&mut self, extra_removed: &[DeviceId]) -> Result<(), VaultError> {
         self.writable()?;
         let vault_id = self.header.vault_id;
@@ -1367,8 +1321,7 @@ impl Vault {
         self.scan()
     }
 
-    /// Device slots of older generations are no longer needed once a newer one exists;
-    /// gen.info and recovery.slot stay because they form the chain a recovery walks.
+    /// gen.info and recovery.slot stay: they form the chain a recovery walks.
     fn remove_old_slots(&self, newest: &GenId) -> Result<(), VaultError> {
         let keys_dir = self.vault_dir.join(KEYS_DIR);
         for name in fsutil::list(&keys_dir)? {
@@ -1388,8 +1341,6 @@ impl Vault {
         Ok(())
     }
 
-    // ---- public queries ----
-
     pub fn device_id(&self) -> DeviceId {
         self.device.device_id
     }
@@ -1398,7 +1349,6 @@ impl Vault {
         self.header.vault_id
     }
 
-    /// The report of the last scan.
     pub fn report(&self) -> &ScanReport {
         &self.report
     }
@@ -1438,16 +1388,13 @@ impl Vault {
         self.view.backup.is_some() || self.devices().iter().filter(|d| !d.removed).count() >= 2
     }
 
-    // ---- public writes ----
-
-    /// Stores a credential (new, or replacing the one with the same credential id).
     pub fn put(&mut self, record: CredentialRecord) -> Result<(), VaultError> {
         record.validate()?;
         self.content_writable()?;
         self.write(vec![(EventKind::Put(Box::new(record)), Origin::Fresh)])
     }
 
-    /// Deletes a credential. Returns false if it does not exist.
+    /// Returns false if it does not exist.
     pub fn delete(&mut self, credential_id: &[u8]) -> Result<bool, VaultError> {
         let Some(id) = self
             .view
@@ -1461,8 +1408,6 @@ impl Vault {
         Ok(true)
     }
 
-    /// Records that the user completed a backup (for example wrote down the recovery phrase
-    /// and re-entered it, or exported a backup file).
     pub fn confirm_backup(&mut self) -> Result<(), VaultError> {
         self.content_writable()?;
         self.write(vec![(
@@ -1471,8 +1416,8 @@ impl Vault {
         )])
     }
 
-    /// Removes a device and rotates the vault key so it cannot read anything written from now
-    /// on. It keeps whatever it already decrypted.
+    /// Rotates the vault key so the device cannot read anything written from now on; it keeps
+    /// whatever it already decrypted.
     pub fn remove_device(&mut self, device_id: &DeviceId) -> Result<(), VaultError> {
         self.scan()?;
         if *device_id == self.device.device_id {
@@ -1481,8 +1426,8 @@ impl Vault {
         if !self.view.devices.contains_key(device_id) {
             return Err(VaultError::UnknownDevice);
         }
-        // The user has decided this device is untrusted: discard key generations it created
-        // outside the current line, which resolves a rotation conflict it caused.
+        // The user decided this device is untrusted: discard key generations it created outside the
+        // current line, which resolves a rotation conflict it caused.
         let keys_dir = self.vault_dir.join(KEYS_DIR);
         let mut discarded = false;
         for name in fsutil::list(&keys_dir)? {
@@ -1504,10 +1449,6 @@ impl Vault {
         self.rotate(&[*device_id])
     }
 
-    // ---- device pairing (pairing.rs) ----
-
-    /// Pairing requests that can still be approved, oldest first. Also deletes expired,
-    /// already used and long unreadable pairing files.
     pub fn pairing_requests(&mut self) -> Result<Vec<PairingRequest>, VaultError> {
         self.pairing_requests_at(now())
     }
@@ -1523,8 +1464,7 @@ impl Vault {
         pairing::list_requests(&self.vault_dir, at, &known)
     }
 
-    /// The four words the new device shows for `req`, computed from this device's own view of
-    /// the vault (vault id and genesis), never from claims in the request.
+    /// Computed from this device's own view of the vault, never from claims in the request.
     pub fn pairing_words(&self, req: &PairingRequest) -> Result<String, VaultError> {
         let genesis = self.genesis()?;
         let fingerprint = pairing::genesis_fingerprint(&self.vault_dir, &genesis)?;
@@ -1540,9 +1480,7 @@ impl Vault {
             .ok_or(VaultError::NoAccess)
     }
 
-    /// Approves `req` exactly as shown to the user: seals every key generation from the
-    /// genesis to the current one to its public key, writes its key slot and a `device added`
-    /// event, then deletes the request. The caller must have had the user compare the words.
+    /// Approves `req` exactly as shown to the user; the caller must have had the user compare the words.
     pub fn approve_pairing(&mut self, req: &PairingRequest) -> Result<(), VaultError> {
         self.approve_pairing_at(req, now())
     }
@@ -1602,31 +1540,24 @@ impl Vault {
         Ok(())
     }
 
-    /// Deletes a pairing request. Returns false when it was already gone.
     pub fn deny_pairing(&self, request_id: &[u8; 16]) -> Result<bool, VaultError> {
         pairing::remove_request(&self.vault_dir, request_id)
     }
-
-    // ---- crate internals for backup.rs ----
 
     pub(crate) fn recovery_pub(&self) -> [u8; 32] {
         self.keyring.recovery_pub
     }
 }
 
-/// Outcome of joining with keys received through pairing.
 pub(crate) enum KeyedJoin {
     Joined(Box<Vault>),
-    /// The keys are genuine but the vault does not list this device yet, or a newer key
-    /// generation has no slot for it yet: the sync tool has not delivered everything.
+    /// The keys are genuine but the sync tool has not delivered everything yet.
     NotReady,
     Rejected(&'static str),
 }
 
-/// Finishes a pairing join, like `join_with_recovery` once the keys are known. `keyring`
-/// holds the received chain with the genesis as root; every entry must be an authentic key
-/// generation of this folder whose key matches its commitment, so keys made up by someone
-/// without the vault key are rejected.
+/// Every entry of `keyring` must be an authentic key generation of this folder whose key matches
+/// its commitment, so keys made up by someone without the vault key are rejected.
 pub(crate) fn join_with_keys(
     vault_dir: &Path,
     state_dir: &Path,

@@ -1,7 +1,5 @@
-# hirz for Fedora. Builds offline from the two source tarballs attached to each GitHub
-# Release (signed and attested, see docs/release.md): the sources and the vendored crates.
-# scripts/package-rpm.sh writes the same two tarballs from a checkout and runs rpmbuild.
-#
+# hirz for Fedora. Builds offline from the two source tarballs of each GitHub Release, sources and
+# vendored crates (docs/release.md); scripts/package-rpm.sh writes the same two from a checkout.
 #   rpmbuild -ba hirz.spec                   plain cargo build (COPR, local)
 #   rpmbuild -ba --with auditable hirz.spec  cargo auditable build (release workflow)
 
@@ -10,8 +8,7 @@
 %global _lto_cflags %{nil}
 # The release profile strips the binaries, so there is no debug information to package.
 %global debug_package %{nil}
-# cargo-auditable embeds the dependency list in each binary; it is not packaged in Fedora,
-# so it is off unless the build machine has it.
+# cargo-auditable embeds the dependency list in each binary; not packaged in Fedora, so off by default.
 %bcond auditable 0
 
 Name:           hirz
@@ -107,9 +104,8 @@ echo uhid > %{buildroot}%{_modulesloaddir}/hirz.conf
 %{_mandir}/man1/hirz-nmh.1*
 %{_mandir}/man8/hirz-uhid-broker.8*
 
-# Firefox on Fedora reads /usr/lib64/mozilla; the portal and the proxy also read /usr/lib.
-# The second path is a relative symlink: identical files would be hardlinked by rpmbuild,
-# and /usr/lib and /usr/lib64 may be on different file systems.
+# Firefox on Fedora reads /usr/lib64/mozilla; the portal and proxy also read /usr/lib. The second
+# path is a relative symlink: rpmbuild would hardlink identical files across file systems.
 manifest_dir=%{_prefix}/lib/mozilla/native-messaging-hosts
 install -d %{buildroot}$manifest_dir
 sed 's#@HIRZ_NMH_PATH@#%{_prefix}/lib/hirz/hirz-nmh#' packaging/native-messaging/hirz.json \

@@ -88,7 +88,6 @@ pub fn phrase_problem(e: PhraseError) -> String {
     }
 }
 
-/// Plain-language text for vault errors that are not handled by a caller.
 pub fn vault_error(e: &VaultError) -> CliError {
     match e {
         VaultError::Io(kind, op) => CliError::failed(format!(

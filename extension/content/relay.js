@@ -1,8 +1,6 @@
-// ISOLATED world, document_start, every frame.
-// A dumb pipe between page/shim.js and the background. It adds no identity:
-// the background reads the origin from the sender that Firefox reports.
-// For conditional requests it also hands the account list to content/autofill.js,
-// which draws the suggestions; the list never goes back to the page.
+// ISOLATED world, document_start, every frame. A dumb pipe between page/shim.js and the
+// background: it adds no identity, the background reads the origin from the sender Firefox reports.
+// Conditional account lists go to content/autofill.js and never back to the page.
 "use strict";
 
 (() => {
@@ -119,9 +117,8 @@
     }
   }
 
-  // Handshake with the shim. Both scripts run before any page script, and
-  // whichever loads second completes it synchronously. The shim then hands
-  // over a random secret that names the private request and response events.
+  // Handshake with the shim: whichever script loads second completes it synchronously, and the
+  // shim hands over a random secret that names the private request and response events.
   function onBoot(ev) {
     const detail = ev.detail;
     if (secret !== null || typeof detail !== "string") return;

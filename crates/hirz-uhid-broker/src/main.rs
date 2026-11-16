@@ -1,10 +1,7 @@
-//! hirz-uhid-broker: the root helper of the hirz virtual security key.
-//!
-//! It owns `/dev/uhid`. Each client connection on its Unix socket gets exactly one FIDO HID
-//! device, created with a fixed report descriptor; the broker relays 64-byte reports both
-//! ways and destroys the device when the client disconnects. The uhid descriptor never
-//! leaves this process, because whoever holds it can recreate the device as any HID device,
-//! a keyboard included.
+//! hirz-uhid-broker: the root helper of the hirz virtual security key. It owns `/dev/uhid` and gives
+//! each client connection one FIDO HID device with a fixed report descriptor, relaying 64-byte
+//! reports. The descriptor never leaves this process: whoever holds it can recreate the device as
+//! any HID device, a keyboard included (docs/uhid.md).
 #![forbid(unsafe_code)]
 
 mod device;

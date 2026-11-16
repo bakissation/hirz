@@ -30,7 +30,6 @@ members() {
   done
 }
 
-# Prints "name version" for every package in Cargo.lock.
 lock_versions() {
   awk '/^\[\[package\]\]/ { n = "" } /^name = / { n = $3 } /^version = / && n != "" { print n, $3; n = "" }' Cargo.lock |
     tr -d '"'

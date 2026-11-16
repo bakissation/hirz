@@ -1,7 +1,6 @@
-//! RegistrationResponseJSON and AuthenticationResponseJSON (WebAuthn Level 3 section 5.1).
-//!
-//! The engine output is cross-checked against the request before anything is returned:
-//! a mismatch is an engine bug and must not reach the relying party.
+//! RegistrationResponseJSON and AuthenticationResponseJSON (WebAuthn Level 3 section 5.1). Engine
+//! output is cross-checked against the request first: a mismatch is an engine bug and must not
+//! reach the relying party.
 
 use crate::create::{CreatePlan, USER_ID_MAX};
 use crate::error::Error;
@@ -56,7 +55,6 @@ fn spki(public_key_cose: &[u8], algorithm: i64) -> Result<Vec<u8>> {
     }
 }
 
-/// Builds RegistrationResponseJSON.
 pub fn registration_response(plan: &CreatePlan, resp: &MakeCredentialResponse) -> Result<Json> {
     let req = &plan.request;
     if !req.algorithms.contains(&resp.algorithm) {
@@ -131,7 +129,6 @@ fn prf_results(plan: &GetPlan, output: Option<&[u8]>) -> Result<Json> {
     Ok(obj(vec![("results", obj(results))]))
 }
 
-/// Builds AuthenticationResponseJSON.
 pub fn authentication_response(plan: &GetPlan, resp: &AssertionResponse) -> Result<Json> {
     let req = &plan.request;
     let ad = check_auth_data(&resp.auth_data, &req.rp_id, req.uv)?;

@@ -25,8 +25,7 @@ use crate::runner::{CommandRunner, CommandSpec, EnvPolicy, Race, RunResult, Syst
 const DIALOG_GRACE: Duration = Duration::from_secs(2);
 const FPRINTD_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const FINGER_ATTEMPTS: u32 = 3;
-/// Scans the reader could not read (too short, off centre, ...) do not count as attempts,
-/// up to this many per request.
+/// Scans the reader could not read (too short, off centre, ...) do not count as attempts, up to this many per request.
 const FINGER_RESCANS: u32 = 5;
 const PIN_PROMPTS: u32 = 5;
 /// Rate limit key for pairing prompts. Not a valid RP id, so it never shares a site's budget.
@@ -162,14 +161,11 @@ fn outcome(r: &Result<(), Fail>) -> &'static str {
     }
 }
 
-/// Why a method did not approve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Fail {
-    /// Ends the request.
     Stop(ApprovalError),
-    /// The next available method is tried. `otherwise` is the result when none is left,
-    /// `note` is shown in the next method's window, and `chosen` is set when the user asked
-    /// for the next method (so its context window is not shown again).
+    /// `otherwise` is the result when no method is left, `note` is shown in the next method's window,
+    /// `chosen` is set when the user asked for it (so its context window is not shown again).
     Next {
         otherwise: ApprovalError,
         note: Option<String>,
@@ -229,7 +225,6 @@ fn run_methods<M: Copy>(
     }
 }
 
-/// A device change the user confirms with user verification.
 #[derive(Clone, Copy)]
 enum DeviceChange<'a> {
     Pair(&'a PairingApprovalContext<'a>),
@@ -345,7 +340,6 @@ impl<R: CommandRunner> HirzApprover<R> {
         }
     }
 
-    /// Uses `config` instead of reading the config file.
     pub fn with_config(mut self, config: Config) -> Self {
         self.config = ConfigSource::Fixed(config);
         self
@@ -356,7 +350,6 @@ impl<R: CommandRunner> HirzApprover<R> {
         self
     }
 
-    /// For the CLI: set, change and reset the hirz PIN.
     pub fn pin_store(&self) -> &PinStore {
         &self.pins
     }
@@ -371,8 +364,6 @@ impl<R: CommandRunner> HirzApprover<R> {
         }
     }
 
-    /// UV methods usable right now, in configured order. Lets frontends answer capability
-    /// queries truthfully.
     pub fn available_uv_methods(&self) -> Result<Vec<UvMethod>, ApprovalError> {
         let cfg = self.config()?;
         let deadline = Deadline::start(FPRINTD_LIST_TIMEOUT);
@@ -386,7 +377,6 @@ impl<R: CommandRunner> HirzApprover<R> {
             .collect())
     }
 
-    /// The hint about enrolling a finger, the first time it applies.
     fn no_fingers_hint(&self) -> Option<String> {
         if self.no_fingers_hinted.swap(true, Ordering::Relaxed) {
             return None;
@@ -430,8 +420,7 @@ impl<R: CommandRunner> HirzApprover<R> {
         self.runner.tool_available(Tool::Pkcheck) && self.runner.polkit_action_installed()
     }
 
-    /// The method a "use ... instead" button would switch to: the first of `rest` that is
-    /// usable without running anything. Fingerprint never follows itself.
+    /// The first of `rest` usable without running anything; fingerprint never follows itself.
     fn fallback_after(&self, rest: &[UvMethod]) -> Option<UvMethod> {
         rest.iter().copied().find(|m| match m {
             UvMethod::Polkit => self.polkit_ready(),
@@ -440,7 +429,6 @@ impl<R: CommandRunner> HirzApprover<R> {
         })
     }
 
-    /// Adds the hirz window icon, when one is installed, right after the dialog type.
     fn zenity_args(&self, mut args: Vec<String>) -> Vec<String> {
         if let Some(icon) = self
             .runner
@@ -474,8 +462,7 @@ impl<R: CommandRunner> HirzApprover<R> {
         )
     }
 
-    /// Get with several accounts: the user picks one first. Returns the selection and whether
-    /// the context (site and account) was shown.
+    /// Get with several accounts: the user picks one first. Also reports whether the context was shown.
     fn select(
         &self,
         ctx: &ApprovalContext<'_>,
@@ -592,7 +579,6 @@ impl<R: CommandRunner> HirzApprover<R> {
         }))?)
     }
 
-    /// The fingerprint window ended before `fprintd-verify`.
     fn finger_window_closed(r: RunResult, fallback: Option<UvMethod>) -> Fail {
         match map_dialog(r) {
             Ok(_) if fallback.is_some() => Fail::Next {
@@ -606,9 +592,8 @@ impl<R: CommandRunner> HirzApprover<R> {
         }
     }
 
-    /// Runs `fprintd-verify` while a window shows the context and "Touch the fingerprint
-    /// reader". Cancel stops the request; the "use ... instead" button, too many misses or a
-    /// reader error move on to the next method.
+    /// Cancel stops the request; the "use ... instead" button, too many misses or a reader error
+    /// move on to the next method.
     fn run_fingerprint(
         &self,
         deadline: &Deadline,
@@ -978,7 +963,6 @@ mod tests {
             assert_eq!(tool, spec.tool, "{spec:?}");
             r
         }
-        /// One script entry decides the race: the main tool's result, or zenity's.
         fn run_with_dialog(&self, main: &CommandSpec, dialog: &CommandSpec) -> Race {
             {
                 let mut calls = self.calls.lock().unwrap();

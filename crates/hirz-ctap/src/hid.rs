@@ -1,10 +1,6 @@
-//! CTAPHID transport (FIDO CTAP 2.2, section 11.2): 64-byte HID reports carrying framed
-//! messages on logical channels.
-//!
-//! [`Transport`] is a pure state machine: it takes reports and the current time and returns
-//! [`Output`] actions. [`run`] is the thin I/O loop around it: it reads reports from a
-//! [`ReportIo`], runs CBOR requests on a worker thread through a [`CborHandler`], and keeps
-//! sending KEEPALIVE packets and listening for CANCEL while the handler is busy.
+//! CTAPHID transport (FIDO CTAP 2.2, section 11.2): 64-byte HID reports carrying framed messages
+//! on logical channels. [`Transport`] is a pure state machine over reports and the current time;
+//! [`run`] is the I/O loop that keeps KEEPALIVEs flowing while a handler is busy.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -14,26 +10,18 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// Size of every HID report (input and output) of a FIDO device.
 pub const REPORT_SIZE: usize = 64;
-/// One HID report.
 pub type Report = [u8; REPORT_SIZE];
-/// The broadcast channel, used only by CTAPHID_INIT to allocate a channel.
 pub const BROADCAST_CID: u32 = 0xffff_ffff;
-/// Payload bytes in an initialization packet.
 pub const INIT_DATA_SIZE: usize = REPORT_SIZE - 7;
-/// Payload bytes in a continuation packet.
 pub const CONT_DATA_SIZE: usize = REPORT_SIZE - 5;
-/// Highest continuation sequence number.
 pub const MAX_SEQ: u8 = 0x7f;
 /// Largest message: one initialization packet plus 128 continuation packets (7609 bytes).
 pub const MAX_MESSAGE_SIZE: usize = INIT_DATA_SIZE + (MAX_SEQ as usize + 1) * CONT_DATA_SIZE;
-/// CTAPHID protocol version reported by CTAPHID_INIT.
 pub const PROTOCOL_VERSION: u8 = 2;
 
 const TYPE_INIT: u8 = 0x80;
 
-/// CTAPHID command codes (without the 0x80 initialization bit).
 pub mod cmd {
     pub const PING: u8 = 0x01;
     pub const MSG: u8 = 0x03;
@@ -46,7 +34,6 @@ pub mod cmd {
     pub const ERROR: u8 = 0x3f;
 }
 
-/// CTAPHID_ERROR codes.
 pub mod err {
     pub const INVALID_CMD: u8 = 0x01;
     pub const INVALID_PAR: u8 = 0x02;
@@ -59,7 +46,6 @@ pub mod err {
     pub const OTHER: u8 = 0x7f;
 }
 
-/// Capability flags in the CTAPHID_INIT response.
 pub mod capability {
     pub const WINK: u8 = 0x01;
     pub const CBOR: u8 = 0x04;
@@ -67,20 +53,16 @@ pub mod capability {
     pub const NMSG: u8 = 0x08;
 }
 
-/// CTAP2 status bytes the transport itself produces as CBOR responses.
 pub mod ctap2_status {
     pub const ERR_OTHER: u8 = 0x7f;
     pub const ERR_KEEPALIVE_CANCEL: u8 = 0x2d;
     pub const ERR_USER_ACTION_TIMEOUT: u8 = 0x2f;
 }
 
-/// Status carried by a KEEPALIVE packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum KeepaliveStatus {
-    /// The authenticator is still processing.
     Processing = 1,
-    /// The authenticator is waiting for user presence or verification.
     UpNeeded = 2,
 }
 
@@ -94,7 +76,6 @@ impl KeepaliveStatus {
     }
 }
 
-/// A decoded CTAPHID packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Packet<'a> {
     Init {
@@ -110,7 +91,6 @@ pub enum Packet<'a> {
     },
 }
 
-/// A report that is not exactly [`REPORT_SIZE`] bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BadReportSize(pub usize);
 
@@ -122,7 +102,6 @@ impl fmt::Display for BadReportSize {
 
 impl std::error::Error for BadReportSize {}
 
-/// A payload larger than [`MAX_MESSAGE_SIZE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageTooLarge(pub usize);
 
@@ -138,8 +117,7 @@ impl fmt::Display for MessageTooLarge {
 
 impl std::error::Error for MessageTooLarge {}
 
-/// Parses one report. The data slice of an initialization packet is always the full 57
-/// bytes; the caller trims it to `bcnt`.
+/// The data slice of an initialization packet is always the full 57 bytes; the caller trims it to `bcnt`.
 pub fn parse_packet(report: &[u8]) -> Result<Packet<'_>, BadReportSize> {
     let bad = BadReportSize(report.len());
     if report.len() != REPORT_SIZE {
@@ -165,8 +143,6 @@ pub fn parse_packet(report: &[u8]) -> Result<Packet<'_>, BadReportSize> {
     })
 }
 
-/// Splits a message into one initialization packet and as many continuation packets as
-/// needed, zero padded.
 pub fn build_message(
     cid: u32,
     command: u8,
@@ -207,17 +183,13 @@ fn write_into(dst: &mut [u8], off: usize, src: &[u8]) {
     }
 }
 
-/// Transport timing and identity.
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
-    /// Maximum gap between packets of one message before CTAPHID_ERR_MSG_TIMEOUT.
     pub msg_timeout: Duration,
-    /// Interval between KEEPALIVE packets while a CBOR request is processed.
     pub keepalive_interval: Duration,
     /// Upper bound for one CBOR request, after which it is cancelled and answered with
     /// CTAP2_ERR_USER_ACTION_TIMEOUT.
     pub processing_timeout: Duration,
-    /// Device version (major, minor, build) reported by CTAPHID_INIT.
     pub device_version: (u8, u8, u8),
 }
 
@@ -232,19 +204,13 @@ impl Default for Config {
     }
 }
 
-/// Identifies one CBOR request handed to the handler.
 pub type JobId = u64;
 
-/// Actions produced by the state machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
-    /// Send this report to the host.
     Send(Report),
-    /// Run this CTAP2 request (command byte plus CBOR parameters) on the handler.
     StartCbor { job: JobId, request: Vec<u8> },
-    /// The request was cancelled or abandoned; its result will be ignored.
     CancelJob(JobId),
-    /// The host asked the device to identify itself.
     Wink,
 }
 
@@ -297,7 +263,6 @@ impl Transport {
         }
     }
 
-    /// The job currently being processed, if any.
     pub fn current_job(&self) -> Option<JobId> {
         match &self.state {
             State::Processing(p) => Some(p.job),
@@ -305,7 +270,6 @@ impl Transport {
         }
     }
 
-    /// When [`Transport::tick`] must run next (keepalive or timeout), if anything is pending.
     pub fn next_deadline(&self) -> Option<Instant> {
         match &self.state {
             State::Idle => None,
@@ -352,7 +316,6 @@ impl Transport {
         out
     }
 
-    /// Aborts whatever runs on `cid`; returns the cancel action for a running job.
     fn abort_channel(&mut self, cid: u32) -> Vec<Output> {
         match &self.state {
             State::Receiving(r) if r.cid == cid => {
@@ -368,7 +331,6 @@ impl Transport {
         }
     }
 
-    /// Processes one report from the host.
     pub fn handle_report(&mut self, report: &[u8], now: Instant) -> Vec<Output> {
         let Ok(packet) = parse_packet(report) else {
             return Vec::new();
@@ -538,8 +500,7 @@ impl Transport {
         }
     }
 
-    /// Delivers the handler's response for `job`. Responses for jobs that were cancelled or
-    /// timed out are dropped.
+    /// Responses for jobs that were cancelled or timed out are dropped.
     pub fn job_finished(&mut self, job: JobId, response: &[u8]) -> Vec<Output> {
         match &self.state {
             State::Processing(p) if p.job == job => {
@@ -554,7 +515,6 @@ impl Transport {
         }
     }
 
-    /// Emits due keepalives and enforces timeouts.
     pub fn tick(&mut self, now: Instant, status: KeepaliveStatus) -> Vec<Output> {
         match &mut self.state {
             State::Idle => Vec::new(),
@@ -582,8 +542,6 @@ impl Transport {
     }
 }
 
-/// What a CBOR handler sees while it runs: a cancel flag and the keepalive status it wants
-/// the transport to report.
 #[derive(Debug, Clone)]
 pub struct RequestContext {
     cancelled: Arc<AtomicBool>,
@@ -604,7 +562,6 @@ impl RequestContext {
         self.cancelled.load(Ordering::SeqCst)
     }
 
-    /// Sets the status sent in the next KEEPALIVE packets.
     pub fn set_status(&self, status: KeepaliveStatus) {
         self.status.store(status as u8, Ordering::SeqCst);
     }
@@ -632,11 +589,9 @@ pub trait CborHandler: Send + Sync {
     /// CTAP1_ERR_OTHER.
     fn handle(&self, request: &[u8], ctx: &RequestContext) -> Vec<u8>;
 
-    /// Called on CTAPHID_WINK.
     fn wink(&self) {}
 }
 
-/// Result of waiting for one report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recv {
     Report(Report),
@@ -644,9 +599,7 @@ pub enum Recv {
     Closed,
 }
 
-/// A bidirectional channel of 64-byte reports.
 pub trait ReportIo {
-    /// Waits up to `timeout` for a complete report.
     fn recv(&mut self, timeout: Duration) -> io::Result<Recv>;
     fn send(&mut self, report: &Report) -> io::Result<()>;
 }
@@ -702,7 +655,7 @@ impl ReportIo for StreamReportIo {
     }
 }
 
-/// Observations from [`run`], for logging. Contains no request or response contents.
+/// Contains no request or response contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopEvent {
     ChannelInit,
@@ -714,8 +667,6 @@ pub enum LoopEvent {
 const BUSY_POLL: Duration = Duration::from_millis(10);
 const IDLE_POLL: Duration = Duration::from_secs(1);
 
-/// Runs the transport until the report channel closes. CBOR requests run on worker threads;
-/// meanwhile this loop sends keepalives and processes CANCEL and other channels.
 pub fn run<I: ReportIo>(
     io: &mut I,
     handler: Arc<dyn CborHandler>,
@@ -858,7 +809,6 @@ mod tests {
         r
     }
 
-    /// Allocates channel 1 and returns the transport.
     fn ready() -> (Transport, Instant) {
         let now = Instant::now();
         let mut t = Transport::new(Config::default());
@@ -1017,7 +967,6 @@ mod tests {
         t.handle_report(&pkts[0], now);
         let out = t.handle_report(&pkts[2], now);
         assert_eq!(sent(&out), vec![error_report(CID, err::INVALID_SEQ)]);
-        // Back to idle: a new message works.
         let out = t.handle_report(&single(CID, cmd::PING, b"a"), now);
         assert_eq!(sent(&out), vec![single(CID, cmd::PING, b"a")]);
     }
@@ -1072,7 +1021,6 @@ mod tests {
         t.handle_report(&pkts[0], now);
         let out = t.handle_report(&single(2, cmd::PING, b"x"), now);
         assert_eq!(sent(&out), vec![error_report(2, err::CHANNEL_BUSY)]);
-        // A new channel can still be allocated meanwhile.
         let out = t.handle_report(&init_request(BROADCAST_CID, [3; 8]), now);
         assert_eq!(sent(&out)[0][15..19], [0, 0, 0, 3]);
         assert_eq!(sent(&t.handle_report(&pkts[1], now)), pkts);
@@ -1092,7 +1040,6 @@ mod tests {
         }
         let out = t.handle_report(&single(CID, cmd::CBOR, &[]), now);
         assert_eq!(sent(&out), vec![error_report(CID, err::INVALID_LEN)]);
-        // CANCEL while idle has no response.
         assert!(
             t.handle_report(&single(CID, cmd::CANCEL, &[]), now)
                 .is_empty()
@@ -1148,7 +1095,6 @@ mod tests {
         assert_eq!(sent(&out), vec![error_report(2, err::CHANNEL_BUSY)]);
         let out = t.handle_report(&single(CID, cmd::PING, b"x"), now);
         assert_eq!(sent(&out), vec![error_report(CID, err::CHANNEL_BUSY)]);
-        // CANCEL from another channel does not touch the job.
         let out = t.handle_report(&single(2, cmd::CANCEL, &[]), now);
         assert_eq!(sent(&out), vec![error_report(2, err::CHANNEL_BUSY)]);
         assert_eq!(t.current_job(), Some(job));
@@ -1205,7 +1151,6 @@ mod tests {
         assert_eq!(sent(&out), vec![report(&[0, 0, 0, 1, 0x90, 0, 1, 0x7f])]);
     }
 
-    /// Handler that waits for cancellation after asking for user presence.
     struct WaitForCancel;
 
     impl CborHandler for WaitForCancel {
@@ -1241,7 +1186,6 @@ mod tests {
         });
         host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
-        // Send the INIT request in two writes to exercise partial reads.
         let init = init_request(BROADCAST_CID, [9; 8]);
         host.write_all(&init[..10]).unwrap();
         std::thread::sleep(Duration::from_millis(20));
@@ -1254,7 +1198,6 @@ mod tests {
         let resp = read_report(&mut host);
         assert_eq!(&resp[..9], &[0, 0, 0, 1, 0x90, 0, 2, 0x00, 0xa0]);
 
-        // A request that waits for the user: expect UPNEEDED keepalives, then cancel.
         host.write_all(&single(cid, cmd::CBOR, &[0x01, 0xa0]))
             .unwrap();
         let mut keepalives = 0;

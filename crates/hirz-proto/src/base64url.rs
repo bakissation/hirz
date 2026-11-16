@@ -21,7 +21,6 @@ fn value(c: u8) -> Result<u8> {
     }
 }
 
-/// Encodes bytes as base64url without padding.
 pub fn encode(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len().saturating_mul(4).div_ceil(3));
     for chunk in input.chunks(3) {

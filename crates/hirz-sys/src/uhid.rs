@@ -1,26 +1,15 @@
-//! The Linux uhid ABI (`include/uapi/linux/uhid.h`) as byte-level encode and decode.
-//!
-//! uhid needs no ioctls: user space writes one `struct uhid_event` per `write(2)` and reads
-//! one per `read(2)` on `/dev/uhid`. All structs are packed and use host byte order. The
-//! functions here are safe and pure; opening the device is plain `std::fs::File` I/O.
-//!
-//! Encoders always produce a full [`UHID_EVENT_SIZE`] buffer. The kernel accepts shorter
-//! writes, but fixed-size events keep framing trivial when a test stands in for the kernel
-//! over a stream socket.
+//! The Linux uhid ABI (`include/uapi/linux/uhid.h`) as byte-level encode and decode. Structs are
+//! packed in host byte order; encoders always emit a full [`UHID_EVENT_SIZE`] buffer so a test
+//! can stand in for the kernel over a stream socket.
 
 use std::fmt;
 
-/// `UHID_DATA_MAX`.
 pub const UHID_DATA_MAX: usize = 4096;
-/// `HID_MAX_DESCRIPTOR_SIZE`.
 pub const HID_MAX_DESCRIPTOR_SIZE: usize = 4096;
-/// `sizeof(struct uhid_event)`: a u32 type plus the largest union member, `uhid_create2_req`
-/// (128 + 64 + 64 + 2 + 2 + 4 * 4 + 4096 = 4372 bytes).
+/// 4-byte type + the largest union member, `uhid_create2_req` (128 + 64 + 64 + 2 + 2 + 4 * 4 + 4096).
 pub const UHID_EVENT_SIZE: usize = 4376;
-/// `BUS_USB` from `linux/input.h`.
 pub const BUS_USB: u16 = 0x03;
 
-/// `enum uhid_event_type` values used by hirz.
 pub mod event_type {
     pub const DESTROY: u32 = 1;
     pub const START: u32 = 2;
@@ -66,16 +55,13 @@ const SET_REPORT_SIZE: usize = UNION + 6;
 const SET_REPORT_DATA: usize = UNION + 8;
 const START_FLAGS: usize = UNION;
 
-/// Errors from encoding or decoding uhid events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UhidError {
     /// A string field does not fit (with its NUL terminator) or contains NUL.
     BadString(&'static str),
     /// The report descriptor is empty or larger than `HID_MAX_DESCRIPTOR_SIZE`.
     BadDescriptor,
-    /// A report payload is larger than `UHID_DATA_MAX`.
     DataTooLarge,
-    /// The event is shorter than its 4-byte type field.
     Truncated,
 }
 
@@ -92,7 +78,6 @@ impl fmt::Display for UhidError {
 
 impl std::error::Error for UhidError {}
 
-/// Parameters of `UHID_CREATE2`.
 #[derive(Debug, Clone, Copy)]
 pub struct CreateParams<'a> {
     pub name: &'a str,
@@ -106,7 +91,6 @@ pub struct CreateParams<'a> {
     pub report_descriptor: &'a [u8],
 }
 
-/// `enum uhid_report_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportType {
     Feature,
@@ -126,7 +110,6 @@ impl From<u8> for ReportType {
     }
 }
 
-/// Events the kernel sends to user space.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UhidEvent {
     Start {
@@ -217,7 +200,6 @@ fn get_data(buf: &[u8], off: usize, size: u16) -> Result<Vec<u8>, UhidError> {
     Ok(out)
 }
 
-/// `UHID_CREATE2`.
 pub fn encode_create2(p: &CreateParams<'_>) -> Result<Vec<u8>, UhidError> {
     let rd_len = p.report_descriptor.len();
     if rd_len == 0 || rd_len > HID_MAX_DESCRIPTOR_SIZE {
@@ -238,12 +220,10 @@ pub fn encode_create2(p: &CreateParams<'_>) -> Result<Vec<u8>, UhidError> {
     Ok(buf)
 }
 
-/// `UHID_DESTROY`.
 pub fn encode_destroy() -> Vec<u8> {
     new_event(event_type::DESTROY)
 }
 
-/// `UHID_INPUT2`: one input report from the device to the host.
 pub fn encode_input2(data: &[u8]) -> Result<Vec<u8>, UhidError> {
     let size = data_size(data)?;
     let mut buf = new_event(event_type::INPUT2);
@@ -263,7 +243,6 @@ pub fn encode_get_report_reply(id: u32, err: u16, data: &[u8]) -> Result<Vec<u8>
     Ok(buf)
 }
 
-/// `UHID_SET_REPORT_REPLY`.
 pub fn encode_set_report_reply(id: u32, err: u16) -> Vec<u8> {
     let mut buf = new_event(event_type::SET_REPORT_REPLY);
     put(&mut buf, REQ_ID, &id.to_ne_bytes());
@@ -271,8 +250,7 @@ pub fn encode_set_report_reply(id: u32, err: u16) -> Vec<u8> {
     buf
 }
 
-/// Decodes one event read from `/dev/uhid`. Input shorter than the full struct is treated as
-/// zero-extended; bytes past [`UHID_EVENT_SIZE`] are ignored.
+/// Input shorter than the full struct is treated as zero-extended; bytes past [`UHID_EVENT_SIZE`] are ignored.
 pub fn decode_event(buf: &[u8]) -> Result<UhidEvent, UhidError> {
     if buf.len() < 4 {
         return Err(UhidError::Truncated);
@@ -450,7 +428,6 @@ mod tests {
             UhidEvent::Other(99)
         );
         assert_eq!(decode_event(&[1, 0]), Err(UhidError::Truncated));
-        // Short events are zero-extended.
         assert_eq!(decode_event(&3u32.to_ne_bytes()).unwrap(), UhidEvent::Stop);
     }
 

@@ -1,11 +1,4 @@
-//! Passphrase envelope around a CXF export (format in `docs/sync.md`).
-//!
-//! ```text
-//! magic "HIRZ-CXF" [8] || version u8 (1) || kdf u8 (1 = Argon2id v1.3)
-//!   || m_cost_kib u32 || t_cost u32 || p_cost u32 || salt [16]
-//!   || AES-256-GCM(key, aad = all preceding bytes, CXF JSON)
-//! key = HKDF-SHA-256(salt, Argon2id(passphrase, salt, m, t, p, 32), "hirz cxf envelope v1", 32)
-//! ```
+//! Passphrase envelope around a CXF export; the layout is in `docs/sync.md`, "Encrypted export file".
 
 use hirz_crypto::Zeroizing;
 use hirz_crypto::kdf::{self, Argon2Params};
@@ -18,9 +11,7 @@ const HEADER_LEN: usize = 8 + 1 + 1 + 12 + SALT_LEN;
 const INFO: &[u8] = b"hirz cxf envelope v1";
 /// Same bounds as hirz-vault backups: a hostile file cannot demand absurd work.
 pub const IMPORT_LIMIT: Argon2Params = hirz_vault::IMPORT_LIMIT;
-/// Largest envelope or CXF file read.
 pub const MAX_FILE_LEN: u64 = 64 << 20;
-/// Characters (code points) a passphrase needs at least.
 pub const MIN_PASSPHRASE_CHARS: usize = 12;
 pub const MAX_PASSPHRASE_BYTES: usize = 1024;
 
@@ -28,9 +19,7 @@ pub const MAX_PASSPHRASE_BYTES: usize = 1024;
 pub enum EnvelopeError {
     Malformed,
     UnsupportedVersion,
-    /// Argon2 parameters above the import limit.
     TooCostly,
-    /// Wrong passphrase or a modified file (AES-GCM authentication failed).
     WrongPassphrase,
     Crypto,
 }
@@ -92,7 +81,6 @@ fn be_u32(b: &[u8], at: usize) -> Result<u32, EnvelopeError> {
     Ok(u32::from_be_bytes(arr))
 }
 
-/// Reads the header without doing any expensive work.
 pub fn params(data: &[u8]) -> Result<Argon2Params, EnvelopeError> {
     if !is_envelope(data) || data.len() < HEADER_LEN {
         return Err(EnvelopeError::Malformed);
@@ -127,7 +115,6 @@ pub fn open(passphrase: &[u8], data: &[u8]) -> Result<Zeroizing<Vec<u8>>, Envelo
     hirz_crypto::aead::open(&key, head, sealed).map_err(|_| EnvelopeError::WrongPassphrase)
 }
 
-/// Passphrase rules for new exports.
 pub fn passphrase_problem(p: &str) -> Option<String> {
     if p.len() > MAX_PASSPHRASE_BYTES {
         return Some("That passphrase is too long.".into());

@@ -7,15 +7,11 @@ use core::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpIdError {
-    /// Not a domain in canonical form (empty, IP literal, trailing dot, bad label).
     Invalid(DomainError),
-    /// Uppercase or Unicode: Firefox applies its own normalization, so the request is
-    /// left to it instead of guessing which RP ID it would hash.
+    /// Uppercase or Unicode: Firefox applies its own normalization, so the request is left to it.
     NonCanonical,
-    /// A parent domain that is a public suffix or crosses the origin's public suffix.
     PublicSuffix,
-    /// Neither equal to nor a parent of the origin's effective domain. Only a Related
-    /// Origin Request (`/.well-known/webauthn`) could allow it, which hirz does not do.
+    /// Only a Related Origin Request (`/.well-known/webauthn`) could allow it; hirz does not do that.
     RelatedOriginRequired,
 }
 
@@ -34,12 +30,8 @@ impl fmt::Display for RpIdError {
 
 impl std::error::Error for RpIdError {}
 
-/// Returns the RP ID to use for `origin`: the effective domain when `rp_id` is absent,
-/// otherwise `rp_id` after checking it is equal to the effective domain or a registrable
-/// domain suffix of it.
-///
-/// An RP ID equal to the effective domain is accepted even when it is a public suffix,
-/// as the HTML algorithm does: only that exact origin can use such credentials.
+/// `rp_id` must equal the effective domain or be a registrable domain suffix of it. Equal is accepted
+/// even for a public suffix, as the HTML algorithm does: only that exact origin can use such credentials.
 pub fn validate_rp_id(rp_id: Option<&str>, origin: &Origin) -> Result<String, RpIdError> {
     let domain = origin.effective_domain();
     let Some(rp_id) = rp_id else {

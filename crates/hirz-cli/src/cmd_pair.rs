@@ -24,7 +24,6 @@ fn minutes(secs: u64) -> String {
     )
 }
 
-/// Prints the words large enough that they are hard to miss.
 fn show_words(ctx: &mut Ctx<'_>, words: &str) -> CliResult {
     let spaced: Vec<String> = words.split(' ').map(str::to_uppercase).collect();
     ctx.say("")?;
@@ -199,11 +198,9 @@ fn choose(
     }
 }
 
-/// A device change that needs user verification, and what stays as it was when it fails.
 pub(crate) struct Change<'a> {
     /// "Approving a device", "Removing a device".
     pub action: &'a str,
-    /// The command to run again once a method is set up.
     pub retry: String,
     /// Said after every failure, for example "Nothing was removed."
     pub unchanged: String,
@@ -269,8 +266,7 @@ fn pairing_change(ctx: &Ctx<'_>, req: Option<&PairingRequest>) -> Change<'static
     }
 }
 
-/// The second, verified confirmation in a window drawn by hirz-uv. Only a passed user
-/// verification approves; anything else leaves the request waiting.
+/// The second, verified confirmation, in a window drawn by hirz-uv. Anything but a passed UV leaves the request waiting.
 fn verify_user(ctx: &mut Ctx<'_>, req: &PairingRequest, words: &str) -> CliResult {
     ctx.say(
         "Confirm in the hirz window: it shows the same four words, then asks for your system\n\

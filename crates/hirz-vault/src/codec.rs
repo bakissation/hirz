@@ -1,13 +1,11 @@
-//! Small length-prefixed binary encoding used by every vault file.
-//!
-//! A body is a version byte followed by fields `tag (u8) || length (u16, big endian) ||
-//! value`. Tags appear in strictly increasing order, so every value has one encoding.
+//! Small length-prefixed binary encoding used by every vault file: a version byte, then fields
+//! `tag (u8) || length (u16 BE) || value` with tags in strictly increasing order, so every value
+//! has one encoding.
 
 use crate::error::VaultError;
 use hirz_crypto::Zeroizing;
 
-/// Initial capacity for buffers that may hold secrets, so they do not reallocate (and leave
-/// copies in freed memory) while being filled.
+/// Preallocated so buffers that may hold secrets never reallocate and leave copies in freed memory.
 const SECRET_CAPACITY: usize = 4096;
 
 #[derive(Debug)]
@@ -55,7 +53,6 @@ impl Writer {
     }
 }
 
-/// Iterates over the fields of a body, enforcing the canonical form.
 #[derive(Debug)]
 pub(crate) struct Fields<'a> {
     rest: &'a [u8],
@@ -63,12 +60,10 @@ pub(crate) struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
-    /// Checks the version byte and returns the field iterator.
     pub(crate) fn new(data: &'a [u8], version: u8) -> Result<Self, VaultError> {
         Fields::new_versions(data, &[version]).map(|(f, _)| f)
     }
 
-    /// Like `new`, for bodies whose readers accept several versions; returns the version.
     pub(crate) fn new_versions(data: &'a [u8], accepted: &[u8]) -> Result<(Self, u8), VaultError> {
         match data.split_first() {
             Some((v, rest)) if accepted.contains(v) => Ok((
@@ -211,7 +206,6 @@ pub(crate) fn aad(label: &str, parts: &[&[u8]]) -> Vec<u8> {
 
 pub(crate) use hirz_proto::hex::encode as hex;
 
-/// Strict lowercase hex decoding of exactly `N` bytes.
 pub(crate) fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     hirz_proto::hex::decode_array(s).ok()
 }

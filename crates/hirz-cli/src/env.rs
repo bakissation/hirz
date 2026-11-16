@@ -14,16 +14,12 @@ pub const DEFAULT_BROKER_SOCKET: &str = "/run/hirz/uhid.sock";
 #[derive(Debug, Clone)]
 pub struct Env {
     pub home: Option<PathBuf>,
-    /// `$XDG_DATA_HOME`, or `~/.local/share`.
     pub data_home: PathBuf,
-    /// `$XDG_CONFIG_HOME`, or `~/.config`.
     pub config_home: PathBuf,
-    /// hirz-uv paths: config file and `$XDG_STATE_HOME/hirz`.
     pub uv: Paths,
     /// Prefix for system paths that are probed (`/` outside tests).
     pub root: PathBuf,
     pub broker_socket: PathBuf,
-    /// Directory of the running `hirz` binary.
     pub exe_dir: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
 }
@@ -72,7 +68,6 @@ impl Env {
         self.data_home.join("hirz").join("vault")
     }
 
-    /// A system path under the probe root.
     pub fn sys_path(&self, abs: &str) -> PathBuf {
         self.root.join(abs.trim_start_matches('/'))
     }
@@ -87,7 +82,6 @@ impl Env {
             .ok_or_else(|| CliError::failed("Could not find the current folder; give a full path."))
     }
 
-    /// Vault location: `--vault`, else the recorded location, else the default.
     pub fn vault_dir(&self, flag: Option<&Path>) -> CliResult<PathBuf> {
         if let Some(p) = flag {
             return self.absolute(p);
@@ -130,7 +124,6 @@ pub fn write_private(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<()>
     write_atomic(dir, name, data, 0o600)
 }
 
-/// Writes `dir/name` through a temp file and a rename. The directory must exist.
 pub fn write_atomic(dir: &Path, name: &str, data: &[u8], mode: u32) -> std::io::Result<()> {
     let mut rnd = [0u8; 8];
     hirz_crypto::random_fill(&mut rnd).map_err(|_| std::io::Error::other("random"))?;
@@ -151,7 +144,6 @@ pub fn write_atomic(dir: &Path, name: &str, data: &[u8], mode: u32) -> std::io::
     result
 }
 
-/// Creates a new file that must not exist yet, mode 0600.
 pub fn create_new_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let mut f = fs::OpenOptions::new()
         .write(true)
@@ -207,21 +199,14 @@ pub fn is_executable_file(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The parts of the system that tests replace.
 pub trait System {
-    /// Approval methods hirz-uv can use right now, or why that could not be determined.
     fn uv_methods(&self, env: &Env) -> Result<Vec<UvMethod>, String>;
-    /// Whether `zenity` (needed for every approval prompt) is installed.
     fn zenity(&self) -> bool;
-    /// This computer's name, for the device name.
     fn hostname(&self) -> Option<String>;
-    /// Confirms a device pairing with user verification (`hirz devices approve`).
     fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn hirz_core::Approver + 's>;
-    /// Unix time in seconds.
     fn now(&self) -> u64 {
         crate::ui::now()
     }
-    /// Waits between polls of the vault folder.
     fn sleep(&self, d: std::time::Duration) {
         std::thread::sleep(d);
     }

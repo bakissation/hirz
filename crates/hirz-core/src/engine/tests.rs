@@ -111,7 +111,6 @@ impl Approver for Fake {
     }
 }
 
-/// Implements only `approve`, to exercise the default `confirm_selection`.
 struct Minimal;
 
 impl Approver for Minimal {
@@ -1100,7 +1099,6 @@ fn imported_ids_of_other_lengths() {
         verify(key, &a);
     }
 
-    // Prefixes and extensions of an imported id never match it.
     let mut longer = short.clone();
     longer.push(0);
     let near: [&[u8]; 3] = [&short[..15], &longer, &long[..1022]];

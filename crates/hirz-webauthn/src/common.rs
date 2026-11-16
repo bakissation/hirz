@@ -12,9 +12,8 @@ pub(crate) const CREDENTIAL_ID_MAX: usize = hirz_proto::auth_data::MAX_CREDENTIA
 pub(crate) const MAX_DESCRIPTORS: usize = 64;
 pub(crate) const MAX_HINTS: usize = 16;
 pub(crate) const MAX_TRANSPORTS: usize = 16;
-/// Cap for identifier-like strings (enum values, types, hints).
 pub(crate) const MAX_TOKEN_CHARS: usize = 64;
-/// Cap for display strings (names). Matches the extension's own cap.
+/// Matches the extension's own cap.
 pub(crate) const MAX_NAME_CHARS: usize = 1024;
 /// Cap for an RP ID before domain validation: 253 ASCII bytes, with room for the
 /// non-canonical inputs that are reported as such.
@@ -69,7 +68,6 @@ pub fn prf_salt(input: &[u8]) -> [u8; 32] {
     sha256(&buf)
 }
 
-/// Reads AuthenticationExtensionsPRFValuesJSON and derives the salts.
 pub(crate) fn prf_values(v: &Json, key: &'static str) -> Result<HmacSecretSalts> {
     let o = Obj::new(v, key)?;
     let first = o.req_bytes("first", 0, PRF_INPUT_MAX)?;

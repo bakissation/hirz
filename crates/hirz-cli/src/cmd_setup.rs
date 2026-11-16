@@ -44,9 +44,7 @@ pub fn manifest_locations(env: &Env) -> Vec<(PathBuf, &'static str)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestState {
     Missing,
-    /// Present and points to an executable program.
     Ok(PathBuf),
-    /// Present but its `path` is missing, relative or not executable.
     BrokenTarget(String),
     Invalid,
 }
@@ -75,7 +73,6 @@ pub fn manifest_state(path: &Path) -> ManifestState {
     }
 }
 
-/// Fills the template with the absolute path of hirz-nmh.
 pub fn render_manifest(nmh: &Path) -> CliResult<String> {
     let path = nmh
         .to_str()

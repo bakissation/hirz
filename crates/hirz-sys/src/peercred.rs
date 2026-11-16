@@ -4,8 +4,7 @@ use std::io;
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-/// Credentials of the process that connected a Unix socket, as recorded by the kernel at
-/// `connect` time. They cannot be forged by the peer.
+/// Recorded by the kernel at `connect` time; the peer cannot forge them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerCredentials {
     pub pid: i32,
@@ -13,7 +12,6 @@ pub struct PeerCredentials {
     pub gid: u32,
 }
 
-/// Reads SO_PEERCRED from a connected Unix stream socket.
 pub fn peer_credentials<S: AsFd>(socket: &S) -> io::Result<PeerCredentials> {
     let fd = socket.as_fd();
     let mut cred = libc::ucred {
@@ -49,7 +47,6 @@ pub fn peer_credentials<S: AsFd>(socket: &S) -> io::Result<PeerCredentials> {
     })
 }
 
-/// Domain, type and listening state of a socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SocketInfo {
     pub domain: i32,
@@ -58,13 +55,12 @@ pub struct SocketInfo {
 }
 
 impl SocketInfo {
-    /// True for a listening AF_UNIX SOCK_STREAM socket.
     pub fn is_unix_stream_listener(&self) -> bool {
         self.domain == libc::AF_UNIX && self.sock_type == libc::SOCK_STREAM && self.listening
     }
 }
 
-/// Queries SO_DOMAIN, SO_TYPE and SO_ACCEPTCONN. Fails with ENOTSOCK for non-sockets.
+/// Fails with ENOTSOCK for non-sockets.
 pub fn socket_info(fd: BorrowedFd<'_>) -> io::Result<SocketInfo> {
     Ok(SocketInfo {
         domain: int_sockopt(fd, libc::SO_DOMAIN)?,

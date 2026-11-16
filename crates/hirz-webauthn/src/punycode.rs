@@ -91,7 +91,6 @@ pub(crate) fn encode(input: &str) -> Option<String> {
     Some(out)
 }
 
-/// Converts a lowercase Unicode domain to its ASCII form label by label.
 pub(crate) fn domain_to_ascii(domain: &str) -> Option<String> {
     let mut out = String::with_capacity(domain.len());
     for (i, label) in domain.split('.').enumerate() {

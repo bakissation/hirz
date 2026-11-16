@@ -1,8 +1,6 @@
 #!/bin/sh
-# hirz postinst. Safe to run more than once. The unit state handling follows what debhelper
-# generates: the broker socket is enabled on the first install, and an administrator's
-# "systemctl disable" is kept across upgrades and reinstalls. deb-systemd-invoke respects
-# policy-rc.d (chroots, image builds) and never starts a disabled unit.
+# hirz postinst. Safe to run more than once; unit state follows debhelper: the broker socket is
+# enabled on first install and an administrator's "systemctl disable" survives upgrades.
 set -e
 
 UNIT=hirz-uhid-broker.socket

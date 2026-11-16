@@ -1,26 +1,17 @@
 //! COSE_Key encoding (RFC 9052/9053) for credential keys and the CTAP key-agreement key.
-//!
-//! Only the encoding is checked here. Whether a point lies on the curve is checked by the
-//! crypto layer when the key is used.
+//! Only the encoding is checked here; the crypto layer checks that a point lies on the curve.
 
 use crate::cbor::{self, MapBuilder, Value};
 use crate::{Error, Result};
 
-/// COSE key type OKP.
 pub const KTY_OKP: i64 = 1;
-/// COSE key type EC2.
 pub const KTY_EC2: i64 = 2;
-/// COSE algorithm ES256.
 pub const ALG_ES256: i64 = -7;
-/// COSE algorithm EdDSA.
 pub const ALG_EDDSA: i64 = -8;
 /// COSE algorithm Ed25519 (fully specified, RFC 9864); accepted when parsing.
 pub const ALG_ED25519: i64 = -19;
-/// COSE algorithm ECDH-ES+HKDF-256, as used by CTAP pinUvAuthProtocol.
 pub const ALG_ECDH_ES_HKDF_256: i64 = -25;
-/// COSE curve P-256.
 pub const CRV_P256: i64 = 1;
-/// COSE curve Ed25519.
 pub const CRV_ED25519: i64 = 6;
 
 const LABEL_KTY: i64 = 1;
@@ -29,33 +20,19 @@ const LABEL_CRV: i64 = -1;
 const LABEL_X: i64 = -2;
 const LABEL_Y: i64 = -3;
 
-/// A credential public key parsed from a COSE_Key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublicKey {
-    /// P-256 ECDSA key as affine coordinates.
-    Es256 {
-        /// Big-endian x coordinate.
-        x: [u8; 32],
-        /// Big-endian y coordinate.
-        y: [u8; 32],
-    },
-    /// Ed25519 key.
-    Ed25519 {
-        /// Encoded public key.
-        x: [u8; 32],
-    },
+    Es256 { x: [u8; 32], y: [u8; 32] },
+    Ed25519 { x: [u8; 32] },
 }
 
-/// A P-256 key-agreement public key from a CTAP clientPIN request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyAgreementKey {
-    /// Big-endian x coordinate.
     pub x: [u8; 32],
-    /// Big-endian y coordinate.
     pub y: [u8; 32],
 }
 
-/// Writes `{1: kty, 3: alg, -1: crv, -2: x [, -3: y]}`, already in canonical key order.
+/// `{1: kty, 3: alg, -1: crv, -2: x [, -3: y]}`, already in canonical key order.
 fn encode_key(kty: i64, alg: i64, crv: i64, x: &[u8; 32], y: Option<&[u8; 32]>) -> Vec<u8> {
     let mut out = Vec::with_capacity(77);
     cbor::write_map_header(&mut out, if y.is_some() { 5 } else { 4 });
@@ -72,17 +49,14 @@ fn encode_key(kty: i64, alg: i64, crv: i64, x: &[u8; 32], y: Option<&[u8; 32]>) 
     out
 }
 
-/// Encodes an ES256 public key as a canonical COSE_Key `{1:2, 3:-7, -1:1, -2:x, -3:y}`.
 pub fn encode_es256(x: &[u8; 32], y: &[u8; 32]) -> Vec<u8> {
     encode_key(KTY_EC2, ALG_ES256, CRV_P256, x, Some(y))
 }
 
-/// Encodes an Ed25519 public key as a canonical COSE_Key `{1:1, 3:-8, -1:6, -2:x}`.
 pub fn encode_ed25519(x: &[u8; 32]) -> Vec<u8> {
     encode_key(KTY_OKP, ALG_EDDSA, CRV_ED25519, x, None)
 }
 
-/// Returns the authenticator key-agreement key `{1:2, 3:-25, -1:1, -2:x, -3:y}` as a value.
 pub fn key_agreement_value(x: &[u8; 32], y: &[u8; 32]) -> Value {
     MapBuilder::new()
         .int(LABEL_KTY, KTY_EC2)

@@ -1,13 +1,6 @@
-//! Strict CBOR subset used by CTAP2 and WebAuthn, with a CTAP2 canonical encoder.
-//!
-//! Supported: unsigned and negative integers, byte and text strings, arrays, maps, booleans
-//! and null, all with definite lengths. Floats, tags, `undefined`, other simple values and
-//! indefinite lengths are rejected. Map keys must be integers or text strings.
-//!
-//! Canonical form follows CTAP2 section 8: shortest-form arguments and map keys sorted by
-//! major type, then encoded length, then bytewise. For integer and text keys this matches
-//! the length-first core deterministic ordering of RFC 8949 section 4.2.3 within one major
-//! type; across major types all integer keys come before text keys.
+//! Strict CBOR subset used by CTAP2 and WebAuthn, with a CTAP2 canonical encoder: definite
+//! lengths only, no floats, tags or `undefined`, integer or text map keys. Canonical order
+//! follows CTAP2 section 8; see docs/architecture.md, "Implementation notes".
 
 use crate::{Error, Result};
 use core::cmp::Ordering;
@@ -25,29 +18,21 @@ const SIMPLE_FALSE: u8 = 0xf4;
 const SIMPLE_TRUE: u8 = 0xf5;
 const SIMPLE_NULL: u8 = 0xf6;
 
-/// A CBOR data item within the supported subset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
-    /// Major type 0.
     Unsigned(u64),
     /// Major type 1: `Negative(n)` is the integer `-1 - n`.
     Negative(u64),
-    /// Byte string.
     Bytes(Vec<u8>),
-    /// UTF-8 text string.
     Text(String),
-    /// Array of items.
     Array(Vec<Value>),
     /// Map entries in encoded order; keys are integers or text.
     Map(Vec<(Value, Value)>),
-    /// `true` or `false`.
     Bool(bool),
-    /// `null`.
     Null,
 }
 
 impl Value {
-    /// Builds an integer value.
     pub fn int(v: i64) -> Value {
         match u64::try_from(v) {
             Ok(u) => Value::Unsigned(u),
@@ -55,7 +40,6 @@ impl Value {
         }
     }
 
-    /// Returns the integer if it fits in an `i64`.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Value::Unsigned(n) => i64::try_from(*n).ok(),
@@ -64,7 +48,6 @@ impl Value {
         }
     }
 
-    /// Returns any integer value exactly.
     pub fn as_i128(&self) -> Option<i128> {
         match self {
             Value::Unsigned(n) => Some(i128::from(*n)),
@@ -73,7 +56,6 @@ impl Value {
         }
     }
 
-    /// Returns the value of an unsigned integer.
     pub fn as_u64(&self) -> Option<u64> {
         match self {
             Value::Unsigned(n) => Some(*n),
@@ -81,7 +63,6 @@ impl Value {
         }
     }
 
-    /// Returns the contents of a byte string.
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Value::Bytes(b) => Some(b),
@@ -89,7 +70,6 @@ impl Value {
         }
     }
 
-    /// Returns the contents of a text string.
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Value::Text(t) => Some(t),
@@ -97,7 +77,6 @@ impl Value {
         }
     }
 
-    /// Returns the value of a boolean.
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
@@ -105,7 +84,6 @@ impl Value {
         }
     }
 
-    /// Returns the items of an array.
     pub fn as_array(&self) -> Option<&[Value]> {
         match self {
             Value::Array(a) => Some(a),
@@ -113,7 +91,6 @@ impl Value {
         }
     }
 
-    /// Returns the entries of a map.
     pub fn as_map(&self) -> Option<&[(Value, Value)]> {
         match self {
             Value::Map(m) => Some(m),
@@ -121,7 +98,6 @@ impl Value {
         }
     }
 
-    /// Looks up `key` in a map; `None` for missing keys and non-maps.
     pub fn get(&self, key: &Value) -> Option<&Value> {
         self.as_map()?
             .iter()
@@ -129,12 +105,10 @@ impl Value {
             .map(|(_, v)| v)
     }
 
-    /// Looks up an integer key in a map.
     pub fn get_int(&self, key: i64) -> Option<&Value> {
         self.get(&Value::int(key))
     }
 
-    /// Looks up a text key in a map.
     pub fn get_text(&self, key: &str) -> Option<&Value> {
         self.as_map()?
             .iter()
@@ -197,44 +171,36 @@ impl From<Vec<Value>> for Value {
     }
 }
 
-/// Builder for maps with integer or text keys; `encode` sorts keys canonically.
+/// `encode` sorts keys canonically.
 #[derive(Debug, Clone, Default)]
 pub struct MapBuilder {
     entries: Vec<(Value, Value)>,
 }
 
 impl MapBuilder {
-    /// Starts an empty map.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Adds an entry with an integer key.
     pub fn int(mut self, key: i64, value: impl Into<Value>) -> Self {
         self.entries.push((Value::int(key), value.into()));
         self
     }
 
-    /// Adds an entry with a text key.
     pub fn text(mut self, key: &str, value: impl Into<Value>) -> Self {
         self.entries.push((Value::from(key), value.into()));
         self
     }
 
-    /// Finishes the map.
     pub fn build(self) -> Value {
         Value::Map(self.entries)
     }
 }
 
-/// Decoder limits and strictness options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum input length in bytes.
     pub max_len: usize,
-    /// Maximum nesting of arrays and maps.
     pub max_depth: usize,
-    /// Maximum total number of data items, map keys included.
     pub max_items: usize,
     /// Require CTAP2 canonical map key order; duplicate keys are rejected either way.
     pub require_canonical: bool,
@@ -251,7 +217,7 @@ impl Default for Limits {
     }
 }
 
-/// Decodes exactly one data item from `input`, rejecting trailing bytes.
+/// Exactly one item; trailing bytes are rejected.
 pub fn decode(input: &[u8], limits: &Limits) -> Result<Value> {
     let (value, used) = decode_prefix(input, limits)?;
     if used != input.len() {
@@ -260,7 +226,6 @@ pub fn decode(input: &[u8], limits: &Limits) -> Result<Value> {
     Ok(value)
 }
 
-/// Decodes one data item at the start of `input`; returns it and the bytes consumed.
 pub(crate) fn decode_prefix(input: &[u8], limits: &Limits) -> Result<(Value, usize)> {
     if input.len() > limits.max_len {
         return Err(Error::LimitExceeded);
@@ -331,8 +296,8 @@ impl<'a> Decoder<'a> {
         Ok(d)
     }
 
-    /// Rejects a declared item count before any allocation: every item needs at least
-    /// one input byte and one unit of the item budget.
+    /// Rejects a declared item count before any allocation: every item needs at least one input
+    /// byte and one unit of the item budget.
     fn check_count(&self, count: usize, per_entry: usize) -> Result<()> {
         let needed = count.checked_mul(per_entry).ok_or(Error::LimitExceeded)?;
         let budget = self.items.checked_add(needed).ok_or(Error::LimitExceeded)?;
@@ -492,7 +457,7 @@ fn len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
-/// Writes an initial byte and argument in shortest form.
+/// Initial byte and argument in shortest form.
 pub(crate) fn write_head(out: &mut Vec<u8>, major: u8, arg: u64) {
     if let Ok(small) = u8::try_from(arg) {
         if small < 24 {
@@ -513,7 +478,6 @@ pub(crate) fn write_head(out: &mut Vec<u8>, major: u8, arg: u64) {
     }
 }
 
-/// Writes an integer.
 pub(crate) fn write_int(out: &mut Vec<u8>, v: i64) {
     match u64::try_from(v) {
         Ok(u) => write_head(out, MAJOR_UNSIGNED, u),
@@ -521,19 +485,16 @@ pub(crate) fn write_int(out: &mut Vec<u8>, v: i64) {
     }
 }
 
-/// Writes a byte string.
 pub(crate) fn write_bytes(out: &mut Vec<u8>, b: &[u8]) {
     write_head(out, MAJOR_BYTES, len_u64(b.len()));
     out.extend_from_slice(b);
 }
 
-/// Writes a text string.
 pub(crate) fn write_text(out: &mut Vec<u8>, t: &str) {
     write_head(out, MAJOR_TEXT, len_u64(t.len()));
     out.extend_from_slice(t.as_bytes());
 }
 
-/// Writes a map header for `len` entries.
 pub(crate) fn write_map_header(out: &mut Vec<u8>, len: usize) {
     write_head(out, MAJOR_MAP, len_u64(len));
 }
@@ -610,7 +571,6 @@ mod tests {
             decode(&[0xa2, 0x61, 0x61, 0x00, 0x01, 0x00], &strict()),
             Err(Error::NonCanonical)
         );
-        // Shorter text keys first, then bytewise.
         assert!(decode(&[0xa2, 0x61, 0x62, 0x00, 0x62, 0x61, 0x61, 0x00], &strict()).is_ok());
         assert_eq!(
             decode(&[0xa2, 0x62, 0x61, 0x61, 0x00, 0x61, 0x62, 0x00], &strict()),

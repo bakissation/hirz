@@ -2,8 +2,7 @@
 # Packs extension/ into dist/hirz-VERSION.xpi, byte for byte the same on every run: sorted
 # file list, fixed timestamps and modes, no extra zip fields.
 #
-# The XPI is unsigned. Release Firefox installs only signed add-ons; until hirz is signed
-# through addons.mozilla.org, load it with about:debugging or use Developer Edition / Nightly.
+# The XPI is unsigned: release Firefox only installs signed add-ons (use about:debugging or Nightly).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -31,7 +30,6 @@ export TZ=UTC LC_ALL=C
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
-# Only files the extension needs: no dot files, no editor or build leftovers.
 (
   cd extension
   find . -type f ! -path '*/.*' ! -name '*~' ! -name '*.xpi' -print

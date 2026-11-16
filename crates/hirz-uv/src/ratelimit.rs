@@ -18,7 +18,6 @@ impl RateLimiter {
         Self::default()
     }
 
-    /// Records a prompt for `rp_id` at `now` and returns true when it is within the limit.
     /// Refused attempts are not recorded.
     pub fn allow(&mut self, rp_id: &str, now: Instant, per_minute: u32) -> bool {
         let limit = usize::try_from(per_minute).unwrap_or(usize::MAX);

@@ -191,7 +191,6 @@ fn es256_verify_known_vectors() {
     es256::verify(&x, &y, b"test", &test).unwrap();
     assert!(es256::verify(&x, &y, b"test", &sample).is_err());
 
-    // Wycheproof-style malformed encodings must be rejected.
     let mut trailing = sample.clone();
     trailing.push(0);
     assert!(es256::verify(&x, &y, b"sample", &trailing).is_err());
@@ -201,7 +200,6 @@ fn es256_verify_known_vectors() {
     let zero = h("3006020100020100");
     assert!(es256::verify(&x, &y, b"sample", &zero).is_err());
     assert!(es256::verify(&x, &y, b"sample", &[]).is_err());
-    // A point that is not on the curve.
     let mut bad_y = y;
     bad_y[31] ^= 1;
     assert!(es256::verify(&x, &bad_y, b"sample", &sample).is_err());
@@ -365,7 +363,7 @@ fn x25519_rfc7748() {
     let shared = h("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
     assert_eq!(&x25519::agree(&a, &b_pub).unwrap()[..], &shared[..]);
     assert_eq!(&x25519::agree(&b, &a_pub).unwrap()[..], &shared[..]);
-    // A small-order public key gives an all-zero secret and must be refused.
+    // All-zero peer key (small order) must be refused.
     assert!(x25519::agree(&a, &[0u8; 32]).is_err());
 }
 

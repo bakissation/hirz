@@ -1,49 +1,6 @@
 //! The authenticator engine: makeCredential, getAssertion and authenticatorSelection over the
-//! vault, independent of the transport.
-//!
-//! Every ceremony first reloads the vault, so credentials another frontend or the user's
-//! folder sync tool wrote in the meantime are visible.
-//!
-//! Policy, relative to CTAP 2.2 section 6:
-//!
-//! - **Silent probes** (`up: false`): platforms send getAssertion with `up: false` to find
-//!   out which entries of an allow list or exclude list exist here before the real request
-//!   (CTAP 2.2 section 6.2.2, "pre-flight"). With a non-empty allow list the engine signs for
-//!   the first applicable credential without calling the approver: flags UP=0 and UV=0, BE
-//!   and BS as usual, no hmac-secret output and no user entity. Relying parties reject
-//!   assertions without UP for sign-in, so a probe result cannot log anyone in. Credentials
-//!   with credProtect level 3 are not applicable without UV and are skipped. An empty allow
-//!   list, or a probe that asks for UV, never reaches a credential (`NoCredentials` and
-//!   `UvRequiredUnavailable`). A probe reveals to local processes whether a credential exists
-//!   for a site, which processes of the same user can learn from the vault anyway.
-//! - **excludeList**: a listed credential of this RP still asks the user (a Create prompt)
-//!   before [`CoreError::CredentialExcluded`] is returned, so a page cannot probe for
-//!   credentials without a gesture. If the user declines or the prompt times out, the
-//!   approval error is returned instead, exactly as for a declined creation (WebAuthn
-//!   section 6.3.2 step 3). Excluded credentials with credProtect level 3 only count when
-//!   the approval included UV, as in CTAP.
-//! - **credProtect**: level 3 needs UV; level 2 needs UV when there is no allow list. CTAP
-//!   decides UV before looking up credentials, hirz decides it during the approval. So when
-//!   a shown candidate needs UV the approver is asked with `uv_required`. If UV turns out to
-//!   be unavailable and the RP did not require it, the protected candidates are dropped and
-//!   the approver is asked again with the rest, or `NoCredentials` is returned: protected
-//!   credentials stay invisible without UV, as in CTAP.
-//! - **No applicable credential**: `NoCredentials` at once, without a prompt (CTAP 2.2
-//!   getAssertion step 7). A client role that must hide this from pages (WebAuthn privacy
-//!   considerations) has to delay or prompt on its own.
-//! - **Allow list**: the first applicable credential in allow-list order is used, without a
-//!   choice (CTAP: "select any credential"). Without an allow list the user picks among the
-//!   discoverable credentials, newest first.
-//! - **Same account again**: creating a discoverable credential replaces older discoverable
-//!   credentials of the same RP id and user id (CTAP makeCredential, `rk`), after the new one
-//!   is stored.
-//! - **User entity**: returned for flows without an allow list; name and display name only
-//!   when the approval included UV (CTAP getAssertion, user identifiable information).
-//! - **Machine login**: RP ids starting with `pam://` (pam-u2f for login, sudo and screen
-//!   unlock) are refused with `ApprovalError::Unavailable` (CTAP2_ERR_NOT_ALLOWED) before any
-//!   prompt or vault access, silent probes included. hirz passkeys are synced software keys and
-//!   must not become a login factor for the computer they run on, and an unlock that waits for
-//!   a hirz approval could deadlock. See [`is_machine_login_rp_id`].
+//! vault, independent of the transport. Policy (silent probes, excludeList, credProtect, `pam://`)
+//! is in docs/architecture.md, "Engine policy".
 
 use crate::types::{
     AAGUID, Approval, ApprovalContext, ApprovalError, Approver, AssertionResponse, COSE_ALG_EDDSA,
@@ -62,7 +19,6 @@ use hirz_vault::{
     CredentialRecord, HmacSecretPair, MAX_STRING_LEN, MAX_USER_ID_LEN, Vault, VaultError,
 };
 
-/// Authenticator engine over one opened vault and one approver.
 pub struct Engine<'a> {
     vault: &'a mut Vault,
     approver: &'a dyn Approver,
@@ -86,7 +42,6 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Replaces the clock used for `created_at` (Unix seconds).
     pub fn with_clock(mut self, clock: fn() -> u64) -> Self {
         self.clock = clock;
         self
@@ -100,8 +55,7 @@ impl<'a> Engine<'a> {
         self.vault.reload().map(|_| ()).map_err(vault_error)
     }
 
-    /// CTAP authenticatorMakeCredential / WebAuthn create. `origin` is shown in the prompt
-    /// (extension path only).
+    /// `origin` is shown in the prompt (extension path only).
     pub fn make_credential(
         &mut self,
         req: &MakeCredentialRequest,
@@ -205,7 +159,7 @@ impl<'a> Engine<'a> {
         })
     }
 
-    /// (any excluded credential without credProtect 3, any excluded with credProtect 3)
+    /// (any excluded credential without credProtect 3, any with credProtect 3)
     fn excluded(&self, req: &MakeCredentialRequest) -> (bool, bool) {
         let mut plain = false;
         let mut uv_only = false;
@@ -232,15 +186,11 @@ impl<'a> Engine<'a> {
             .map(|r| r.credential_id.clone())
             .collect();
         for id in older {
-            // Best effort: the new credential is already stored, and a leftover older one
-            // only shows up as an extra account.
+            // Best effort: a leftover older credential only shows up as an extra account.
             let _ = self.vault.delete(&id);
         }
     }
 
-    /// CTAP authenticatorGetAssertion / WebAuthn get. With `hmac` (CTAP path) the
-    /// hmac-secret output is wrapped into the authData extensions; without it (extension
-    /// path) it is returned raw in `hmac_secret_output`.
     pub fn get_assertion(
         &mut self,
         req: &GetAssertionRequest,
@@ -309,7 +259,7 @@ impl<'a> Engine<'a> {
         })
     }
 
-    /// getAssertion with `up: false` (see the module documentation). Never prompts.
+    /// Never prompts; see "Engine policy" in docs/architecture.md.
     fn silent_probe(&mut self, req: &GetAssertionRequest) -> Result<AssertionResponse, CoreError> {
         if req.allow_list.is_empty() {
             return Err(CoreError::NoCredentials);
@@ -326,7 +276,6 @@ impl<'a> Engine<'a> {
         sign_assertion(record, req, flags(false, false, vault.backup_state()), None)
     }
 
-    /// CTAP authenticatorSelection: user presence only.
     pub fn select(&mut self) -> Result<(), CoreError> {
         let approval = self
             .approver
@@ -342,8 +291,7 @@ impl<'a> Engine<'a> {
 
 const MACHINE_LOGIN_PREFIX: &str = "pam://";
 
-/// True for RP ids that ask for a login factor of this computer (pam-u2f uses `pam://HOST`
-/// by default). The engine refuses them; frontends use this to log the refusal.
+/// pam-u2f asks for `pam://HOST` by default; the engine refuses these.
 pub fn is_machine_login_rp_id(rp_id: &str) -> bool {
     rp_id
         .get(..MACHINE_LOGIN_PREFIX.len())
@@ -364,8 +312,7 @@ fn check_rp_id(rp_id: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Applicable credentials before credProtect: allow-list order without duplicates, or the
-/// discoverable credentials of the RP, newest first.
+/// Allow-list order without duplicates, or the RP's discoverable credentials, newest first.
 fn locate<'v>(vault: &'v Vault, req: &GetAssertionRequest) -> Vec<&'v CredentialRecord> {
     if req.allow_list.is_empty() {
         let mut found: Vec<&CredentialRecord> = vault
@@ -392,7 +339,6 @@ fn locate<'v>(vault: &'v Vault, req: &GetAssertionRequest) -> Vec<&'v Credential
     found
 }
 
-/// CTAP credProtect: whether this credential is usable only after UV in this request.
 fn needs_uv(rec: &CredentialRecord, with_list: bool) -> bool {
     match rec.cred_protect {
         Some(3) => true,
@@ -401,8 +347,7 @@ fn needs_uv(rec: &CredentialRecord, with_list: bool) -> bool {
     }
 }
 
-/// One Get approval over `pool`. UV is required when the RP requires it or when a shown
-/// candidate is protected by credProtect.
+/// UV is required when the RP requires it or a shown candidate is protected by credProtect.
 fn ask<'v>(
     approver: &dyn Approver,
     req: &GetAssertionRequest,
@@ -525,8 +470,7 @@ fn new_hmac_pair() -> Result<HmacSecretPair, CoreError> {
     })
 }
 
-/// HMAC-SHA-256(CredRandom, salt1) [|| HMAC-SHA-256(CredRandom, salt2)], CredRandom chosen
-/// by the UV result. None when the credential was created without hmac-secret.
+/// HMAC-SHA-256(CredRandom, salt1) [|| HMAC-SHA-256(CredRandom, salt2)]; CredRandom depends on UV.
 fn hmac_secret_output(
     rec: &CredentialRecord,
     salts: &HmacSecretSalts,
@@ -546,8 +490,6 @@ fn hmac_secret_output(
     Some(out)
 }
 
-/// authenticatorData for an assertion and the signature over it and the client data hash,
-/// without a user entity or a raw hmac-secret output.
 fn sign_assertion(
     record: &CredentialRecord,
     req: &GetAssertionRequest,

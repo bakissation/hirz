@@ -58,8 +58,7 @@ pub(crate) fn strip_prefix(data: &[u8], t: FileType) -> Result<&[u8], VaultError
     Ok(r.rest())
 }
 
-/// Key generation identifier. Ordering (number, then rotator id) picks the winner when two
-/// devices rotate at the same time.
+/// Ordering (number, then rotator id) picks the winner when two devices rotate at the same time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GenId {
     pub number: u32,
@@ -150,8 +149,6 @@ pub(crate) fn slot_name(device: &DeviceId) -> String {
     format!("{}{SLOT_SUFFIX}", hex(device))
 }
 
-// ---- header ----
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Header {
     pub(crate) vault_id: [u8; 16],
@@ -178,8 +175,6 @@ impl Header {
     }
 }
 
-// ---- key commitments ----
-
 pub(crate) fn commitment(key: &[u8; 32], vault_id: &[u8; 16], gen_id: &GenId) -> [u8; 32] {
     hirz_crypto::hmac_sha256(
         key,
@@ -202,8 +197,6 @@ pub(crate) fn genesis_tag(
         ),
     )
 }
-
-// ---- gen.info ----
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GenInfo {
@@ -336,8 +329,6 @@ impl GenInfo {
     }
 }
 
-// ---- slots ----
-
 fn device_slot_aad(vault_id: &[u8; 16], gen_id: &GenId, device: &DeviceId) -> Vec<u8> {
     aad(
         "hirz device slot v1",
@@ -438,8 +429,6 @@ pub(crate) fn open_recovery_slot(
     )
 }
 
-// ---- record files ----
-
 fn record_key(
     key: &[u8; 32],
     vault_id: &[u8; 16],
@@ -517,8 +506,6 @@ pub(crate) fn author_tag(
         &aad("hirz author v1", &[vault_id, rel_path.as_bytes(), body]),
     )
 }
-
-// ---- local state ----
 
 #[derive(Clone)]
 pub(crate) struct LocalDevice {

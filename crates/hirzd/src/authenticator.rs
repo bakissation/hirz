@@ -1,9 +1,6 @@
-//! The CTAP engine adapter: [`hirz_ctap::Authenticator`] over a [`Session`].
-//!
-//! The approval prompt cannot be interrupted. When the platform cancels, the transport
-//! answers CTAP2_ERR_KEEPALIVE_CANCEL at once and drops the late result; the prompt stays
-//! open until it is answered or times out, and its approval then counts as refused, so a
-//! cancelled request creates and signs nothing.
+//! The CTAP engine adapter: [`hirz_ctap::Authenticator`] over a [`Session`]. The approval prompt
+//! cannot be interrupted, so a cancelled request creates and signs nothing (docs/uhid.md,
+//! "Cancellation").
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +17,6 @@ use crate::session::{REMOVED_NOTICE, Session, VaultStatus};
 const NOTICE_INTERVAL: Duration = Duration::from_secs(600);
 const NO_VAULT: &str = "no hirz vault on this device; run `hirz init` first";
 
-/// Tells the user about a missing vault, at most once per [`NOTICE_INTERVAL`].
 #[derive(Debug)]
 pub struct Notice {
     desktop: bool,
@@ -29,7 +25,6 @@ pub struct Notice {
 }
 
 impl Notice {
-    /// `desktop`: also show a desktop notification with zenity.
     pub fn new(desktop: bool) -> Self {
         Notice {
             desktop,
@@ -38,7 +33,6 @@ impl Notice {
         }
     }
 
-    /// Tells the user once per run that this device was removed from the vault.
     fn removed(&mut self) {
         if core::mem::replace(&mut self.removed_told, true) {
             return;
@@ -117,10 +111,9 @@ impl<A: Approver> VaultAuthenticator<A> {
     }
 }
 
-/// Platforms send a throwaway makeCredential only to wait for a touch, for example when a
-/// silent probe found none of the allowed credentials: Firefox (authenticator-rs
-/// `dummy_make_credentials_cmd`) uses the RP id `make.me.blink`, Chromium `.dummy`. hirz
-/// asks for presence like authenticatorSelection and stores nothing.
+/// Platforms send a throwaway makeCredential only to wait for a touch: Firefox (authenticator-rs
+/// `dummy_make_credentials_cmd`) uses the RP id `make.me.blink`, Chromium `.dummy`. Asks for
+/// presence like authenticatorSelection and stores nothing.
 fn is_touch_request(req: &MakeCredentialRequest) -> bool {
     req.rp.id == "make.me.blink" || req.rp.id.starts_with('.')
 }

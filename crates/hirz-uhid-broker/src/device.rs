@@ -26,13 +26,11 @@ pub const FIDO_REPORT_DESCRIPTOR: [u8; 34] = [
 pub const DEVICE_NAME: &str = "hirz virtual authenticator";
 /// pid.codes vendor id for open source hardware.
 pub const VENDOR_ID: u32 = 0x1209;
-/// A pid.codes test product id (1209:0001 to 1209:0010 are reserved for testing). A
-/// dedicated product id must be registered with pid.codes before a stable release; the
-/// udev rule in packaging/udev matches on this value.
+/// A pid.codes test product id; a dedicated one must be registered before a stable release, and
+/// the udev rule in packaging/udev matches on this value.
 pub const PRODUCT_ID: u32 = 0x0007;
 pub const DEVICE_VERSION: u32 = 0x0001;
 
-/// Size of every report relayed in either direction.
 pub const REPORT_SIZE: usize = 64;
 
 /// Creation parameters for the device of `uid`. The decimal uid goes into the `phys` field,
@@ -51,10 +49,8 @@ pub fn create_params(phys: &str) -> CreateParams<'_> {
     }
 }
 
-/// Extracts the 64-byte output report from a UHID_OUTPUT payload. hidraw writers prefix
-/// the report with the report number, which is 0 for a descriptor without report ids, so the
-/// kernel delivers 65 bytes; a bare 64-byte payload is accepted as well. Anything else is
-/// dropped.
+/// hidraw writers prefix the report with the report number (0 without report ids), so the kernel
+/// delivers 65 bytes; a bare 64-byte payload is accepted too. Anything else is dropped.
 pub fn output_report(data: &[u8]) -> Option<[u8; REPORT_SIZE]> {
     let body = match data.len() {
         65 if data.first() == Some(&0) => data.get(1..)?,

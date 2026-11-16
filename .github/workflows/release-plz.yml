@@ -1,15 +1,8 @@
 name: release-plz
 
-# On every push to main:
-# 1. "release": if the push is the merge of the release PR, tag vX.Y.Z (signed when
-#    RELEASE_TAG_SSH_KEY exists) and create the draft GitHub Release. The tag starts
-#    release.yml, which builds, signs and publishes.
-# 2. "release-pr": open or update the "chore: release vX.Y.Z" PR against main with the next
-#    version and the CHANGELOG.md entry from the Conventional Commits since the last tag.
-# 3. "sync-versions": add the version to the files release-plz does not know about
-#    (scripts/set-version.sh) as a verified commit on the release PR branch.
-# 4. "backmerge": after a release, open and auto-merge main into dev.
-# See docs/release.md for the GitHub App and secrets this needs.
+# On every push to main: tag and draft-release when the release PR was merged, otherwise open or
+# update the release PR, stamp versions and back-merge main into dev. Secrets and the GitHub App:
+# docs/release.md.
 
 on:
   push:

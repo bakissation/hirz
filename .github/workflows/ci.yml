@@ -1,11 +1,8 @@
 name: ci
 
-# Every push to dev or main and every pull request into them: formatting, clippy, tests on
-# both architectures, the unsafe and dependency checks, cargo deny, cargo vet and a build of
-# every package (kept 7 days as workflow artifacts). Nothing is released from here.
-# The nightly schedule runs only the 60 s per-target fuzz smoke test.
-# Branch protection requires the single check named "ci" (the last job), which passes only
-# when every other job passed. See docs/release.md.
+# Every push to dev or main and every pull request into them; nothing is released from here. Branch
+# protection requires the single check named "ci" (the last job), which passes only when every
+# other job passed (docs/release.md).
 
 on:
   push:

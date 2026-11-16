@@ -1,7 +1,6 @@
 //! Display helpers. Names shown here come from websites and other devices, so they are
 //! cleaned before reaching the terminal.
 
-/// Characters that change how surrounding text is displayed without being visible.
 fn invisible(c: char) -> bool {
     matches!(
         c,
@@ -16,8 +15,6 @@ fn invisible(c: char) -> bool {
     )
 }
 
-/// Removes control and invisible characters, collapses whitespace and shortens the text to
-/// at most `max_chars` characters.
 pub fn clean(s: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(s.len().min(max_chars.saturating_mul(4)));
     let mut count = 0usize;
@@ -66,7 +63,6 @@ pub fn clean(s: &str, max_chars: usize) -> String {
 
 pub use hirz_proto::hex::encode as hex;
 
-/// The start of an id as `hirz list`, `hirz devices` and `hirz devices approve` show it.
 pub fn short_id(id: &[u8]) -> String {
     const SHOWN_HEX: usize = 12;
     let mut h = hex(id);
@@ -82,15 +78,13 @@ pub fn hex_prefix(input: &str) -> Option<String> {
     (p.len() >= 4 && p.len() <= max && p.bytes().all(|b| b.is_ascii_hexdigit())).then_some(p)
 }
 
-/// `YYYY-MM-DD` (UTC) for a unix time in seconds.
 pub fn date(unix: u64) -> String {
     let days = unix / 86_400;
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Days since 1970-01-01 to a proleptic Gregorian date (H. Hinnant's algorithm), for days
-/// after the epoch.
+/// Days since 1970-01-01 to a proleptic Gregorian date (H. Hinnant's algorithm); after the epoch only.
 fn civil_from_days(days: u64) -> (u64, u64, u64) {
     let z = days.saturating_add(719_468);
     let era = z / 146_097;
@@ -121,7 +115,6 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 
 pub use hirz_proto::time::unix_now as now;
 
-/// Renders rows as left-aligned columns separated by two spaces.
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
     for row in rows {
@@ -150,7 +143,6 @@ pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     out
 }
 
-/// Plural helper: `count(3, "passkey")` is "3 passkeys".
 pub fn count(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
@@ -159,8 +151,7 @@ pub fn count(n: usize, noun: &str) -> String {
     }
 }
 
-/// A credential's RP id for people: OpenSSH keys read "SSH key (NAME)", see
-/// [`hirz_uv::display::site_label_with`]. JSON output keeps the raw RP id.
+/// OpenSSH keys read "SSH key (NAME)" (see [`hirz_uv::display::site_label_with`]); JSON output keeps the raw RP id.
 pub fn site(rp_id: &str, max_chars: usize) -> String {
     hirz_uv::display::site_label_with(rp_id, |s| clean(s, max_chars))
 }

@@ -1,9 +1,6 @@
-//! KeePassXC passkey files (`.passkey`, written by "Export passkey" for one entry): a JSON
-//! object with `relyingParty`, `url`, `username`, `credentialId` and `userHandle`
-//! (base64url) and `privateKey` (a PKCS#8 PEM block).
-//!
-//! KeePass XML exports, which keep passkeys in `KPEX_PASSKEY_*` entry attributes, are not
-//! read: hirz has no XML parser.
+//! KeePassXC passkey files (`.passkey`, from "Export passkey" for one entry): a JSON object with
+//! `relyingParty`, `url`, `username`, `credentialId`, `userHandle` (base64url) and `privateKey` (a
+//! PKCS#8 PEM block). KeePass XML exports are not read: hirz has no XML parser.
 
 use super::{
     Found, base64_field, finish, identify_key, lenient_base64, non_empty, opt_text, site_id,
@@ -13,9 +10,7 @@ use hirz_crypto::Zeroizing;
 use hirz_proto::json::{Json, Limits};
 use hirz_vault::{CredentialRecord, MAX_CREDENTIAL_ID_LEN, MAX_PKCS8_LEN, MAX_USER_ID_LEN};
 
-/// Largest `.passkey` file hirz reads.
 pub const MAX_PASSKEY_FILE_LEN: usize = 64 * 1024;
-/// File name extension KeePassXC gives passkey exports.
 pub const EXTENSION: &str = "passkey";
 
 const LIMITS: Limits = Limits {
@@ -102,7 +97,6 @@ pub fn read(data: &[u8], now: u64) -> Result<Found, String> {
     )
 }
 
-/// Builds a `.passkey` file as KeePassXC writes it, for tests.
 #[cfg(test)]
 pub fn passkey_file(rp: &str, user: &str, id: &[u8], handle: &[u8], pkcs8: &[u8]) -> String {
     let mut b64 = hirz_proto::base64url::encode(pkcs8)

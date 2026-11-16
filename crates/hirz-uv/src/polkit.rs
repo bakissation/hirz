@@ -2,14 +2,12 @@
 
 pub const ACTION_ID: &str = "dev.hirz.authenticate";
 pub const POLICY_FILE_NAME: &str = "dev.hirz.authenticate.policy";
-/// Where an installed action file is looked for before polkit is offered.
 pub const POLICY_DIRS: &[&str] = &[
     "/usr/share/polkit-1/actions",
     "/usr/local/share/polkit-1/actions",
 ];
 
-/// The subject polkit authorizes. The three-part form avoids the pid reuse races documented
-/// in pkcheck(1).
+/// The three-part subject form avoids the pid reuse races documented in pkcheck(1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,
@@ -30,22 +28,14 @@ pub fn pkcheck_args(id: &ProcessIdentity) -> Vec<String> {
     ]
 }
 
-/// Exit status meaning, per pkcheck(1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PkcheckOutcome {
-    /// 0: authorized (the user authenticated).
     Authorized,
-    /// 1: not authorized.
     NotAuthorized,
-    /// 2: no authentication agent, or interaction not allowed.
     NoAgent,
-    /// 3: the user dismissed the dialog.
     Dismissed,
-    /// 127: error while checking, for example the action is not registered.
     CheckError,
-    /// 126: malformed options.
     BadArguments,
-    /// Killed by a signal or an undocumented status.
     Unknown,
 }
 
@@ -70,7 +60,6 @@ pub fn parse_stat_start_time(stat: &[u8]) -> Option<u64> {
     rest.split_ascii_whitespace().nth(19)?.parse().ok()
 }
 
-/// Real uid from the `Uid:` line of `/proc/<pid>/status`.
 pub fn parse_status_uid(status: &[u8]) -> Option<u32> {
     let text = core::str::from_utf8(status).ok()?;
     let line = text.lines().find(|l| l.starts_with("Uid:"))?;
