@@ -1,0 +1,11 @@
+name: Idea or wish
+description: Something you wish hirz did.
+labels: [idea]
+body:
+  - type: textarea
+    id: wish
+    attributes:
+      label: What would you like hirz to do?
+      description: Describe the situation you are in, not only the feature.
+    validations:
+      required: true

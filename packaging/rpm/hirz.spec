@@ -98,6 +98,8 @@ install -Dm0644 packaging/udev/70-hirz.rules %{buildroot}%{_udevrulesdir}/70-hir
 install -Dm0644 packaging/udev/72-hirz.rules %{buildroot}%{_udevrulesdir}/72-hirz.rules
 install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
   %{buildroot}%{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
+install -Dm0644 assets/brand/hirz-app-icon.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/hirz.svg
+install -Dm0644 assets/brand/app-icon-256.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/hirz.png
 install -d %{buildroot}%{_modulesloaddir}
 echo uhid > %{buildroot}%{_modulesloaddir}/hirz.conf
 %{_mandir}/man1/hirz.1*
@@ -162,6 +164,8 @@ fi
 %{_udevrulesdir}/70-hirz.rules
 %{_udevrulesdir}/72-hirz.rules
 %{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
+%{_datadir}/icons/hicolor/scalable/apps/hirz.svg
+%{_datadir}/icons/hicolor/256x256/apps/hirz.png
 %{_modulesloaddir}/hirz.conf
 %{_prefix}/lib/mozilla/native-messaging-hosts/hirz.json
 %if "%{_libdir}" != "%{_prefix}/lib"

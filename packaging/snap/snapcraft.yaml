@@ -6,6 +6,7 @@
 # runner (the core24 base). Locally: the same, or "snapcraft pack" with LXD.
 name: hirz
 title: hirz
+icon: assets/brand/hirz-app-icon.svg
 version: '0.1.0-dev'
 summary: Passkey authenticator for Linux, seen by browsers as a USB security key
 description: |

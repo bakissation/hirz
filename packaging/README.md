@@ -14,6 +14,7 @@ manifest points to the same `hirz-nmh` path everywhere.
 | User unit | `/usr/lib/systemd/user/hirzd.service` | same | same | 0644 |
 | udev rules | `/usr/lib/udev/rules.d/70-hirz.rules` and `72-hirz.rules` | same | same | 0644 |
 | polkit action | `/usr/share/polkit-1/actions/dev.hirz.authenticate.policy` | same | same | 0644 |
+| App icon (prompt windows) | `/usr/share/icons/hicolor/scalable/apps/hirz.svg` and `256x256/apps/hirz.png` | same | same | 0644 |
 | Module list (`uhid`) | `/usr/lib/modules-load.d/hirz.conf` | same | same | 0644 |
 | Firefox native manifest | `/usr/lib/mozilla/native-messaging-hosts/hirz.json` | same, plus `/usr/lib64/mozilla/native-messaging-hosts/hirz.json` (a relative symlink to it) | same as Debian | 0644 |
 | Manual pages | `/usr/share/man/man1/hirz.1`, `hirzd.1`, `hirz-nmh.1` and `/usr/share/man/man8/hirz-uhid-broker.8` (compressed by the package tools) | same | same | 0644 |
@@ -31,6 +32,7 @@ and nothing in a home directory.
 | `hirzd.service` | `packaging/systemd/hirzd.service` | `ExecStart` path set to `/usr/bin/hirzd` |
 | `70-hirz.rules`, `72-hirz.rules` | `packaging/udev/` | none |
 | `dev.hirz.authenticate.policy` | `packaging/polkit/dev.hirz.authenticate.policy` | none |
+| `hirz.svg`, `hirz.png` | `assets/brand/hirz-app-icon.svg`, `assets/brand/app-icon-256.png` | renamed |
 | `hirz.json` | `packaging/native-messaging/hirz.json` | `@HIRZ_NMH_PATH@` replaced by `/usr/lib/hirz/hirz-nmh` |
 | `hirz.conf` | written by the build | contains `uhid` |
 | Manual pages | `docs/man/` (hand-written roff) | gzip |

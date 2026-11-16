@@ -74,6 +74,8 @@ package() {
   install -Dm0644 -t "$pkgdir/usr/lib/udev/rules.d" packaging/udev/70-hirz.rules packaging/udev/72-hirz.rules
   install -Dm0644 packaging/polkit/dev.hirz.authenticate.policy \
     "$pkgdir/usr/share/polkit-1/actions/dev.hirz.authenticate.policy"
+  install -Dm0644 assets/brand/hirz-app-icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/hirz.svg"
+  install -Dm0644 assets/brand/app-icon-256.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/hirz.png"
   install -d "$pkgdir/usr/lib/modules-load.d"
   echo uhid > "$pkgdir/usr/lib/modules-load.d/hirz.conf"
 

@@ -1,0 +1,33 @@
+name: A website refuses hirz
+description: A site that supports passkeys does not accept hirz.
+labels: [site-compatibility]
+body:
+  - type: input
+    id: site
+    attributes:
+      label: Website
+      placeholder: https://example.com
+    validations:
+      required: true
+  - type: dropdown
+    id: step
+    attributes:
+      label: Where it fails
+      options:
+        - Creating a passkey
+        - Signing in with a passkey
+        - The site does not offer passkeys to hirz at all
+    validations:
+      required: true
+  - type: textarea
+    id: message
+    attributes:
+      label: What the site says
+      description: The error text or a screenshot. Never include passwords or recovery words.
+  - type: input
+    id: system
+    attributes:
+      label: System and browser
+      placeholder: Fedora 45, Firefox 159
+    validations:
+      required: true

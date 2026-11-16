@@ -1,0 +1,29 @@
+name: Something does not work
+description: hirz fails, crashes or behaves unexpectedly.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `hirz status`
+      description: Remove anything you consider private.
+      render: text
+  - type: input
+    id: system
+    attributes:
+      label: System and browser
+      placeholder: Ubuntu 26.04, Firefox 159 (snap)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hirz version
+      placeholder: hirz --version
