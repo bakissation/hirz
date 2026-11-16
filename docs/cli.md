@@ -175,9 +175,21 @@ REQUEST, at least four hex digits of the request id, picks one directly.
 
 You must type `yes` to approve, and only if the new device shows exactly the same words.
 There is no option to skip this question. Any other answer deletes the request (exit
-status 4). On approval hirz gives the new device the vault key, its key slot and a `device
-added` entry. If the request changed or expired while you were checking, nothing is
-approved (exit status 1). Exit status 1 also when no device is waiting.
+status 4).
+
+After `yes`, hirz requires user verification, as for a passkey: a hirz window shows the
+device name and the four words again (Cancel has the focus), and then the first available
+method of your approval config asks for your system password (polkit), your fingerprint or
+your hirz PIN. Click-to-allow never counts here. The request stays waiting when the window is
+cancelled or the check fails (exit status 4), or the window times out or the PIN is locked
+(exit status 1). When no
+verifying method is available, hirz refuses before showing the words (exit status 1) and
+explains how to set a PIN with `hirz pin set` or install the polkit action; see
+[approval.md](approval.md).
+
+On approval hirz gives the new device the vault key, its key slot and a `device added`
+entry. If the request changed or expired while you were checking, nothing is approved (exit
+status 1). Exit status 1 also when no device is waiting.
 
 ### `hirz devices deny REQUEST`
 

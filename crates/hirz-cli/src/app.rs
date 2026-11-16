@@ -214,7 +214,8 @@ Lists the devices (computers) that use this vault.
 
   approve    Shows the devices waiting to join (after `hirz join --request` on them)
              and four words for the one you pick. Approve only if the new device shows
-             exactly the same words. REQUEST (the start of its id) picks one directly.
+             exactly the same words, then confirm with your password, fingerprint or
+             hirz PIN. REQUEST (the start of its id) picks one directly.
   deny       Deletes the request of a device waiting to join.
 ";
 

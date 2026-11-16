@@ -11,7 +11,7 @@
   <vendor>hirz</vendor>
   <action id="dev.hirz.authenticate">
     <description>Use a hirz passkey</description>
-    <message>Confirm it is you to use a passkey</message>
+    <message>Confirm it is you to use hirz</message>
     <icon_name>dialog-password</icon_name>
     <defaults>
       <allow_any>no</allow_any>

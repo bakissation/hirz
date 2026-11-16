@@ -57,7 +57,7 @@ asks every time and remembers nothing.
 | 127, check failed (for example, action not installed) | method unavailable, next method tried |
 | 126 or anything else | internal error |
 
-The polkit dialog text is fixed ("Confirm it is you to use a passkey"); polkit does not
+The polkit dialog text is fixed ("Confirm it is you to use hirz"); polkit does not
 show which site is asking. That is why hirz shows its own dialog with the site first.
 
 This method is the strongest against other programs running as you: the password is typed
@@ -143,6 +143,23 @@ Click-to-allow is off by default and is enabled per site in the config file. It 
 (the method is unavailable) whenever the site requires user verification, so such sites fall
 back to a verifying method or fail.
 
+## Approving a new device
+
+`hirz devices approve` lets a new device join the vault and gives it every passkey, so it
+always requires user verification. After the typed confirmation in the terminal, hirz shows
+a zenity question with the name of the new device (from the request, so it is sanitized
+like site names), how long ago it asked and the four verification words in capitals, and
+asks: "Do these 4 words match the ones on the new device? Only approve a device you are
+setting up yourself right now." The focus starts on Cancel.
+
+Then the configured verifying methods run in order: system password, fingerprint or hirz
+PIN (the PIN is asked in a second window that repeats the device name and words). Pairing is
+approved only when one of them succeeds. Click-to-allow is never used for pairing, whatever
+the `click_to_allow` list holds, and when no verifying method is available no window is shown
+and the CLI explains how to set a PIN or install the polkit action. Cancel or a failed check
+leaves the request waiting. The busy rule and the prompt limit apply as for sites, with all
+pairing prompts counted under one shared key.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/hirz/config` (by default `~/.config/hirz/config`). One `key = value` per
@@ -164,7 +181,8 @@ Site ids are host names in lowercase ASCII (internationalized names in their `xn
 and match exactly: `example.com` does not cover `login.example.com`.
 
 When no method is available (no polkit action, no enrolled finger, no PIN, and the site not
-listed for click-to-allow), the request fails as unavailable.
+listed for click-to-allow), the request fails as unavailable. Approving a new device ignores
+`click_to_allow` and needs one of the verifying methods.
 
 ## Requirements
 

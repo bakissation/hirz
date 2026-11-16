@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use hirz_core::{ApprovalContext, CandidateAccount, Ceremony, UserEntity};
+use hirz_core::{ApprovalContext, CandidateAccount, Ceremony, PairingApprovalContext, UserEntity};
 
 use crate::config::UvMethod;
 
@@ -314,6 +314,98 @@ pub fn list_args(
     args
 }
 
+pub const PAIRING_TITLE: &str = "hirz: approve a new device";
+const PAIRING_WORD_CHARS: usize = 16;
+
+fn pairing_device(ctx: &PairingApprovalContext<'_>) -> String {
+    or_placeholder(sanitize(ctx.device_name, MAX_FIELD_CHARS), "unnamed device")
+}
+
+fn asked_ago(requested_at: u64, now: u64) -> String {
+    match now.saturating_sub(requested_at) / 60 {
+        0 => "Asked less than a minute ago".to_owned(),
+        1 => "Asked 1 minute ago".to_owned(),
+        n => format!("Asked {n} minutes ago"),
+    }
+}
+
+/// The four words in capitals with wide gaps: `--no-markup` rules out a larger font, so the
+/// words get their own line and stand out by case and spacing instead.
+pub fn pairing_words_line(words: &[&str]) -> String {
+    let shown: Vec<String> = words
+        .iter()
+        .map(|w| sanitize(w, PAIRING_WORD_CHARS).to_uppercase())
+        .collect();
+    format!("        {}", shown.join("    "))
+}
+
+/// Body of the pairing question: device name, age of the request, the words and the step.
+pub fn pairing_text(ctx: &PairingApprovalContext<'_>, now: u64, step: Step) -> String {
+    [
+        "A new device asks to join your hirz vault.".to_owned(),
+        format!("Device name: {}", pairing_device(ctx)),
+        asked_ago(ctx.requested_at, now),
+        String::new(),
+        pairing_words_line(ctx.words),
+        String::new(),
+        "Do these 4 words match the ones on the new device? Only approve a device you are \
+         setting up yourself right now."
+            .to_owned(),
+        "Approving gives it every passkey in the vault.".to_owned(),
+        String::new(),
+        step_hint(step).to_owned(),
+    ]
+    .join("\n")
+}
+
+/// Pairing question. Focus is on Cancel so a stray Enter does not approve.
+pub fn pairing_question_args(
+    ctx: &PairingApprovalContext<'_>,
+    now: u64,
+    step: Step,
+    remaining: Duration,
+) -> Vec<String> {
+    vec![
+        "--question".to_owned(),
+        "--no-markup".to_owned(),
+        format!("--title={PAIRING_TITLE}"),
+        format!("--text={}", pairing_text(ctx, now, step)),
+        "--ok-label=They match".to_owned(),
+        "--cancel-label=Cancel".to_owned(),
+        "--width=520".to_owned(),
+        zenity_timeout(remaining),
+        "--default-cancel".to_owned(),
+    ]
+}
+
+/// Hidden-text entry for the hirz PIN when approving a new device.
+pub fn pairing_pin_args(
+    ctx: &PairingApprovalContext<'_>,
+    notice: Option<&str>,
+    remaining: Duration,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("Approve the new device: {}", pairing_device(ctx)),
+        pairing_words_line(ctx.words),
+        String::new(),
+    ];
+    if let Some(n) = notice {
+        lines.push(n.to_owned());
+    }
+    lines.push(step_hint(Step::Uv(UvMethod::Pin)).to_owned());
+    vec![
+        "--entry".to_owned(),
+        "--hide-text".to_owned(),
+        "--no-markup".to_owned(),
+        format!("--title={PAIRING_TITLE}"),
+        format!("--text={}", lines.join("\n")),
+        "--ok-label=Verify".to_owned(),
+        "--cancel-label=Cancel".to_owned(),
+        "--width=460".to_owned(),
+        zenity_timeout(remaining),
+    ]
+}
+
 /// zenity prints the hidden row number. Anything other than one number in range is rejected.
 pub fn parse_list_selection(stdout: &[u8], count: usize) -> Option<usize> {
     let s = core::str::from_utf8(stdout).ok()?;
@@ -522,6 +614,60 @@ mod tests {
         assert_eq!(parse_list_selection(b"+1\n", 2), None);
         assert_eq!(parse_list_selection(b"1\n\n", 2), None);
         assert_eq!(parse_list_selection(b"99999999999999999999", 2), None);
+    }
+
+    fn pairing_ctx<'a>(name: &'a str, words: &'a [&'a str]) -> PairingApprovalContext<'a> {
+        PairingApprovalContext {
+            device_name: name,
+            words,
+            requested_at: 1_000,
+        }
+    }
+
+    #[test]
+    fn pairing_question_shows_name_words_and_focuses_cancel() {
+        let words = ["maple", "orbit", "quartz", "ember"];
+        let ctx = pairing_ctx("desk <b>\u{202E}evil</b>\nline", &words);
+        let a = pairing_question_args(
+            &ctx,
+            1_000 + 125,
+            Step::Uv(UvMethod::Polkit),
+            Duration::from_secs(60),
+        );
+        assert_eq!(a[0], "--question");
+        assert!(a.contains(&"--no-markup".to_owned()));
+        assert!(a.contains(&"--default-cancel".to_owned()));
+        assert!(a.contains(&"--timeout=60".to_owned()));
+        assert!(a.iter().all(|x| x.starts_with("--")));
+        let text = a.iter().find_map(|x| x.strip_prefix("--text=")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[1],
+            "Device name: desk \u{FF1C}b\u{FF1E}evil\u{FF1C}/b\u{FF1E} line"
+        );
+        assert_eq!(lines[2], "Asked 2 minutes ago");
+        assert_eq!(lines[4], "        MAPLE    ORBIT    QUARTZ    EMBER");
+        assert!(text.contains(
+            "Do these 4 words match the ones on the new device? Only approve a device you are \
+             setting up yourself right now."
+        ));
+        assert!(text.ends_with("Next, your system will ask for your password."));
+        assert!(!text.contains('<') && !text.contains('\u{202E}'));
+    }
+
+    #[test]
+    fn pairing_texts_edge_cases() {
+        let words = ["a", "b", "c", "d"];
+        let ctx = pairing_ctx("\u{200B}", &words);
+        let t = pairing_text(&ctx, 0, Step::Uv(UvMethod::Pin));
+        assert!(t.contains("Device name: unnamed device"));
+        assert!(t.contains("Asked less than a minute ago"));
+        assert!(pairing_text(&ctx, 1_060, Step::Uv(UvMethod::Pin)).contains("Asked 1 minute ago"));
+        let a = pairing_pin_args(&ctx, Some("Wrong PIN."), Duration::from_secs(5));
+        assert_eq!(&a[..3], ["--entry", "--hide-text", "--no-markup"]);
+        let text = a.iter().find_map(|x| x.strip_prefix("--text=")).unwrap();
+        assert!(text.contains("A    B    C    D"));
+        assert!(text.contains("Wrong PIN.\nEnter your hirz PIN"));
     }
 
     #[test]

@@ -154,6 +154,18 @@ pub struct Approval {
     pub selected: Option<usize>,
 }
 
+/// A new device asks to join the vault (device pairing). Shown to the user before a UV method
+/// runs; see `docs/vault-format.md`, section 11.
+#[derive(Debug)]
+pub struct PairingApprovalContext<'a> {
+    /// Chosen by the new device and stored in the synced folder: untrusted.
+    pub device_name: &'a str,
+    /// The four verification words computed on this device.
+    pub words: &'a [&'a str],
+    /// Unix seconds, as stated in the request.
+    pub requested_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalError {
     /// The user cancelled or closed the prompt.
@@ -187,6 +199,16 @@ pub trait Approver {
     fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
         Err(ApprovalError::Unavailable)
     }
+
+    /// Device pairing: the user confirms that the words match those on the new device and then
+    /// passes a user verification method. Click-to-allow never counts, so callers act only on
+    /// `user_verified`. The default refuses, so an approver without such a method fails closed.
+    fn confirm_pairing(
+        &self,
+        _ctx: &PairingApprovalContext<'_>,
+    ) -> Result<Approval, ApprovalError> {
+        Err(ApprovalError::Unavailable)
+    }
 }
 
 /// Errors the engine reports; frontends map them to CTAP status codes or DOMException names.
@@ -206,4 +228,35 @@ pub enum CoreError {
     InvalidRequest(&'static str),
     Vault(String),
     Crypto(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ApproveOnly;
+
+    impl Approver for ApproveOnly {
+        fn approve(&self, _: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+            Ok(Approval {
+                user_present: true,
+                user_verified: true,
+                selected: None,
+            })
+        }
+    }
+
+    #[test]
+    fn pairing_fails_closed_by_default() {
+        let words = ["maple", "orbit", "quartz", "ember"];
+        let ctx = PairingApprovalContext {
+            device_name: "desk",
+            words: &words,
+            requested_at: 0,
+        };
+        assert_eq!(
+            ApproveOnly.confirm_pairing(&ctx),
+            Err(ApprovalError::Unavailable)
+        );
+    }
 }

@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
-use hirz_core::{Approval, ApprovalContext, ApprovalError, Approver, Ceremony};
+use hirz_core::{
+    Approval, ApprovalContext, ApprovalError, Approver, Ceremony, PairingApprovalContext,
+};
 use hirz_crypto::Secret;
 
 use crate::config::{self, Config, Paths, UvMethod};
@@ -21,6 +23,9 @@ const DIALOG_GRACE: Duration = Duration::from_secs(2);
 const FPRINTD_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const FINGER_ATTEMPTS: u32 = 3;
 const PIN_PROMPTS: u32 = 5;
+/// Rate limit key for pairing prompts. Not a valid RP id, so it never shares a site's budget.
+const PAIRING_RATE_KEY: &str = "hirz pairing";
+const PAIRING_WORDS: usize = 4;
 const ZENITY_MISSING: &str =
     "zenity was not found in /usr/bin or /bin; install zenity to approve passkey requests";
 
@@ -384,7 +389,9 @@ impl<R: CommandRunner> HirzApprover<R> {
                 r
             }
             Method::Uv(UvMethod::Pin) => {
-                let r = self.run_pin(ctx, selected, deadline);
+                let r = self.run_pin(deadline, |notice, rem| {
+                    display::pin_args(ctx, selected, notice, rem)
+                });
                 *shown = Some(method.step());
                 r
             }
@@ -437,15 +444,12 @@ impl<R: CommandRunner> HirzApprover<R> {
 
     fn run_pin(
         &self,
-        ctx: &ApprovalContext<'_>,
-        selected: Option<usize>,
         deadline: &Deadline,
+        build: impl Fn(Option<&str>, Duration) -> Vec<String>,
     ) -> Result<(), ApprovalError> {
         let mut notice: Option<String> = None;
         for _ in 0..PIN_PROMPTS {
-            let out = self.dialog(deadline, |rem| {
-                display::pin_args(ctx, selected, notice.as_deref(), rem)
-            })?;
+            let out = self.dialog(deadline, |rem| build(notice.as_deref(), rem))?;
             match self.pins.verify(display::strip_entry_newline(&out)) {
                 Ok(()) => return Ok(()),
                 Err(PinError::Wrong { remaining: 0 } | PinError::Locked) => {
@@ -480,23 +484,81 @@ impl<R: CommandRunner> HirzApprover<R> {
         }
         Err(ApprovalError::Denied)
     }
+
+    fn take_busy(&self) -> Result<std::sync::MutexGuard<'_, ()>, ApprovalError> {
+        match self.busy.try_lock() {
+            Ok(g) => Ok(g),
+            Err(TryLockError::WouldBlock) => Err(ApprovalError::Denied),
+            Err(TryLockError::Poisoned(p)) => Ok(p.into_inner()),
+        }
+    }
+
+    fn rate_allowed(&self, key: &str, per_minute: u32) -> bool {
+        match self.limiter.lock() {
+            Ok(mut l) => l.allow(key, Instant::now(), per_minute),
+            Err(p) => p.into_inner().allow(key, Instant::now(), per_minute),
+        }
+    }
+
+    fn next_uv(
+        &self,
+        queue: &mut impl Iterator<Item = UvMethod>,
+        deadline: &Deadline,
+    ) -> Option<UvMethod> {
+        queue.find(|m| self.uv_available(*m, deadline))
+    }
+
+    /// One UV method for pairing. The question with the words is shown before the method runs,
+    /// and again when the fingerprint reader is next, so the hint matches what to do.
+    fn perform_pairing(
+        &self,
+        method: UvMethod,
+        ctx: &PairingApprovalContext<'_>,
+        now: u64,
+        shown: &mut Option<Step>,
+        deadline: &Deadline,
+    ) -> Result<(), ApprovalError> {
+        let step = Step::Uv(method);
+        let reshow = match method {
+            UvMethod::Fingerprint => *shown != Some(step),
+            UvMethod::Polkit | UvMethod::Pin => shown.is_none(),
+        };
+        if reshow {
+            self.dialog(deadline, |rem| {
+                display::pairing_question_args(ctx, now, step, rem)
+            })?;
+            *shown = Some(step);
+        }
+        let r = match method {
+            UvMethod::Polkit => {
+                diag("asking for your password (polkit)");
+                self.run_polkit(deadline)
+            }
+            UvMethod::Fingerprint => {
+                diag("waiting for your fingerprint");
+                self.run_fingerprint(deadline)
+            }
+            UvMethod::Pin => self.run_pin(deadline, |notice, rem| {
+                display::pairing_pin_args(ctx, notice, rem)
+            }),
+        };
+        diag(&format!("pairing approval: {}", outcome(&r)));
+        r
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl<R: CommandRunner> Approver for HirzApprover<R> {
     fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
-        let _busy = match self.busy.try_lock() {
-            Ok(g) => g,
-            Err(TryLockError::WouldBlock) => return Err(ApprovalError::Denied),
-            Err(TryLockError::Poisoned(p)) => p.into_inner(),
-        };
+        let _busy = self.take_busy()?;
         let config = self.config()?;
-        let allowed = match self.limiter.lock() {
-            Ok(mut l) => l.allow(ctx.rp_id, Instant::now(), config.prompts_per_minute),
-            Err(p) => p
-                .into_inner()
-                .allow(ctx.rp_id, Instant::now(), config.prompts_per_minute),
-        };
-        if !allowed {
+        if !self.rate_allowed(ctx.rp_id, config.prompts_per_minute) {
             diag("too many approval prompts for one site; try again in a minute");
             return Err(ApprovalError::Denied);
         }
@@ -534,11 +596,7 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
     }
 
     fn confirm_selection(&self) -> Result<Approval, ApprovalError> {
-        let _busy = match self.busy.try_lock() {
-            Ok(g) => g,
-            Err(TryLockError::WouldBlock) => return Err(ApprovalError::Denied),
-            Err(TryLockError::Poisoned(p)) => p.into_inner(),
-        };
+        let _busy = self.take_busy()?;
         let config = self.config()?;
         if !self.runner.tool_available(Tool::Zenity) {
             diag(ZENITY_MISSING);
@@ -551,6 +609,53 @@ impl<R: CommandRunner> Approver for HirzApprover<R> {
             user_verified: false,
             selected: None,
         })
+    }
+
+    /// Only the configured UV methods are tried; click-to-allow is never a way to approve a
+    /// device, whatever the config says. Nothing is shown when no UV method is available.
+    fn confirm_pairing(&self, ctx: &PairingApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        if ctx.words.len() != PAIRING_WORDS || ctx.words.iter().any(|w| w.is_empty()) {
+            return Err(ApprovalError::Internal(
+                "pairing approval needs four words".into(),
+            ));
+        }
+        let _busy = self.take_busy()?;
+        let config = self.config()?;
+        if !self.rate_allowed(PAIRING_RATE_KEY, config.prompts_per_minute) {
+            diag("too many pairing prompts; try again in a minute");
+            return Err(ApprovalError::Denied);
+        }
+        if !self.runner.tool_available(Tool::Zenity) {
+            diag(ZENITY_MISSING);
+            return Err(ApprovalError::Unavailable);
+        }
+        let deadline = Deadline::start(config.timeout);
+        let now = unix_now();
+        let mut queue = config.methods.iter().copied();
+        let mut method = self
+            .next_uv(&mut queue, &deadline)
+            .ok_or(ApprovalError::Unavailable)?;
+        let mut shown = None;
+        let mut locked = false;
+        loop {
+            match self.perform_pairing(method, ctx, now, &mut shown, &deadline) {
+                Ok(()) => {
+                    return Ok(Approval {
+                        user_present: true,
+                        user_verified: true,
+                        selected: None,
+                    });
+                }
+                Err(ApprovalError::Unavailable) => {}
+                Err(ApprovalError::Locked) => locked = true,
+                Err(e) => return Err(e),
+            }
+            method = match self.next_uv(&mut queue, &deadline) {
+                Some(m) => m,
+                None if locked => return Err(ApprovalError::Locked),
+                None => return Err(ApprovalError::Unavailable),
+            };
+        }
     }
 }
 
@@ -1377,5 +1482,239 @@ mod tests {
                 .any(|x| x.contains("Wrong PIN. 7 attempts left"))
         );
         assert_eq!(a.pin_store().status().unwrap().unwrap().failures, 0);
+    }
+
+    const WORDS: [&str; 4] = ["maple", "orbit", "quartz", "ember"];
+
+    fn pairing() -> PairingApprovalContext<'static> {
+        PairingApprovalContext {
+            device_name: "desk",
+            words: &WORDS,
+            requested_at: 0,
+        }
+    }
+
+    const VERIFIED: Approval = Approval {
+        user_present: true,
+        user_verified: true,
+        selected: None,
+    };
+
+    #[test]
+    fn pairing_shows_words_then_polkit() {
+        let d = TempDir::new("pair-polkit");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, exit(0, ""))],
+            ),
+            cfg(&[UvMethod::Polkit, UvMethod::Pin]),
+            &d,
+        );
+        assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
+        let cl = calls(&a);
+        assert_eq!(cl.len(), 2);
+        assert_eq!(cl[0].args[0], "--question");
+        assert!(cl[0].args.contains(&"--default-cancel".to_owned()));
+        assert!(cl[0].args.contains(&"--no-markup".to_owned()));
+        let text = cl[0]
+            .args
+            .iter()
+            .find_map(|x| x.strip_prefix("--text="))
+            .unwrap();
+        assert!(text.contains("Device name: desk"));
+        assert!(text.contains("MAPLE    ORBIT    QUARTZ    EMBER"));
+        assert!(text.contains("Do these 4 words match the ones on the new device?"));
+        assert_eq!(cl[1].tool, Tool::Pkcheck);
+        assert_eq!(cl[1].env, EnvPolicy::System);
+    }
+
+    #[test]
+    fn pairing_cancel_is_denied_without_uv() {
+        let d = TempDir::new("pair-cancel");
+        let a = approver(
+            Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(a.confirm_pairing(&pairing()), Err(ApprovalError::Denied));
+        assert_eq!(calls(&a).len(), 1);
+    }
+
+    #[test]
+    fn pairing_uv_refused_or_timed_out() {
+        for (r, want) in [
+            (exit(1, ""), ApprovalError::Denied),
+            (exit(3, ""), ApprovalError::Denied),
+            (RunResult::TimedOut, ApprovalError::Timeout),
+        ] {
+            let d = TempDir::new("pair-uv-no");
+            let a = approver(
+                Fake::new(ALL, vec![(Tool::Zenity, exit(0, "")), (Tool::Pkcheck, r)]),
+                cfg(&[UvMethod::Polkit]),
+                &d,
+            );
+            assert_eq!(a.confirm_pairing(&pairing()), Err(want));
+        }
+    }
+
+    #[test]
+    fn pairing_falls_back_to_fingerprint_with_its_hint() {
+        let d = TempDir::new("pair-finger");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Pkcheck, exit(2, "")),
+                    (Tool::FprintdList, exit(0, ENROLLED)),
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::FprintdVerify, exit(0, MATCH)),
+                ],
+            ),
+            cfg(&[UvMethod::Polkit, UvMethod::Fingerprint]),
+            &d,
+        );
+        assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
+        let cl = calls(&a);
+        assert!(
+            cl[3]
+                .args
+                .iter()
+                .any(|x| x.contains("touch the fingerprint reader") && x.contains("MAPLE"))
+        );
+    }
+
+    #[test]
+    fn pairing_unavailable_everywhere_shows_nothing() {
+        let d = TempDir::new("pair-none");
+        let mut fake = Fake::new(
+            ALL,
+            vec![(
+                Tool::FprintdList,
+                exit(0, "User alice has no fingers enrolled.\n"),
+            )],
+        );
+        fake.polkit_installed = false;
+        let a = approver(
+            fake,
+            cfg(&[UvMethod::Polkit, UvMethod::Fingerprint, UvMethod::Pin]),
+            &d,
+        );
+        assert_eq!(
+            a.confirm_pairing(&pairing()),
+            Err(ApprovalError::Unavailable)
+        );
+        assert!(calls(&a).iter().all(|c| c.tool != Tool::Zenity));
+    }
+
+    #[test]
+    fn pairing_never_uses_click_to_allow() {
+        for methods in [&[][..], &[UvMethod::Pin][..]] {
+            let d = TempDir::new("pair-click");
+            let mut config = cfg(methods);
+            config.click_to_allow = vec!["example.com".into(), "desk".into()];
+            let a = approver(Fake::new(ALL, vec![]), config, &d);
+            assert_eq!(
+                a.confirm_pairing(&pairing()),
+                Err(ApprovalError::Unavailable)
+            );
+            assert!(calls(&a).is_empty());
+        }
+    }
+
+    #[test]
+    fn pairing_needs_zenity_and_four_words() {
+        let d = TempDir::new("pair-zenity");
+        let a = approver(
+            Fake::new(&[Tool::Pkcheck], vec![]),
+            cfg(&[UvMethod::Polkit]),
+            &d,
+        );
+        assert_eq!(
+            a.confirm_pairing(&pairing()),
+            Err(ApprovalError::Unavailable)
+        );
+        let three = ["maple", "orbit", "quartz"];
+        let ctx = PairingApprovalContext {
+            device_name: "desk",
+            words: &three,
+            requested_at: 0,
+        };
+        assert!(matches!(
+            a.confirm_pairing(&ctx),
+            Err(ApprovalError::Internal(_))
+        ));
+        assert!(calls(&a).is_empty());
+    }
+
+    #[test]
+    fn pairing_busy_and_rate_limited() {
+        let d = TempDir::new("pair-rate");
+        let mut config = cfg(&[UvMethod::Polkit]);
+        config.prompts_per_minute = 1;
+        let a = approver(
+            Fake::new(ALL, vec![(Tool::Zenity, exit(1, ""))]),
+            config,
+            &d,
+        );
+        {
+            let _held = a.busy.lock().unwrap();
+            assert_eq!(a.confirm_pairing(&pairing()), Err(ApprovalError::Denied));
+        }
+        assert!(calls(&a).is_empty());
+        assert_eq!(a.confirm_pairing(&pairing()), Err(ApprovalError::Denied));
+        assert_eq!(a.confirm_pairing(&pairing()), Err(ApprovalError::Denied));
+        assert_eq!(calls(&a).len(), 1);
+    }
+
+    #[test]
+    fn pairing_pin_locked() {
+        let d = TempDir::new("pair-pin-locked");
+        write_verifier(&d, MAX_FAILURES);
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "1234\n")),
+                ],
+            ),
+            cfg(&[UvMethod::Pin]),
+            &d,
+        );
+        assert_eq!(a.confirm_pairing(&pairing()), Err(ApprovalError::Locked));
+    }
+
+    #[test]
+    fn pairing_pin_with_real_crypto() {
+        if !crypto_ready() {
+            eprintln!("skipped: hirz-crypto placeholder");
+            return;
+        }
+        let d = TempDir::new("pair-pin");
+        let a = approver(
+            Fake::new(
+                ALL,
+                vec![
+                    (Tool::Zenity, exit(0, "")),
+                    (Tool::Zenity, exit(0, "0000\n")),
+                    (Tool::Zenity, exit(0, "1234\n")),
+                ],
+            ),
+            cfg(&[UvMethod::Pin]),
+            &d,
+        );
+        a.pin_store().set_pin(b"1234").unwrap();
+        assert_eq!(a.confirm_pairing(&pairing()), Ok(VERIFIED));
+        let cl = calls(&a);
+        assert_eq!(cl[0].args[0], "--question");
+        assert_eq!(&cl[1].args[..2], ["--entry", "--hide-text"]);
+        assert!(
+            cl[2]
+                .args
+                .iter()
+                .any(|x| x.contains("Wrong PIN.") && x.contains("Approve the new device: desk"))
+        );
     }
 }

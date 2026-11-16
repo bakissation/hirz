@@ -140,6 +140,14 @@ synced too. Do not keep anything else in this folder.
    computer. Type `yes` only if all four are exactly the same and you started the join
    yourself. If anything differs, answer no: someone who can change files in your synced
    folder may be trying to get your passkeys. hirz then deletes the request.
+
+   After `yes`, a hirz window shows the name and the four words once more and then asks
+   for your system password, your fingerprint or your hirz PIN, as when you use a passkey.
+   The device is approved only when that check succeeds; clicking Allow is never enough
+   here, even for sites where you enabled click-to-allow. If this computer has none of
+   those methods, `approve` refuses and tells you how to set a hirz PIN (`hirz pin set`)
+   or install the polkit action ([approval.md](approval.md)). If you cancel the window or
+   the check fails, nothing is approved and the request keeps waiting.
 5. The new computer finishes as soon as the sync program has copied the approval back to
    it, and lists the other devices of the vault so you can check that it is yours.
 

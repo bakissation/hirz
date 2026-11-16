@@ -9,6 +9,9 @@
 //! | hirz PIN | UP + UV | Argon2id verifier in the state directory, retry limit |
 //! | Click-to-allow | UP only | zenity question; opt-in per RP id, refused when UV is required |
 //!
+//! Approving a new device ([`hirz_core::Approver::confirm_pairing`]) shows the verification
+//! words and then needs one of the UV methods; click-to-allow never applies to it.
+//!
 //! Prompts use zenity through argument vectors (never a shell). See `docs/approval.md`.
 #![forbid(unsafe_code)]
 

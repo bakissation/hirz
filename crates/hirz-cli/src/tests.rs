@@ -12,6 +12,7 @@ use crate::args::{self, Command, DeleteTarget, Invocation, PinAction};
 use crate::env::{Env, System};
 use crate::error::{CliError, Exit};
 use crate::prompt::Prompter;
+use hirz_core::{Approval, ApprovalContext, ApprovalError, Approver, PairingApprovalContext};
 use hirz_crypto::Zeroizing;
 use hirz_crypto::kdf::Argon2Params;
 use hirz_uv::UvMethod;
@@ -98,6 +99,43 @@ impl System for FakeSys {
     }
     fn hostname(&self) -> Option<String> {
         Some("test-host".into())
+    }
+    fn pairing_approver<'s>(&'s self, _env: &Env) -> Box<dyn Approver + 's> {
+        Box::new(FakeApprover {
+            result: Ok(VERIFIED),
+            seen: None,
+        })
+    }
+}
+
+const VERIFIED: Approval = Approval {
+    user_present: true,
+    user_verified: true,
+    selected: None,
+};
+
+/// What a pairing confirmation was shown: device name, words, request time.
+type SeenPairing = (String, Vec<String>, u64);
+
+/// Stands in for the hirz-uv window and the user's password, fingerprint or PIN.
+struct FakeApprover<'a> {
+    result: Result<Approval, ApprovalError>,
+    seen: Option<&'a RefCell<Vec<SeenPairing>>>,
+}
+
+impl Approver for FakeApprover<'_> {
+    fn approve(&self, _ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        Err(ApprovalError::Internal("not used by the CLI".into()))
+    }
+    fn confirm_pairing(&self, ctx: &PairingApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+        if let Some(seen) = self.seen {
+            seen.borrow_mut().push((
+                ctx.device_name.to_string(),
+                ctx.words.iter().map(|w| w.to_string()).collect(),
+                ctx.requested_at,
+            ));
+        }
+        self.result.clone()
     }
 }
 
@@ -1442,6 +1480,9 @@ impl System for PairSys<'_> {
     fn hostname(&self) -> Option<String> {
         Some("new-host".into())
     }
+    fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn Approver + 's> {
+        FakeSys.pairing_approver(env)
+    }
     fn now(&self) -> u64 {
         self.clock.get()
     }
@@ -1614,4 +1655,139 @@ fn pairing_mismatch_deny_and_expiry_change_nothing() {
     let missing = d.tmp.path("nothing-here");
     let r = join_request(&d, missing.to_str().unwrap(), &FakeSys);
     assert_eq!(r.exit(), Exit::NotSetUp);
+}
+
+/// `devices approve` with a chosen user verification outcome and set of methods.
+struct UvSys {
+    methods: Vec<UvMethod>,
+    result: Result<Approval, ApprovalError>,
+    seen: RefCell<Vec<SeenPairing>>,
+}
+
+impl UvSys {
+    fn new(methods: &[UvMethod], result: Result<Approval, ApprovalError>) -> Self {
+        UvSys {
+            methods: methods.to_vec(),
+            result,
+            seen: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl System for UvSys {
+    fn uv_methods(&self, _env: &Env) -> Result<Vec<UvMethod>, String> {
+        Ok(self.methods.clone())
+    }
+    fn zenity(&self) -> bool {
+        true
+    }
+    fn hostname(&self) -> Option<String> {
+        Some("test-host".into())
+    }
+    fn pairing_approver<'s>(&'s self, _env: &Env) -> Box<dyn Approver + 's> {
+        Box::new(FakeApprover {
+            result: self.result.clone(),
+            seen: Some(&self.seen),
+        })
+    }
+}
+
+fn approve_with(m: &Machine, sys: &UvSys, answers: &[&str]) -> Run {
+    run_opts(
+        m,
+        &["devices", "approve"],
+        answers,
+        Opts {
+            sys,
+            program: "hirz",
+            terminal: false,
+            wrong_words: false,
+        },
+    )
+}
+
+#[test]
+fn pairing_approval_requires_user_verification() {
+    let a = Machine::new("pair-uv-a");
+    init(&a);
+    let vault = a.default_vault();
+    let vs = vault.to_str().unwrap().to_string();
+    let b = Machine::new("pair-uv-b");
+    let approved = RefCell::new(String::new());
+    let sys = PairSys::new(2, |n| {
+        if n != 1 {
+            return;
+        }
+        let waiting = || {
+            pairing_dir_files(&vault)
+                .iter()
+                .filter(|f| f.ends_with(".req"))
+                .count()
+        };
+
+        // No method at all: refused before the words are compared.
+        let none = UvSys::new(&[], Ok(VERIFIED));
+        let r = approve_with(&a, &none, &["yes"]);
+        assert_eq!(r.exit(), Exit::Failed);
+        assert!(r.message().contains("hirz pin set"), "{}", r.message());
+        assert!(r.message().contains("polkit"));
+        assert!(r.prompts.is_empty());
+        assert!(none.seen.borrow().is_empty());
+        assert_eq!(waiting(), 1);
+
+        for (result, exit, needle) in [
+            (
+                Err(ApprovalError::Unavailable),
+                Exit::Failed,
+                "hirz pin set",
+            ),
+            (Err(ApprovalError::Denied), Exit::Cancelled, "still waiting"),
+            (
+                Err(ApprovalError::Timeout),
+                Exit::Failed,
+                "not answered in time",
+            ),
+            (Err(ApprovalError::Locked), Exit::Failed, "hirz pin reset"),
+            (
+                Err(ApprovalError::Internal("boom".into())),
+                Exit::Failed,
+                "boom",
+            ),
+            (
+                Ok(Approval {
+                    user_present: true,
+                    user_verified: false,
+                    selected: None,
+                }),
+                Exit::Failed,
+                "could not verify",
+            ),
+        ] {
+            let uv = UvSys::new(&[UvMethod::Polkit], result);
+            let r = approve_with(&a, &uv, &["yes"]);
+            assert_eq!(r.exit(), exit, "{}", r.message());
+            assert!(r.message().contains(needle), "{}", r.message());
+            assert!(r.out.contains("Confirm in the hirz window"));
+            assert_eq!(uv.seen.borrow().len(), 1);
+            assert_eq!(waiting(), 1, "a refused verification keeps the request");
+        }
+
+        let ok = UvSys::new(&[UvMethod::Pin], Ok(VERIFIED));
+        let r = approve_with(&a, &ok, &["yes"]);
+        let out = r.ok().to_string();
+        let seen = ok.seen.borrow();
+        let (name, words, requested_at) = &seen[0];
+        assert_eq!(name, "desk");
+        assert!(*requested_at > 0);
+        let shown: Vec<String> = words_line(&out)
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        assert_eq!(words, &shown);
+        *approved.borrow_mut() = out;
+    });
+    let r = join_request(&b, &vs, &sys);
+    r.ok();
+    assert!(approved.borrow().contains("Approved \"desk\""));
+    assert_eq!(records(&b, &vault).len(), 0);
 }

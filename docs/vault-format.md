@@ -535,7 +535,9 @@ replace requests, and write fake approvals.
   match the words on the screen of the new device. That comparison is the security of
   pairing: the approve command shows the words prominently, explains that a mismatch means
   tampering, asks the user to type `yes`, has no option to skip the question, and deletes the
-  request on any other answer. Several waiting requests are flagged as suspicious.
+  request on any other answer. It then shows the words again in a hirz window and requires
+  user verification (system password, fingerprint or hirz PIN; a click never counts) before
+  writing anything. Several waiting requests are flagged as suspicious.
 - To pass the comparison, a planted request must produce the same four words as the genuine
   one. The words carry 44 bits. The attacker sees the genuine request only once it is in the
   folder and must find a matching request before the user approves, within the 15-minute
@@ -563,6 +565,8 @@ not match on the user's trusted device in that case (the genesis is bound into t
 new device lists the other devices of the vault it joined, so the user can notice. The
 recovery key join (section 8) has an anchor and is not affected.
 
-Approving requires no user verification beyond typing `yes` in a terminal session of the
-user: any process that can run hirz as that user can also read the device state file
-(section 7), which already gives it the vault key.
+Approving requires typing `yes` in a terminal session of the user and then passing user
+verification (system password, fingerprint or hirz PIN, see `docs/approval.md`), so someone
+at an unlocked session cannot add a device without it. This does not stop a process already
+running as the user: it can read the device state file (section 7), which gives it the vault
+key, without pairing at all.

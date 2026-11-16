@@ -6,6 +6,7 @@ use crate::cmd_vault::{already_set_up, join_target};
 use crate::error::{CliError, CliResult, Exit};
 use crate::prompt::{self, confirm_word};
 use crate::ui::{self, clean, count, hex};
+use hirz_core::{ApprovalError, PairingApprovalContext};
 use hirz_vault::{PairingPoll, PairingRequest, PendingJoin, Vault, VaultError};
 use std::path::Path;
 use std::time::Duration;
@@ -206,12 +207,79 @@ fn choose(
     }
 }
 
+fn no_uv(program: &str) -> CliError {
+    CliError::failed(format!(
+        "Approving a device needs your system password, your fingerprint or a hirz PIN, and none \
+         of them can be used on this computer right now (a click is not enough). Nothing was \
+         approved; the request is still waiting.\n\
+         Set a hirz PIN:\n  {program} pin set\n\
+         or install the polkit action for the system password (see docs/approval.md):\n  \
+         sudo install -o root -g root -m 0644 packaging/polkit/dev.hirz.authenticate.policy \
+         /usr/share/polkit-1/actions/\n\
+         The approval window also needs zenity. Then run `{program} devices approve` again."
+    ))
+}
+
+/// The second, verified confirmation in a window drawn by hirz-uv. Only a passed user
+/// verification approves; anything else leaves the request waiting.
+fn verify_user(ctx: &mut Ctx<'_>, req: &PairingRequest, words: &str) -> CliResult {
+    ctx.say(
+        "Confirm in the hirz window: it shows the same four words, then asks for your system\n\
+         password, your fingerprint or your hirz PIN.",
+    )?;
+    let words: Vec<&str> = words.split(' ').collect();
+    let pairing = PairingApprovalContext {
+        device_name: &req.name,
+        words: &words,
+        requested_at: req.created_at,
+    };
+    let sys = ctx.sys;
+    let verdict = sys.pairing_approver(ctx.env).confirm_pairing(&pairing);
+    let still_waiting = format!(
+        "The request is still waiting: run `{0} devices approve` again, or remove it with \
+         `{0} devices deny {1}`.",
+        ctx.program,
+        short(&req.request_id)
+    );
+    match verdict {
+        Ok(a) if a.user_verified => Ok(()),
+        Ok(_) => Err(CliError::failed(format!(
+            "hirz could not verify that it is you, so nothing was approved. {still_waiting}"
+        ))),
+        Err(ApprovalError::Unavailable) => Err(no_uv(&ctx.program)),
+        Err(ApprovalError::Denied) => Err(CliError::cancelled(format!(
+            "Not approved: the window was cancelled or the check failed. {still_waiting}"
+        ))),
+        Err(ApprovalError::Timeout) => Err(CliError::failed(format!(
+            "Not approved: the window was not answered in time. {still_waiting}"
+        ))),
+        Err(ApprovalError::Locked) => Err(CliError::failed(format!(
+            "Not approved: your hirz PIN is locked after too many wrong attempts. Reset it with \
+             `{} pin reset`, or use your system password. {still_waiting}",
+            ctx.program
+        ))),
+        Err(ApprovalError::Internal(m)) => Err(CliError::failed(format!(
+            "Not approved: the approval window failed ({m}). {still_waiting}"
+        ))),
+    }
+}
+
+/// Refuses before the words are compared when no verification method can work at all.
+fn ensure_uv_possible(ctx: &Ctx<'_>) -> CliResult {
+    let none = matches!(ctx.sys.uv_methods(ctx.env), Ok(m) if m.is_empty());
+    if none || !ctx.sys.zenity() {
+        return Err(no_uv(&ctx.program));
+    }
+    Ok(())
+}
+
 pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
     let (mut vault, _) = ctx.open_vault()?;
     let reqs = vault.pairing_requests()?;
     if reqs.is_empty() {
         return Err(no_requests());
     }
+    ensure_uv_possible(ctx)?;
     let req = choose(ctx, reqs, prefix.as_deref())?;
     let name = clean(&req.name, NAME_CHARS);
     let now = ctx.sys.now();
@@ -222,7 +290,8 @@ pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
         minutes(now.saturating_sub(req.created_at)),
         short(&req.request_id)
     ))?;
-    show_words(ctx, &vault.pairing_words(&req)?)?;
+    let words = vault.pairing_words(&req)?;
+    show_words(ctx, &words)?;
     ctx.say(
         "Answer yes only if all four words are exactly the same AND you started `hirz join`\n\
          on that device yourself in the last 15 minutes. If anything differs, someone with\n\
@@ -235,6 +304,7 @@ pub fn approve(ctx: &mut Ctx<'_>, prefix: Option<String>) -> CliResult<Exit> {
              new device yourself, start it again there for new words.",
         ));
     }
+    verify_user(ctx, &req, &words)?;
     match vault.approve_pairing(&req) {
         Ok(()) => {}
         Err(VaultError::NotFound) => {

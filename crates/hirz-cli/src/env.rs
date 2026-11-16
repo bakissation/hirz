@@ -235,6 +235,8 @@ pub trait System {
     fn zenity(&self) -> bool;
     /// This computer's name, for the device name.
     fn hostname(&self) -> Option<String>;
+    /// Confirms a device pairing with user verification (`hirz devices approve`).
+    fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn hirz_core::Approver + 's>;
     /// Unix time in seconds.
     fn now(&self) -> u64 {
         std::time::SystemTime::now()
@@ -262,6 +264,10 @@ impl System for RealSystem {
 
     fn zenity(&self) -> bool {
         hirz_uv::runner::resolve_tool("zenity").is_some()
+    }
+
+    fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn hirz_core::Approver + 's> {
+        Box::new(hirz_uv::HirzApprover::new(hirz_uv::SystemRunner, &env.uv))
     }
 
     fn hostname(&self) -> Option<String> {
