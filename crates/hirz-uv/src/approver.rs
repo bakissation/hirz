@@ -73,7 +73,10 @@ pub fn map_dialog(r: RunResult) -> Result<Secret, ApprovalError> {
             diag("zenity could not open the display");
             Err(ApprovalError::Unavailable)
         }
-        RunResult::Exited { code: Some(1), .. } => Err(ApprovalError::Denied),
+        RunResult::Exited { code: Some(1), .. } => {
+            diag("prompt cancelled");
+            Err(ApprovalError::Denied)
+        }
         RunResult::Exited { code: Some(5), .. } => Err(ApprovalError::Timeout),
         RunResult::Exited { code, .. } => Err(ApprovalError::Internal(format!(
             "zenity exited with {code:?}"
@@ -293,7 +296,13 @@ impl<R: CommandRunner> HirzApprover<R> {
                 let out = self.dialog(deadline, |rem| {
                     display::list_args(ctx, ctx.candidates, step, rem)
                 })?;
-                let idx = display::parse_list_selection(&out, n).ok_or(ApprovalError::Denied)?;
+                let idx = display::parse_list_selection(&out, n).ok_or_else(|| {
+                    diag(&format!(
+                        "account list returned an unreadable selection ({} bytes)",
+                        out.len()
+                    ));
+                    ApprovalError::Denied
+                })?;
                 Ok((Some(idx), true))
             }
         }

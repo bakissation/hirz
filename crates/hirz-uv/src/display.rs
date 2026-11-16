@@ -281,7 +281,7 @@ pub fn list_args(
         "--column=#".to_owned(),
         "--column=Account".to_owned(),
         "--column=Name".to_owned(),
-        "--hide-column=1".to_owned(),
+        // The "#" column stays visible: zenity 4 does not reliably print hidden columns.
         "--print-column=1".to_owned(),
         "--ok-label=Continue".to_owned(),
         "--cancel-label=Cancel".to_owned(),
@@ -477,7 +477,7 @@ mod tests {
         );
         assert!(a.contains(&"--no-markup".to_owned()));
         assert!(a.contains(&"--print-column=1".to_owned()));
-        assert!(a.contains(&"--hide-column=1".to_owned()));
+        assert!(!a.iter().any(|x| x.starts_with("--hide-column")));
     }
 
     #[test]
