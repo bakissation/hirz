@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 hirz-proto = { workspace = true }
+hirz-crypto = { workspace = true }
+hirz-core = { workspace = true }
 
 [lints]
 workspace = true
