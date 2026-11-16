@@ -1,0 +1,61 @@
+[Unit]
+Description=hirz virtual security key broker (uhid)
+Documentation=https://github.com/bakissation/hirz/blob/main/docs/uhid.md
+Requires=hirz-uhid-broker.socket
+After=hirz-uhid-broker.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/hirz/hirz-uhid-broker
+Restart=on-failure
+
+# /dev/uhid is root:root 0600. Running as uid 0 opens it through the owner permission
+# bits, so the broker needs no capability at all.
+User=root
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+# Not PrivateUsers=: inside a user namespace SO_PEERCRED would report unmapped client uids
+# as the overflow uid, and the per-uid policy would break.
+
+DevicePolicy=closed
+DeviceAllow=/dev/uhid rw
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateIPC=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+UMask=0077
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@chown @clock @cpu-emulation @debug @keyring @memlock @module @mount @obsolete @privileged @raw-io @reboot @resources @setuid @swap
+# Re-allowed so the broker can empty its own capability sets (it can only ever lower them).
+SystemCallFilter=capset
+SystemCallErrorNumber=EPERM
+
+LimitCORE=0
+LimitNOFILE=64
+TasksMax=32
+MemoryMax=64M
+
+[Install]
+Also=hirz-uhid-broker.socket

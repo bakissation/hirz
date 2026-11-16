@@ -1,0 +1,29 @@
+# hirz virtual security key.
+#
+# systemd's 60-fido-id.rules marks the hidraw node of any FIDO device with
+# ID_SECURITY_TOKEN=1, and 70-uaccess.rules then grants the user of the active seat an ACL
+# on it. For a virtual device created by hirz-uhid-broker that is the wrong user whenever
+# the seat user differs from the user whose hirzd created the device (fast user switching,
+# or another local user connecting to the broker). This rule binds the node to its creator
+# instead: the broker writes the creating uid into the HID "phys" field (HID_PHYS), and the
+# node becomes owned by that uid with mode 0600 and no seat ACL.
+#
+# The file name must sort after 60-fido-id.rules and before 70-snap.*.rules and
+# 70-uaccess.rules.
+
+ACTION=="remove", GOTO="hirz_end"
+SUBSYSTEM!="hidraw", GOTO="hirz_end"
+# Only nodes of devices created through /dev/uhid with the hirz ids, never real hardware.
+DEVPATH!="/devices/virtual/misc/uhid/0003:1209:0007.*", GOTO="hirz_end"
+ENV{ID_SECURITY_TOKEN}!="1", GOTO="hirz_end"
+IMPORT{parent}="HID_PHYS"
+ENV{HID_PHYS}!="[1-9]*", GOTO="hirz_end"
+
+ENV{ID_SECURITY_TOKEN}="", OWNER="$env{HID_PHYS}", GROUP="root", MODE="0600"
+
+# Strictly confined snap browsers only reach hidraw nodes that snapd tags for them, and the
+# u2f-devices interface tags a fixed list of vendor and product ids. Tag the hirz node for
+# the browser snaps so snap-device-helper adds it to their device cgroup.
+TAG+="snap_firefox_firefox", TAG+="snap_chromium_chromium"
+
+LABEL="hirz_end"
