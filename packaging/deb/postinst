@@ -1,7 +1,8 @@
 #!/bin/sh
 # hirz postinst. Safe to run more than once. The unit state handling follows what debhelper
 # generates: the broker socket is enabled on the first install, and an administrator's
-# "systemctl disable" is kept across upgrades and reinstalls.
+# "systemctl disable" is kept across upgrades and reinstalls. deb-systemd-invoke respects
+# policy-rc.d (chroots, image builds) and never starts a disabled unit.
 set -e
 
 UNIT=hirz-uhid-broker.socket
@@ -16,12 +17,10 @@ case "$1" in
             else
                 deb-systemd-helper update-state "$UNIT" >/dev/null || true
             fi
-        elif [ -z "$2" ] && command -v systemctl >/dev/null 2>&1; then
-            systemctl enable "$UNIT" >/dev/null 2>&1 || true
         fi
 
         if [ -d /run/systemd/system ]; then
-            systemctl daemon-reload || true
+            systemctl --system daemon-reload >/dev/null || true
         fi
         if command -v udevadm >/dev/null 2>&1; then
             udevadm control --reload || true
@@ -30,13 +29,11 @@ case "$1" in
             modprobe uhid 2>/dev/null || true
         fi
 
-        if [ -d /run/systemd/system ]; then
+        if [ -d /run/systemd/system ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
             if [ -n "$2" ]; then
-                systemctl try-restart hirz-uhid-broker.service || true
+                deb-systemd-invoke try-restart hirz-uhid-broker.service >/dev/null || true
             fi
-            if systemctl is-enabled --quiet "$UNIT" 2>/dev/null; then
-                systemctl start "$UNIT" || true
-            fi
+            deb-systemd-invoke start "$UNIT" >/dev/null || true
         fi
         ;;
 esac

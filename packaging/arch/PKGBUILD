@@ -7,7 +7,7 @@ pkgdesc='Passkey authenticator for Linux: a virtual security key and a Firefox e
 arch=('x86_64' 'aarch64')
 url='https://github.com/bakissation/hirz'
 license=('MIT OR Apache-2.0')
-depends=('glibc' 'gcc-libs' 'polkit' 'zenity' 'systemd')
+depends=('glibc' 'libgcc' 'polkit' 'zenity' 'systemd')
 makedepends=('cargo' 'cmake')
 optdepends=(
   'fprintd: approve with your fingerprint'

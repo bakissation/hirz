@@ -16,7 +16,9 @@ Version:        %{lua: print((string.gsub(rpm.expand("%{upstream_version}"), "-"
 Release:        1%{?dist}
 Summary:        Passkey authenticator for Linux
 
-License:        MIT OR Apache-2.0
+# hirz is MIT OR Apache-2.0. The binaries statically link Rust crates: AWS-LC (aws-lc-sys)
+# adds ISC, Apache-2.0, MIT and BSD-3-Clause parts, memchr is MIT OR Unlicense.
+License:        (MIT OR Apache-2.0) AND Apache-2.0 AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)
 URL:            https://github.com/bakissation/hirz
 Source0:        %{url}/archive/v%{upstream_version}/hirz-%{upstream_version}.tar.gz
 Source1:        hirz-%{upstream_version}-vendor.tar.xz
@@ -91,12 +93,18 @@ install -d %{buildroot}%{_modulesloaddir}
 echo uhid > %{buildroot}%{_modulesloaddir}/hirz.conf
 
 # Firefox on Fedora reads /usr/lib64/mozilla; the portal and the proxy also read /usr/lib.
-for d in %{_prefix}/lib/mozilla/native-messaging-hosts %{_libdir}/mozilla/native-messaging-hosts; do
-  install -d %{buildroot}$d
-  sed 's#@HIRZ_NMH_PATH@#%{_prefix}/lib/hirz/hirz-nmh#' packaging/native-messaging/hirz.json \
-    > %{buildroot}$d/hirz.json
-  grep -q '"path": "%{_prefix}/lib/hirz/hirz-nmh"' %{buildroot}$d/hirz.json
-done
+# The second path is a relative symlink: identical files would be hardlinked by rpmbuild,
+# and /usr/lib and /usr/lib64 may be on different file systems.
+manifest_dir=%{_prefix}/lib/mozilla/native-messaging-hosts
+install -d %{buildroot}$manifest_dir
+sed 's#@HIRZ_NMH_PATH@#%{_prefix}/lib/hirz/hirz-nmh#' packaging/native-messaging/hirz.json \
+  > %{buildroot}$manifest_dir/hirz.json
+grep -q '"path": "%{_prefix}/lib/hirz/hirz-nmh"' %{buildroot}$manifest_dir/hirz.json
+%if "%{_libdir}" != "%{_prefix}/lib"
+install -d %{buildroot}%{_libdir}/mozilla/native-messaging-hosts
+ln -s ../../../lib/mozilla/native-messaging-hosts/hirz.json \
+  %{buildroot}%{_libdir}/mozilla/native-messaging-hosts/hirz.json
+%endif
 
 %check
 cargo test --release --locked --frozen --offline --workspace
@@ -139,7 +147,9 @@ fi
 %{_datadir}/polkit-1/actions/dev.hirz.authenticate.policy
 %{_modulesloaddir}/hirz.conf
 %{_prefix}/lib/mozilla/native-messaging-hosts/hirz.json
+%if "%{_libdir}" != "%{_prefix}/lib"
 %{_libdir}/mozilla/native-messaging-hosts/hirz.json
+%endif
 
 %changelog
 * Mon Nov 16 2026 Abdelbaki Berkati <bakissation@users.noreply.github.com> - 0.1.0~dev-1

@@ -1,0 +1,7 @@
+# rpmlint filters for hirz.spec. Only false positives; real findings stay visible.
+
+# Dictionary misses: a WebAuthn authenticator, and the fprintd daemon.
+addFilter(r"spelling-error .*'authenticator'")
+addFilter(r"spelling-error .*'fprintd'")
+# The vendored crates tarball is made by scripts/package-rpm.sh, so it has no URL.
+addFilter(r"invalid-url Source1: hirz-.*-vendor\.tar\.xz")

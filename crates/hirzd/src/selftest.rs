@@ -415,10 +415,7 @@ mod tests {
             let mut request = vec![0x01];
             request.extend(cbor::encode(&params).unwrap());
             let ctx = hid::RequestContext::new();
-            assert_eq!(
-                handler.process(&request, &ctx),
-                vec![STATUS_NOT_ALLOWED]
-            );
+            assert_eq!(handler.process(&request, &ctx), vec![STATUS_NOT_ALLOWED]);
         }
         assert!(
             Vault::open(&vault_dir, &state_dir)

@@ -113,8 +113,8 @@ Copyright: 2026 Abdelbaki Berkati
 License: MIT or Apache-2.0
 Comment:
  The programs statically include these Rust crates (versions in Cargo.lock):
- aws-lc-rs and aws-lc-sys (Apache-2.0 AND ISC, with OpenSSL-derived parts under the
- OpenSSL and SSLeay licenses; the upstream license files apply), argon2, blake2,
+ aws-lc-rs and aws-lc-sys (ISC, Apache-2.0, MIT and BSD-3-Clause parts, as AWS-LC's
+ LICENSE file describes; its OpenSSL-derived code is under Apache-2.0), argon2, blake2,
  base64ct, digest, crypto-common, block-buffer, hybrid-array, typenum, cpufeatures,
  cmov, ctutils, password-hash, phc, getrandom, cfg-if, zeroize, libc, serde_json,
  serde_core, itoa, memchr, zmij (MIT or Apache-2.0, some also other permissive terms).
@@ -163,7 +163,7 @@ Version: $debver
 Architecture: $arch
 Maintainer: $MAINTAINER
 Installed-Size: $installed_size
-Depends: $libdeps, polkitd | policykit-1, zenity
+Depends: $libdeps, polkitd, zenity
 Recommends: fprintd
 Suggests: xdg-native-messaging-proxy
 Section: utils

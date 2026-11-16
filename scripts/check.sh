@@ -27,10 +27,17 @@ for bin in hirzd hirz-nmh hirz-uhid-broker; do
 done
 
 if command -v cargo-deny >/dev/null 2>&1; then
-  echo "== cargo deny"
-  cargo deny check
+  echo "== cargo deny (licenses, bans, advisories, sources)"
+  cargo deny --locked check
 else
-  echo "== cargo deny not installed, skipped"
+  echo "== cargo deny not installed, skipped (cargo install --locked cargo-deny)"
+fi
+
+if command -v cargo-vet >/dev/null 2>&1; then
+  echo "== cargo vet"
+  cargo vet --locked
+else
+  echo "== cargo vet not installed, skipped (cargo install --locked cargo-vet)"
 fi
 
 echo "== extension lint (no remote code, no eval)"

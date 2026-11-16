@@ -202,11 +202,25 @@ dependencies = [
  "hirz-core",
  "hirz-crypto",
  "hirz-ctap",
+ "hirz-nmh",
  "hirz-proto",
  "hirz-uv",
  "hirz-vault",
  "hirz-webauthn",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "hirz-nmh"
+version = "0.1.0-dev"
+dependencies = [
+ "hirz-core",
+ "hirz-crypto",
+ "hirz-proto",
+ "hirz-sys",
+ "hirz-uv",
+ "hirz-vault",
+ "hirz-webauthn",
 ]
 
 [[package]]

@@ -1,0 +1,185 @@
+
+# cargo-vet config file
+
+[cargo-vet]
+version = "0.10"
+
+[imports.bytecode-alliance]
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
+
+[imports.google]
+url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+
+[imports.isrg]
+url = "https://raw.githubusercontent.com/divviup/libprio-rs/main/supply-chain/audits.toml"
+
+[imports.mozilla]
+url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+
+[imports.zcash]
+url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
+
+[[exemptions.argon2]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.aws-lc-rs]]
+version = "1.19.0"
+criteria = "safe-to-deploy"
+notes = "Crypto backend behind hirz-crypto (aws-lc-sys bundles the AWS-LC C library). Not covered by any imported audit set; too large to audit here. Relied on through upstream review and RustSec advisories (cargo deny)."
+
+[[exemptions.aws-lc-sys]]
+version = "0.47.0"
+criteria = "safe-to-deploy"
+notes = "Crypto backend behind hirz-crypto (aws-lc-sys bundles the AWS-LC C library). Not covered by any imported audit set; too large to audit here. Relied on through upstream review and RustSec advisories (cargo deny)."
+
+[[exemptions.base64ct]]
+version = "1.8.3"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.blake2]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.block-buffer]]
+version = "0.12.1"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.cc]]
+version = "1.11.2"
+criteria = "safe-to-deploy"
+notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
+
+[[exemptions.cfg-if]]
+version = "1.0.5"
+criteria = "safe-to-deploy"
+notes = "Trivial macro crate pulled in by getrandom. Imported sets audited 1.0.4, not this version. No cargo-vet audit recorded here."
+
+[[exemptions.cmake]]
+version = "0.1.58"
+criteria = "safe-to-deploy"
+notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
+
+[[exemptions.cmov]]
+version = "0.5.4"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.crypto-common]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.ctutils]]
+version = "0.4.8"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.digest]]
+version = "0.11.3"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.find-msvc-tools]]
+version = "0.1.15"
+criteria = "safe-to-deploy"
+notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
+
+[[exemptions.fs_extra]]
+version = "1.3.0"
+criteria = "safe-to-deploy"
+notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
+
+[[exemptions.getrandom]]
+version = "0.4.3"
+criteria = "safe-to-deploy"
+notes = "OS random numbers for aws-lc-rs and argon2 (getrandom system call on Linux). This major version is not covered by the imported audit sets. No cargo-vet audit recorded here."
+
+[[exemptions.hybrid-array]]
+version = "0.4.15"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.itoa]]
+version = "1.0.19"
+criteria = "safe-to-deploy"
+notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
+
+[[exemptions.jobserver]]
+version = "0.1.35"
+criteria = "safe-to-deploy"
+notes = "Build-time only: used by aws-lc-sys's build script to compile AWS-LC. No cargo-vet audit recorded here."
+
+[[exemptions.libc]]
+version = "0.2.191"
+criteria = "safe-to-deploy"
+notes = "Used by hirz-sys for the few system calls hirz makes, and by getrandom. Too large to audit here; imported sets audited older versions only."
+
+[[exemptions.memchr]]
+version = "2.8.3"
+criteria = "safe-to-deploy"
+notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
+
+[[exemptions.password-hash]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.phc]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.proc-macro2]]
+version = "1.0.107"
+criteria = "safe-to-deploy"
+notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
+
+[[exemptions.r-efi]]
+version = "6.0.0"
+criteria = "safe-to-deploy"
+notes = "UEFI target only (getrandom); never compiled for Linux. No cargo-vet audit recorded here."
+
+[[exemptions.serde]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
+
+[[exemptions.serde_core]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
+
+[[exemptions.serde_derive]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
+
+[[exemptions.serde_json]]
+version = "1.0.154"
+criteria = "safe-to-deploy"
+notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."
+
+[[exemptions.syn]]
+version = "3.0.10"
+criteria = "safe-to-deploy"
+notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
+
+[[exemptions.typenum]]
+version = "1.20.1"
+criteria = "safe-to-deploy"
+notes = "argon2 family (RustCrypto), used by hirz-crypto for the PIN and backup passphrase KDF. These major versions are not covered by the imported audit sets yet. No cargo-vet audit recorded here; RustSec advisories through cargo deny."
+
+[[exemptions.unicode-ident]]
+version = "1.0.27"
+criteria = "safe-to-deploy"
+notes = "Listed only because serde_json declares serde under a target condition that never matches (cargo vet resolves every target); never compiled for hirz. No cargo-vet audit recorded here."
+
+[[exemptions.zmij]]
+version = "1.0.23"
+criteria = "safe-to-deploy"
+notes = "serde_json family: tool only, a dependency of hirz-cli for CXF import and export, never of hirzd or hirz-nmh. No cargo-vet audit recorded here; imported sets trust the publisher but have no audit of this version."

@@ -5,7 +5,6 @@
 //! `hirz_webauthn::handle`. See `docs/extension.md` for the protocol.
 #![forbid(unsafe_code)]
 
-mod framing;
 #[path = "../../hirzd/src/session.rs"]
 mod session;
 
@@ -15,13 +14,16 @@ use std::process::ExitCode;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use framing::{FrameError, INBOUND_MAX, read_frame, write_frame};
 use hirz_core::{
-    Approver, AssertionResponse, CoreError, GetAssertionRequest, MakeCredentialRequest,
-    MakeCredentialResponse,
+    Approver, AssertionResponse, CandidateAccount, CoreError, GetAssertionRequest,
+    MakeCredentialRequest, MakeCredentialResponse,
 };
+#[cfg(test)]
+use hirz_nmh::framing;
+use hirz_nmh::framing::{FrameError, INBOUND_MAX, read_frame, write_frame};
 use hirz_proto::json::{self, Json, Limits};
 use hirz_uv::{CommandRunner, HirzApprover, SystemRunner};
+use hirz_vault::{CredentialRecord, Vault};
 use hirz_webauthn::envelope::{MAX_SAFE_INTEGER, error_reply};
 use hirz_webauthn::{Error, PROTOCOL_VERSION};
 use session::{Session, Settings, VaultStatus};
@@ -81,6 +83,59 @@ impl<A: Approver> hirz_webauthn::Engine for HostEngine<'_, A> {
     fn user_verification_available(&self) -> bool {
         self.uv
     }
+
+    fn list_accounts(
+        &mut self,
+        rp_id: &str,
+        allow_list: &[Vec<u8>],
+    ) -> Result<Vec<CandidateAccount>, CoreError> {
+        let found = self.session.with_engine(self.cancelled, |e| {
+            Ok(visible_accounts(e.vault(), rp_id, allow_list))
+        });
+        match found {
+            // The closure cannot fail, so this is "no vault is open".
+            Err(CoreError::Vault(_)) => Ok(Vec::new()),
+            other => other,
+        }
+    }
+}
+
+/// The accounts conditional mediation may suggest, chosen like the engine chooses what a
+/// `get` without user verification may use: allow-list order without duplicates and
+/// credProtect 3 hidden, or the RP's discoverable credentials, newest first, with
+/// credProtect 2 and 3 hidden.
+fn visible_accounts(vault: &Vault, rp_id: &str, allow_list: &[Vec<u8>]) -> Vec<CandidateAccount> {
+    let mut found: Vec<&CredentialRecord> = Vec::new();
+    if allow_list.is_empty() {
+        found = vault
+            .credentials_for_rp(rp_id)
+            .into_iter()
+            .filter(|r| r.discoverable && !matches!(r.cred_protect, Some(2 | 3)))
+            .collect();
+        found.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.credential_id.cmp(&b.credential_id))
+        });
+    } else {
+        for id in allow_list {
+            if let Some(rec) = vault.get(id)
+                && rec.rp_id == rp_id
+                && rec.cred_protect != Some(3)
+                && !found.iter().any(|f| f.credential_id == rec.credential_id)
+            {
+                found.push(rec);
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|r| CandidateAccount {
+            credential_id: r.credential_id.clone(),
+            user_name: r.user_name.clone(),
+            user_display_name: r.user_display_name.clone(),
+        })
+        .collect()
 }
 
 /// Ceremonies received but not yet answered, and those of them the extension cancelled.
@@ -99,6 +154,7 @@ enum Kind {
     Hello,
     Capabilities,
     Ceremony,
+    List,
     Cancel,
     Other,
 }
@@ -114,6 +170,7 @@ fn classify(msg: &Json) -> (Option<u64>, Kind) {
         Some("hello") => Kind::Hello,
         Some("capabilities") => Kind::Capabilities,
         Some("create" | "get") => Kind::Ceremony,
+        Some("list") => Kind::List,
         Some("cancel") => Kind::Cancel,
         _ => Kind::Other,
     };
@@ -122,7 +179,7 @@ fn classify(msg: &Json) -> (Option<u64>, Kind) {
 
 fn type_name(msg: &Json) -> &str {
     match msg.get("type").and_then(Json::as_str) {
-        Some(t @ ("hello" | "capabilities" | "create" | "get" | "cancel")) => t,
+        Some(t @ ("hello" | "capabilities" | "create" | "get" | "list" | "cancel")) => t,
         _ => "other",
     }
 }
@@ -228,6 +285,10 @@ impl<A: Approver + UvProbe> Host<A> {
                     return abort_reply(id);
                 }
                 reply
+            }
+            (Kind::List, _) => {
+                self.vault_ready();
+                self.handle(msg, false, None)
             }
             (Kind::Capabilities, _) => {
                 let uv = self.vault_ready() && self.session.approver().uv_available();

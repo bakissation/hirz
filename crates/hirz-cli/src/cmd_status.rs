@@ -13,6 +13,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 
 const MAX_LISTED_SKIPPED: usize = 10;
+const SYSTEM_SCOPE: &str = "system";
 
 #[derive(Debug, Default)]
 struct VaultInfo {
@@ -138,6 +139,21 @@ fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
     })
 }
 
+/// Per-user manifests that Firefox, the portal and the proxy read before an installed system
+/// manifest, so they take precedence over the packaged one.
+fn overriding_user_manifests(manifests: &[Manifest]) -> Vec<&Manifest> {
+    let system_installed = manifests
+        .iter()
+        .any(|m| m.scope == SYSTEM_SCOPE && m.state != ManifestState::Missing);
+    if !system_installed {
+        return Vec::new();
+    }
+    manifests
+        .iter()
+        .filter(|m| m.scope != SYSTEM_SCOPE && m.state != ManifestState::Missing)
+        .collect()
+}
+
 fn to_json(r: &Report) -> Value {
     let vault = r.vault.as_ref().map(|v| {
         json!({
@@ -158,6 +174,7 @@ fn to_json(r: &Report) -> Value {
             }
         })
     });
+    let overriding = overriding_user_manifests(&r.manifests);
     let (methods, methods_error) = match &r.methods {
         Ok(m) => (Some(m.clone()), None),
         Err(e) => (None, Some(e.clone())),
@@ -185,7 +202,8 @@ fn to_json(r: &Report) -> Value {
                     ManifestState::BrokenTarget(p) => ("program_missing", Some(p.clone())),
                     ManifestState::Invalid => ("invalid", None),
                 };
-                json!({"path": m.path.display().to_string(), "scope": m.scope, "state": state, "program": target})
+                let overrides_system = overriding.iter().any(|o| o.path == m.path);
+                json!({"path": m.path.display().to_string(), "scope": m.scope, "state": state, "program": target, "overrides_system": overrides_system})
             }).collect::<Vec<_>>(),
             "snap": r.snap,
             "flatpak": r.flatpak,
@@ -343,6 +361,20 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
             m.scope
         ))?;
     }
+    for m in overriding_user_manifests(&r.manifests) {
+        let program = match &m.state {
+            ManifestState::Ok(p) => p.display().to_string(),
+            ManifestState::BrokenTarget(p) => clean(p, 200),
+            ManifestState::Invalid | ManifestState::Missing => "no valid program".into(),
+        };
+        ctx.say(&format!(
+            "Warning:        {} takes precedence over the system manifest, so Firefox\n                \
+             starts {program} instead of the packaged host.\n                \
+             Remove it unless you run a development build: rm {}",
+            m.path.display(),
+            m.path.display()
+        ))?;
+    }
     if r.snap {
         ctx.say(
             "Firefox Snap:   found; it reads the manifest through the desktop portal and asks\n                \
@@ -384,4 +416,48 @@ pub fn status(ctx: &mut Ctx<'_>, json_out: bool) -> CliResult<Exit> {
         Some(_) => {}
     }
     Ok(Exit::Ok)
+}
+
+#[cfg(test)]
+mod manifest_override_tests {
+    use super::*;
+
+    fn manifest(path: &str, scope: &'static str, state: ManifestState) -> Manifest {
+        Manifest {
+            path: PathBuf::from(path),
+            scope,
+            state,
+        }
+    }
+
+    #[test]
+    fn user_manifest_overrides_only_an_installed_system_manifest() {
+        let user = || manifest("/h/user.json", "your user", ManifestState::Invalid);
+        let portal = || {
+            manifest(
+                "/h/portal.json",
+                "your user (portal)",
+                ManifestState::Missing,
+            )
+        };
+        let sys = |state| manifest("/usr/lib/hirz.json", SYSTEM_SCOPE, state);
+
+        let none = [user(), portal(), sys(ManifestState::Missing)];
+        assert!(overriding_user_manifests(&none).is_empty());
+
+        let both = [
+            user(),
+            portal(),
+            sys(ManifestState::Ok(PathBuf::from("/usr/lib/hirz/hirz-nmh"))),
+        ];
+        let found = overriding_user_manifests(&both);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found.first().map(|m| m.path.as_path()),
+            Some(PathBuf::from("/h/user.json").as_path())
+        );
+
+        let only_system = [sys(ManifestState::Invalid)];
+        assert!(overriding_user_manifests(&only_system).is_empty());
+    }
 }

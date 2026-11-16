@@ -20,6 +20,7 @@ hirz-ctap = { path = "../crates/hirz-ctap" }
 hirz-webauthn = { path = "../crates/hirz-webauthn" }
 hirz-vault = { path = "../crates/hirz-vault" }
 hirz-uv = { path = "../crates/hirz-uv" }
+hirz-nmh = { path = "../crates/hirz-nmh" }
 
 [profile.release]
 debug = 1
@@ -180,6 +181,27 @@ bench = false
 [[bin]]
 name = "uv_tool_output"
 path = "fuzz_targets/uv_tool_output.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nmh_framing"
+path = "fuzz_targets/nmh_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_record"
+path = "fuzz_targets/vault_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_event"
+path = "fuzz_targets/vault_event.rs"
 test = false
 doc = false
 bench = false

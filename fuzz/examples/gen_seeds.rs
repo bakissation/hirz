@@ -452,6 +452,131 @@ fn vault_and_uv_seeds(o: &mut Out) {
     }
 }
 
+/// The vault's field encoding: version byte, then `tag || u16 length || value` in tag order.
+fn tlv(version: u8, fields: &[(u8, &[u8])]) -> Vec<u8> {
+    let mut out = vec![version];
+    for (tag, value) in fields {
+        out.push(*tag);
+        out.extend_from_slice(
+            &u16::try_from(value.len())
+                .expect("short field")
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+fn record_body(version: u8, credential_id: &[u8], full: bool) -> Vec<u8> {
+    let alg = (-7i64).to_be_bytes();
+    let created = 1_700_000_000u64.to_be_bytes();
+    let key = [0x30u8; 40];
+    let hmac = [0x44u8; 64];
+    let discoverable = [u8::from(full)];
+    let mut f: Vec<(u8, &[u8])> = vec![(0x01, credential_id), (0x02, b"example.com")];
+    if full {
+        f.push((0x03, b"Example"));
+    }
+    f.push((0x04, b"user-0001"));
+    if full {
+        f.push((0x05, b"alice"));
+        f.push((0x06, b"Alice"));
+    }
+    f.push((0x07, &alg));
+    f.push((0x08, &key));
+    f.push((0x09, &created));
+    if full {
+        f.push((0x0a, &[2]));
+        f.push((0x0b, &hmac));
+    }
+    f.push((0x0c, &discoverable));
+    f.push((0x0d, &[1]));
+    if full {
+        f.push((0x40, b"ignored"));
+    }
+    tlv(version, &f)
+}
+
+fn event(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let lamport = 7u64.to_be_bytes();
+    let mut b = tlv(
+        1,
+        &[
+            (0x01, &[kind]),
+            (0x02, &[0x10; 16]),
+            (0x03, &lamport),
+            (0x04, payload),
+        ],
+    );
+    b.push(0x7f);
+    b.extend_from_slice(&32u16.to_be_bytes());
+    b.extend_from_slice(&[0x55; 32]);
+    b
+}
+
+fn nmh_and_vault_record_seeds(o: &mut Out) {
+    let mut stream = vec![0u8, 0];
+    for msg in [
+        &br#"{"type":"hello","id":1}"#[..],
+        br#"{"type":"cancel","id":1}"#,
+    ] {
+        stream.extend_from_slice(&u32::try_from(msg.len()).expect("short").to_ne_bytes());
+        stream.extend_from_slice(msg);
+    }
+    o.put("nmh_framing", "two", &stream);
+    let mut chunked = stream.clone();
+    chunked[0] = 3;
+    chunked[1] = 2;
+    o.put("nmh_framing", "chunked", &chunked);
+    o.put("nmh_framing", "too_large", &[0, 0, 0xff, 0xff, 0xff, 0x7f]);
+
+    let full = record_body(2, &[0x11; 48], true);
+    let minimal = record_body(2, &[0x22; 1], false);
+    let v1 = record_body(1, &[0x33; 32], false);
+    o.put("vault_record", "full", &full);
+    o.put("vault_record", "minimal", &minimal);
+    o.put("vault_record", "v1", &v1);
+
+    let created = 1_700_000_000u64.to_be_bytes();
+    o.put("vault_event", "put", &event(1, &full));
+    o.put(
+        "vault_event",
+        "tombstone",
+        &event(2, &tlv(2, &[(0x01, &[0x11; 48])])),
+    );
+    o.put(
+        "vault_event",
+        "tombstone_v1",
+        &event(2, &tlv(1, &[(0x01, &[0x33; 32])])),
+    );
+    o.put(
+        "vault_event",
+        "device_added",
+        &event(
+            3,
+            &tlv(
+                1,
+                &[
+                    (0x01, &[0x10; 16]),
+                    (0x02, b"laptop"),
+                    (0x03, &[0x66; 32]),
+                    (0x04, &created),
+                ],
+            ),
+        ),
+    );
+    o.put(
+        "vault_event",
+        "device_removed",
+        &event(4, &tlv(1, &[(0x01, &[0x10; 16]), (0x02, &created)])),
+    );
+    o.put(
+        "vault_event",
+        "backup_confirmed",
+        &event(5, &tlv(1, &[(0x01, &created)])),
+    );
+}
+
 fn main() {
     let root = std::env::args_os()
         .nth(1)
@@ -461,5 +586,6 @@ fn main() {
     ctap_seeds(&mut out);
     webauthn_seeds(&mut out);
     vault_and_uv_seeds(&mut out);
+    nmh_and_vault_record_seeds(&mut out);
     println!("wrote {} bytes of seeds to {}", out.total, out.root.display());
 }

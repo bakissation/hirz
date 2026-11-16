@@ -1,18 +1,37 @@
+# cargo deny check: licenses, bans, advisories (RustSec) and sources of the workspace.
+# The fuzz/ workspace (libfuzzer-sys) is separate and never shipped, so it is not covered.
+
 [graph]
 all-features = false
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [advisories]
 version = 2
 yanked = "deny"
+unmaintained = "all"
+unsound = "all"
 
 [licenses]
 version = 2
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "ISC", "BSD-3-Clause", "OpenSSL", "Unicode-3.0"]
+# Exactly the licenses the dependency tree needs. aws-lc-sys declares
+# "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND
+# (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)": AWS-LC now licenses the
+# OpenSSL and SSLeay derived code under Apache-2.0, so no OpenSSL license is needed and the
+# declared expression matches its LICENSE file without a clarify entry.
+allow = ["MIT", "Apache-2.0", "ISC", "BSD-3-Clause"]
 confidence-threshold = 0.9
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+# Internal crates are path dependencies without a version; every crate has publish = false.
+allow-wildcard-paths = true
+# Cryptography goes through hirz-crypto (aws-lc-rs, argon2); no second TLS or crypto stack.
+deny = [
+  { crate = "openssl", reason = "cryptography only through hirz-crypto" },
+  { crate = "openssl-sys", reason = "cryptography only through hirz-crypto" },
+  { crate = "ring", reason = "cryptography only through hirz-crypto" },
+]
 
 [sources]
 unknown-registry = "deny"

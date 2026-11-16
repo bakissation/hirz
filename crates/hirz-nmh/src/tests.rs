@@ -485,3 +485,105 @@ fn imported_credential_with_a_16_byte_id_signs_through_handle() {
     let reply = hirz_webauthn::handle(&msg, &mut engine);
     assert_eq!(reply.get("ok"), Some(&Json::Bool(false)), "{reply}");
 }
+
+fn record(
+    id: u8,
+    rp_id: &str,
+    created_at: u64,
+    protect: Option<u8>,
+    discoverable: bool,
+) -> hirz_vault::CredentialRecord {
+    let (pkcs8, _, _) = hirz_crypto::es256::generate().unwrap();
+    hirz_vault::CredentialRecord {
+        credential_id: vec![id; 16],
+        rp_id: rp_id.to_owned(),
+        rp_name: None,
+        user_id: vec![id],
+        user_name: Some(format!("user{id}")),
+        user_display_name: Some(format!("User {id}")),
+        algorithm: hirz_core::COSE_ALG_ES256,
+        private_key_pkcs8: pkcs8,
+        created_at,
+        cred_protect: protect,
+        hmac_secret: None,
+        discoverable,
+        backup_eligible: true,
+    }
+}
+
+fn list_msg(id: u64, allow: &[u8]) -> String {
+    let allow: Vec<String> = allow
+        .iter()
+        .map(|n| format!(r#"{{"type":"public-key","id":"{}"}}"#, b64(&[*n; 16])))
+        .collect();
+    format!(
+        r#"{{"v":1,"id":{id},"type":"list","origin":"{ORIGIN}","topOrigin":"{ORIGIN}","crossOrigin":false,"options":{{"rpId":"example.com","allowCredentials":[{}]}}}}"#,
+        allow.join(",")
+    )
+}
+
+fn listed_ids(reply: &Json) -> Vec<u8> {
+    assert_eq!(reply.get("ok"), Some(&Json::Bool(true)), "{reply}");
+    reply
+        .get("accounts")
+        .and_then(Json::as_array)
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let id = unb64(a.get("id"));
+            assert_eq!(id.len(), 16);
+            assert_eq!(
+                a.get("name").and_then(Json::as_str),
+                Some(format!("user{}", id[0]).as_str())
+            );
+            id[0]
+        })
+        .collect()
+}
+
+#[test]
+fn list_honours_discoverability_and_cred_protect() {
+    let mut h = Harness::start(true, plain());
+    let mut vault = Vault::open(&h.vault_dir, &h.state_dir).unwrap();
+    for rec in [
+        record(1, "example.com", 10, None, true),
+        record(2, "example.com", 30, Some(1), true),
+        record(3, "example.com", 20, Some(2), true),
+        record(4, "example.com", 40, Some(3), true),
+        record(5, "example.com", 50, None, false),
+        record(6, "other.example", 60, None, true),
+    ] {
+        vault.put(rec).unwrap();
+    }
+    drop(vault);
+
+    h.send(&list_msg(1, &[]));
+    assert_eq!(listed_ids(&h.recv()), [2, 1]);
+
+    h.send(&list_msg(2, &[3, 4, 5, 6, 1, 3, 9]));
+    assert_eq!(listed_ids(&h.recv()), [3, 5, 1]);
+
+    let cross = list_msg(3, &[]).replace(r#""crossOrigin":false"#, r#""crossOrigin":true"#);
+    h.send(&cross);
+    let reply = h.recv();
+    assert_eq!(
+        reply.get("error").and_then(Json::as_str),
+        Some("NotHandled")
+    );
+    h.finish().unwrap();
+}
+
+#[test]
+fn list_without_a_vault_is_empty() {
+    let mut h = Harness::start(false, plain());
+    h.send(&list_msg(1, &[]));
+    assert_eq!(
+        h.recv(),
+        json::parse(
+            br#"{"v":1,"id":1,"ok":true,"accounts":[]}"#,
+            &Limits::default()
+        )
+        .unwrap()
+    );
+    h.finish().unwrap();
+}

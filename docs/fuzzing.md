@@ -28,7 +28,7 @@ scripts/fuzz.sh seeds                     # regenerate fuzz/seeds
 scripts/fuzz.sh list
 ```
 
-`smoke` is meant for local CI: about 11 minutes after the first build, and it exits non-zero
+`smoke` is meant for local CI: about 12 minutes after the first build, and it exits non-zero
 when any target finds a crash, leak or timeout. Logs go to `fuzz/artifacts/smoke-logs/`.
 Environment knobs: `FUZZ_SMOKE_SECONDS` (default 60), `FUZZ_JOBS` (parallel targets,
 default 2), `FUZZ_RSS_MB` (default 1024), `CARGO_BUILD_JOBS` (default 3).
@@ -95,15 +95,25 @@ Properties are checked with `assert!`, so a violated property is reported like a
 | `uv_pin_verifier` | `pin::parse_verifier` | the PIN verifier file has one spelling: `serialize(parse(x)) == x` |
 | `uv_tool_output` | `fprint::classify_verify`, `fprint::has_enrolled_fingers`, `polkit::parse_stat_start_time`, `polkit::parse_status_uid`, `runner::passwd_name_for_uid` | a fingerprint match needs exit status 0 and a `verify-match (done)` line; listed fingers need exit status 0; a passwd name is always a valid user name |
 
-## Not covered yet
+### hirz-nmh
 
-- `hirz-nmh` framing (`read_frame`, `write_frame`) lives in the binary crate and cannot be
-  linked from `fuzz/`. Moving `framing.rs` into a library target (or into `hirz-proto`)
-  makes it a target.
-- `hirz-vault` record, event and field decoders (`CredentialRecord::decode`,
-  `Event::decode`, `codec::Fields`) are crate-private, and in a vault they only see bytes
-  that passed AEAD authentication. A `#[doc(hidden)] pub fn` that decodes one record body
-  would make them a target.
+| Target | Entry point | Checks |
+|---|---|---|
+| `nmh_framing` | `framing::read_frame` in a loop over a stream (first byte: bytes per `read` call, second: frame size cap), then `write_frame` | every frame is 1 byte to the cap; the bytes consumed are exactly the headers and bodies; a clean end only after the last frame; `TooLarge` only above the cap; a written frame reads back unchanged |
+
+`hirz-nmh` has a library target (`src/lib.rs`) only so that `fuzz/` can link the framing.
+
+### hirz-vault decoders
+
+The record and event decoders are crate-private, and in a vault they only see bytes that
+passed AEAD authentication. Two `#[doc(hidden)]` functions expose them for fuzzing:
+`fuzz_decode_record_body` and `fuzz_decode_event` decode, then return the re-encoding of
+what they decoded.
+
+| Target | Entry point | Checks |
+|---|---|---|
+| `vault_record` | `CredentialRecord::decode` (version 1 and 2 bodies) | a decoded record always encodes, and the encoding is a fixed point of decode then encode |
+| `vault_event` | `Event::decode` (body and author tag, all five event kinds) | same as `vault_record`, for events with their author tag |
 
 ## Triage
 

@@ -15,7 +15,7 @@ manifest points to the same `hirz-nmh` path everywhere.
 | udev rule | `/usr/lib/udev/rules.d/70-hirz.rules` | same | same | 0644 |
 | polkit action | `/usr/share/polkit-1/actions/dev.hirz.authenticate.policy` | same | same | 0644 |
 | Module list (`uhid`) | `/usr/lib/modules-load.d/hirz.conf` | same | same | 0644 |
-| Firefox native manifest | `/usr/lib/mozilla/native-messaging-hosts/hirz.json` | same, plus `/usr/lib64/mozilla/native-messaging-hosts/hirz.json` | same as Debian | 0644 |
+| Firefox native manifest | `/usr/lib/mozilla/native-messaging-hosts/hirz.json` | same, plus `/usr/lib64/mozilla/native-messaging-hosts/hirz.json` (a relative symlink to it) | same as Debian | 0644 |
 | Preset enabling the broker socket | none | `/usr/lib/systemd/system-preset/80-hirz.preset` | none | 0644 |
 
 All files and directories are owned by root. Nothing is installed in `/etc` (no conffiles)
@@ -77,7 +77,9 @@ scripts/build-xpi.sh                            # dist/hirz-VERSION.xpi, determi
 ```
 
 Arch: `cd packaging/arch && makepkg -si` once a `v$pkgver` tag exists (`makepkg` downloads
-the tag tarball).
+the tag tarball). To build before a tag exists, put a tarball named `hirz-$pkgver.tar.gz` (top
+directory `hirz-$pkgver/`) next to the `PKGBUILD`: `makepkg` uses an existing source file
+instead of downloading it.
 
 Release builds pass `--locked`, remap the source and Cargo paths
 (`--remap-path-prefix`, and `-ffile-prefix-map` for the C code of AWS-LC), take
@@ -87,7 +89,8 @@ local path is still found in a binary.
 ## Directories
 
 - `deb/`: maintainer scripts (`postinst`, `prerm`, `postrm`) used by `scripts/package-deb.sh`.
-- `rpm/`: `hirz.spec`.
+- `rpm/`: `hirz.spec`, and `hirz.rpmlintrc` with the filters for rpmlint's false positives
+  (`rpmlint -r packaging/rpm/hirz.rpmlintrc hirz.spec *.rpm`).
 - `arch/`: `PKGBUILD` and `hirz.install`.
 - `flatpak/`: how hirz works with Firefox installed as a Flatpak. hirz itself is not a
   Flatpak.
