@@ -1,0 +1,8 @@
+{
+    "credentialId": "AQIDBAUGBwgJCgsMDQ4PEA",
+    "privateKey": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAA\nAAAAAAAAAAAAAAAAAAAAAAAAAAGhRANCAARrF9Hy4SxCR/i85uVjpEDydwN9gS3r\nM6D0oTlF2JjClk/jQuL+Gn+bjufrSnwPnhYrzjNXazFezsu2QGg3v1H1\n-----END PRIVATE KEY-----\n",
+    "relyingParty": "example.com",
+    "url": "https://example.com",
+    "userHandle": "dXNlci0x",
+    "username": "alice"
+}

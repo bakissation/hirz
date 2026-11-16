@@ -17,16 +17,10 @@ use crate::recovery::RecoveryPhrase;
 use hirz_crypto::Zeroizing;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const GC_GRACE_SECS: u64 = 24 * 60 * 60;
 
-pub(crate) fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub(crate) use hirz_proto::time::unix_now as now;
 
 pub(crate) fn random16() -> Result<[u8; 16], VaultError> {
     let mut out = [0u8; 16];

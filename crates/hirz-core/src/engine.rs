@@ -77,19 +77,12 @@ impl fmt::Debug for Engine<'_> {
     }
 }
 
-fn system_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 impl<'a> Engine<'a> {
     pub fn new(vault: &'a mut Vault, approver: &'a dyn Approver) -> Self {
         Engine {
             vault,
             approver,
-            clock: system_now,
+            clock: hirz_proto::time::unix_now,
         }
     }
 

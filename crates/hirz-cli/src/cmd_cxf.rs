@@ -1,14 +1,18 @@
-//! `hirz export` and `hirz import`: FIDO CXF files, encrypted by default.
+//! `hirz export` and `hirz import`: FIDO CXF files, encrypted by default, and imports from
+//! Bitwarden and KeePassXC exports.
 
 use crate::app::Ctx;
+use crate::args::ImportFormat;
 use crate::cxf::{self, Candidate};
 use crate::envelope::{self, EnvelopeError};
 use crate::error::{CliError, CliResult, Exit};
+use crate::foreign::{self, Found, bitwarden, keepassxc};
 use crate::prompt::{self, confirm, confirm_word};
 use crate::ui::{clean, count};
-use hirz_crypto::Zeroizing;
+use hirz_crypto::{Secret, Zeroizing};
+use hirz_vault::Vault;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const PASSPHRASE_ATTEMPTS: usize = 3;
 
@@ -104,14 +108,18 @@ pub fn export(ctx: &mut Ctx<'_>, file: &Path, plain: bool) -> CliResult<Exit> {
     Ok(Exit::Ok)
 }
 
-fn read_capped(path: &Path) -> CliResult<Zeroizing<Vec<u8>>> {
+fn len64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+fn read_capped(path: &Path, max: u64) -> CliResult<Zeroizing<Vec<u8>>> {
     let f = std::fs::File::open(path)
         .map_err(|e| CliError::io(&format!("Could not open {}", path.display()), &e))?;
     let mut buf = Zeroizing::new(Vec::new());
-    f.take(envelope::MAX_FILE_LEN.saturating_add(1))
+    f.take(max.saturating_add(1))
         .read_to_end(&mut buf)
         .map_err(|e| CliError::io(&format!("Could not read {}", path.display()), &e))?;
-    if u64::try_from(buf.len()).unwrap_or(u64::MAX) > envelope::MAX_FILE_LEN {
+    if u64::try_from(buf.len()).unwrap_or(u64::MAX) > max {
         return Err(CliError::failed(
             "The file is too large to be a passkey export.",
         ));
@@ -152,10 +160,18 @@ fn decrypt(ctx: &mut Ctx<'_>, data: &[u8]) -> CliResult<Zeroizing<Vec<u8>>> {
     ))
 }
 
-pub fn import(ctx: &mut Ctx<'_>, file: &Path) -> CliResult<Exit> {
+pub fn import(ctx: &mut Ctx<'_>, format: ImportFormat, file: &Path) -> CliResult<Exit> {
     let file = ctx.env.absolute(file)?;
     let (mut vault, _) = ctx.open_vault()?;
-    let raw = read_capped(&file)?;
+    match format {
+        ImportFormat::Cxf => import_cxf(ctx, &mut vault, &file),
+        ImportFormat::Bitwarden => import_bitwarden(ctx, &mut vault, &file),
+        ImportFormat::KeePassXc => import_keepassxc(ctx, &mut vault, &file),
+    }
+}
+
+fn import_cxf(ctx: &mut Ctx<'_>, vault: &mut Vault, file: &Path) -> CliResult<Exit> {
+    let raw = read_capped(file, envelope::MAX_FILE_LEN)?;
     let json = if envelope::is_envelope(&raw) {
         decrypt(ctx, &raw)?
     } else {
@@ -166,7 +182,136 @@ pub fn import(ctx: &mut Ctx<'_>, file: &Path) -> CliResult<Exit> {
     if !parsed.exporter.is_empty() {
         ctx.say(&format!("Export made by: {}", parsed.exporter))?;
     }
-    if parsed.passkeys.is_empty() {
+    store(ctx, vault, parsed.passkeys, parsed.other_credentials)
+}
+
+fn candidate(found: Found) -> Candidate {
+    match found {
+        Found::Ready(record) => Candidate::Ready {
+            record,
+            dropped: Vec::new(),
+        },
+        Found::Skipped {
+            site,
+            account,
+            reason,
+        } => Candidate::Skipped {
+            label: cxf::label(&site, account.as_deref()),
+            reason,
+        },
+    }
+}
+
+fn bitwarden_password(ctx: &mut Ctx<'_>, file: &bitwarden::Protected) -> CliResult<Secret> {
+    ctx.say("This Bitwarden export is password protected.")?;
+    for attempt in 0..PASSPHRASE_ATTEMPTS {
+        let p = prompt::read_secret(ctx.prompt, "File password: ")?;
+        match file.decrypt(p.as_bytes()) {
+            Ok(plain) => return Ok(plain),
+            Err(bitwarden::OpenError::WrongPassword) => {
+                if attempt.saturating_add(1) < PASSPHRASE_ATTEMPTS {
+                    ctx.say("Wrong password (or the file was changed). Try again.")?;
+                }
+            }
+            Err(bitwarden::OpenError::Damaged) => {
+                return Err(CliError::failed(
+                    "The password protected export is damaged.",
+                ));
+            }
+        }
+    }
+    Err(CliError::denied(
+        "Wrong password, or the file was changed after it was written. Nothing was imported.",
+    ))
+}
+
+fn import_bitwarden(ctx: &mut Ctx<'_>, vault: &mut Vault, file: &Path) -> CliResult<Exit> {
+    let now = crate::ui::now();
+    let raw = read_capped(file, len64(foreign::MAX_FILE_LEN))?;
+    let parsed = match bitwarden::read(&raw, now).map_err(CliError::failed)? {
+        bitwarden::Export::Plain(parsed) => parsed,
+        bitwarden::Export::Protected(protected) => {
+            drop(raw);
+            let inner = bitwarden_password(ctx, &protected)?;
+            bitwarden::read_decrypted(&inner, now).map_err(CliError::failed)?
+        }
+    };
+    store(
+        ctx,
+        vault,
+        parsed.passkeys.into_iter().map(candidate).collect(),
+        parsed.other_items,
+    )
+}
+
+/// The `.passkey` files of a folder, sorted by name.
+fn passkey_files(dir: &Path) -> CliResult<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| CliError::io(&format!("Could not read {}", dir.display()), &e))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|e| CliError::io(&format!("Could not read {}", dir.display()), &e))?
+            .path();
+        if path.extension().is_some_and(|x| x == keepassxc::EXTENSION) && path.is_file() {
+            if files.len() >= foreign::MAX_PASSKEYS {
+                return Err(CliError::failed(format!(
+                    "The folder holds more than {} passkey files; hirz will not read it.",
+                    foreign::MAX_PASSKEYS
+                )));
+            }
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn import_keepassxc(ctx: &mut Ctx<'_>, vault: &mut Vault, path: &Path) -> CliResult<Exit> {
+    let now = crate::ui::now();
+    let read_one = |file: &Path| -> CliResult<Found> {
+        let raw = read_capped(file, len64(keepassxc::MAX_PASSKEY_FILE_LEN))?;
+        keepassxc::read(&raw, now).map_err(CliError::failed)
+    };
+    if !path.is_dir() {
+        let found = read_one(path)?;
+        return store(ctx, vault, vec![candidate(found)], 0);
+    }
+    let files = passkey_files(path)?;
+    if files.is_empty() {
+        return Err(CliError::failed(format!(
+            "{} holds no .{} files.",
+            path.display(),
+            keepassxc::EXTENSION
+        )));
+    }
+    let mut found = Vec::with_capacity(files.len());
+    for file in &files {
+        found.push(match read_one(file) {
+            Ok(f) => candidate(f),
+            Err(e) => Candidate::Skipped {
+                label: clean(
+                    &file
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    60,
+                ),
+                reason: e.message,
+            },
+        });
+    }
+    store(ctx, vault, found, 0)
+}
+
+/// Adds the ready passkeys that are not in the vault yet and reports the rest.
+fn store(
+    ctx: &mut Ctx<'_>,
+    vault: &mut Vault,
+    passkeys: Vec<Candidate>,
+    other_items: usize,
+) -> CliResult<Exit> {
+    if passkeys.is_empty() {
         ctx.say("The file holds no passkeys.")?;
     }
     let mut imported = 0usize;
@@ -174,7 +319,7 @@ pub fn import(ctx: &mut Ctx<'_>, file: &Path) -> CliResult<Exit> {
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut dropped_notes: Vec<(String, Vec<&'static str>)> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for c in parsed.passkeys {
+    for c in passkeys {
         match c {
             Candidate::Skipped { label, reason } => skipped.push((label, reason)),
             Candidate::Ready { record, dropped } => {
@@ -213,10 +358,10 @@ pub fn import(ctx: &mut Ctx<'_>, file: &Path) -> CliResult<Exit> {
             count(already, "passkey")
         ))?;
     }
-    if parsed.other_credentials > 0 {
+    if other_items > 0 {
         ctx.say(&format!(
             "{} of other kinds (passwords, notes, cards...) were ignored: hirz stores passkeys only.",
-            count(parsed.other_credentials, "item")
+            count(other_items, "item")
         ))?;
     }
     for (label, what) in &dropped_notes {

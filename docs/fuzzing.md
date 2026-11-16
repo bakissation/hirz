@@ -35,8 +35,8 @@ default 2), `FUZZ_RSS_MB` (default 1024), `CARGO_BUILD_JOBS` (default 3).
 
 Every run uses `-rss_limit_mb=1024`, a 10 second per-input timeout and a per-target
 `-max_len`: 7609 bytes for CTAP2 inputs (the largest CTAPHID message, 57 + 128 x 59),
-262144 for JSON, 65536 for CBOR and authenticatorData, 16640 for the CTAPHID transport
-script (256 reports), 8192 otherwise.
+262144 for JSON and Bitwarden exports, 65536 for CBOR, authenticatorData and KeePassXC
+files, 16640 for the CTAPHID transport script (256 reports), 8192 otherwise.
 
 Inputs are read from `fuzz/seeds/<target>` (checked in) and `fuzz/corpus/<target>`
 (generated, ignored by git). Crashing inputs land in `fuzz/artifacts/<target>/` (ignored
@@ -114,6 +114,16 @@ what they decoded.
 |---|---|---|
 | `vault_record` | `CredentialRecord::decode` (version 1 and 2 bodies) | a decoded record always encodes, and the encoding is a fixed point of decode then encode |
 | `vault_event` | `Event::decode` (body and author tag, all five event kinds) | same as `vault_record`, for events with their author tag |
+
+### hirz-cli import parsers
+
+`hirz` has no library target; `fuzz/src/lib.rs` includes `crates/hirz-cli/src/foreign/` as a
+module. Those parsers use only hirz library crates and the strict JSON reader of hirz-proto.
+
+| Target | Entry point | Checks |
+|---|---|---|
+| `import_bitwarden` | `bitwarden::read`, `Protected::decrypt_with` with a fixed key (no KDF runs), `bitwarden::read_decrypted`, `bitwarden::credential_id` | every imported record validates, is ES256 with a key that parses, a valid RP id and a creation time not in the future; credential ids are 1 to 1023 bytes |
+| `import_keepassxc` | `keepassxc::read` | every imported record validates, is ES256 or EdDSA, discoverable and backup eligible, with a valid RP id |
 
 ## Triage
 

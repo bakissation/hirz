@@ -22,6 +22,14 @@ pub enum PinAction {
     Status,
 }
 
+/// File formats `hirz import` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportFormat {
+    Cxf,
+    Bitwarden,
+    KeePassXc,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help(Option<String>),
@@ -67,6 +75,7 @@ pub enum Command {
         plain: bool,
     },
     Import {
+        format: ImportFormat,
         file: PathBuf,
     },
     BackupConfirm {
@@ -97,7 +106,15 @@ struct Raw {
 }
 
 /// Options that take a value, so `--opt value` and `--opt=value` both work.
-const VALUE_OPTS: &[&str] = &["--vault", "--name", "--site", "--cxf", "--nmh-path"];
+const VALUE_OPTS: &[&str] = &[
+    "--vault",
+    "--name",
+    "--site",
+    "--cxf",
+    "--bitwarden",
+    "--keepassxc",
+    "--nmh-path",
+];
 const BOOL_OPTS: &[&str] = &[
     "--json",
     "--yes",
@@ -398,11 +415,25 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
         }
         "import" => {
             expect_args(rest, 0, "import")?;
-            let file = raw
-                .value("--cxf")
-                .ok_or_else(|| CliError::usage("Say which file to read: hirz import --cxf FILE"))?;
+            let mut given = [
+                (ImportFormat::Cxf, raw.value("--cxf")),
+                (ImportFormat::Bitwarden, raw.value("--bitwarden")),
+                (ImportFormat::KeePassXc, raw.value("--keepassxc")),
+            ]
+            .into_iter()
+            .filter_map(|(f, v)| Some((f, v?)));
             raw.finish("import")?;
+            let (format, file) = given.next().ok_or_else(|| {
+                CliError::usage(
+                    "Say which file to read: hirz import --cxf FILE, --bitwarden FILE or \
+                     --keepassxc PATH",
+                )
+            })?;
+            if given.next().is_some() {
+                return Err(CliError::usage("Import one file at a time."));
+            }
             Command::Import {
+                format,
                 file: PathBuf::from(file),
             }
         }

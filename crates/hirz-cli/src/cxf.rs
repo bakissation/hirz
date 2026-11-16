@@ -4,7 +4,7 @@
 //! credential. Import reads every `passkey` credential of every item of every account and
 //! counts the other credential types, which hirz does not store.
 
-use hirz_core::{COSE_ALG_EDDSA, COSE_ALG_ES256};
+use crate::foreign::identify_key;
 use hirz_crypto::{Zeroize, Zeroizing};
 use hirz_vault::{
     CredentialRecord, HmacSecretPair, MAX_CREDENTIAL_ID_LEN, MAX_PKCS8_LEN, MAX_STRING_LEN,
@@ -170,52 +170,6 @@ fn req_bytes(o: &Map<String, Value>, key: &str, max: usize) -> Result<Zeroizing<
 
 fn non_empty(s: Option<&str>) -> Option<String> {
     s.filter(|v| !v.is_empty()).map(str::to_string)
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
-}
-
-/// COSE algorithm of a PKCS#8 private key, if hirz supports it.
-pub fn identify_key(pkcs8: &[u8]) -> Result<i64, String> {
-    if hirz_crypto::es256::public_key(pkcs8).is_ok() {
-        return Ok(COSE_ALG_ES256);
-    }
-    if hirz_crypto::ed25519::public_key(pkcs8).is_ok() {
-        return Ok(COSE_ALG_EDDSA);
-    }
-    const KNOWN: &[(&[u8], &str)] = &[
-        (
-            &[
-                0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
-            ],
-            "an RSA key",
-        ),
-        (
-            &[
-                0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
-            ],
-            "an RSA-PSS key",
-        ),
-        (&[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22], "a P-384 key"),
-        (&[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23], "a P-521 key"),
-        (&[0x06, 0x03, 0x2b, 0x65, 0x71], "an Ed448 key"),
-        (
-            &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
-            "a P-256 key hirz could not read",
-        ),
-        (
-            &[0x06, 0x03, 0x2b, 0x65, 0x70],
-            "an Ed25519 key hirz could not read",
-        ),
-    ];
-    let kind = KNOWN
-        .iter()
-        .find(|(oid, _)| contains(pkcs8, oid))
-        .map_or("a key type hirz does not know", |(_, k)| *k);
-    Err(format!(
-        "it uses {kind}; hirz supports P-256 (ES256) and Ed25519 keys"
-    ))
 }
 
 #[derive(Debug, Default)]
@@ -428,21 +382,7 @@ fn parse_doc(doc: &Value, now: u64) -> Result<Parsed, String> {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn identifies_keys() {
-        let (es, _, _) = hirz_crypto::es256::generate().unwrap();
-        let (ed, _) = hirz_crypto::ed25519::generate().unwrap();
-        assert_eq!(identify_key(&es), Ok(COSE_ALG_ES256));
-        assert_eq!(identify_key(&ed), Ok(COSE_ALG_EDDSA));
-        let p384 = [0x30, 0x10, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22, 0x00];
-        assert!(identify_key(&p384).unwrap_err().contains("P-384"));
-        assert!(
-            identify_key(b"garbage")
-                .unwrap_err()
-                .contains("does not know")
-        );
-    }
+    use hirz_core::COSE_ALG_ES256;
 
     #[test]
     fn export_then_parse() {

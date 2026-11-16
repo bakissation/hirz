@@ -176,6 +176,21 @@ Read an encrypted hirz export or a plain CXF document from another provider and 
 valid passkeys.
 Existing passkeys are never replaced.
 .TP
+.B import \-\-bitwarden \fIFILE
+Read the passkeys of a Bitwarden JSON export, unencrypted or password protected (asks for
+the file password).
+Account restricted exports cannot be read.
+Only P\-256 passkeys are imported; passwords, notes and other items are ignored.
+.TP
+.B import \-\-keepassxc \fIPATH
+Read a KeePassXC
+.I .passkey
+file, or every
+.I *.passkey
+file in the folder
+.IR PATH .
+KeePass XML exports are not supported.
+.TP
 .B backup confirm \fR[\fB\-\-yes\fR]
 Record that your passkeys exist somewhere other than this computer, so new assertions carry
 the backed up (BS) flag.

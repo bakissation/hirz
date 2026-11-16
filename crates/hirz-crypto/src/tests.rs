@@ -510,3 +510,70 @@ fn argon2id_basic_and_limits() {
     );
     assert!(kdf::within_limits(kdf::DEFAULT));
 }
+
+#[test]
+fn pbkdf2_rfc7914_vector() {
+    let out = pbkdf2_hmac_sha256(b"passwd", b"salt", 1, 64).unwrap();
+    assert_eq!(
+        out.as_slice(),
+        h(
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc
+           49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"
+        )
+    );
+    assert!(pbkdf2_hmac_sha256(b"p", b"s", 0, 32).is_err());
+    assert!(pbkdf2_hmac_sha256(b"p", b"s", PBKDF2_MAX_ITERATIONS + 1, 32).is_err());
+    assert!(pbkdf2_hmac_sha256(b"p", b"s", 1, 0).is_err());
+}
+
+#[test]
+fn hkdf_expand_rfc5869_case1() {
+    let prk = h("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5");
+    let mut okm = [0u8; 42];
+    hkdf_sha256_expand(&prk, &h("f0f1f2f3f4f5f6f7f8f9"), &mut okm).unwrap();
+    assert_eq!(
+        okm.to_vec(),
+        h("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+    );
+    assert!(hkdf_sha256_expand(&prk, b"", &mut []).is_err());
+}
+
+#[test]
+fn hmac_verify_rfc4231_case2() {
+    let tag = h("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    hmac_sha256_verify(b"Jefe", b"what do ya want for nothing?", &tag).unwrap();
+    let mut bad = tag.clone();
+    bad[0] ^= 1;
+    assert_eq!(
+        hmac_sha256_verify(b"Jefe", b"what do ya want for nothing?", &bad),
+        Err(CryptoError::Auth)
+    );
+    assert!(hmac_sha256_verify(b"Jefe", b"what do ya want for nothing?", &tag[..31]).is_err());
+}
+
+#[test]
+fn aes_cbc_hmac_round_trip_and_tamper() {
+    let (ek, mk) = ([7u8; 32], [9u8; 32]);
+    for msg in [&b""[..], b"x", &[0x41; 16], &[0x42; 33]] {
+        let (iv, ct, tag) = aes_cbc_hmac::seal(&ek, &mk, msg).unwrap();
+        assert_eq!(ct.len(), (msg.len() / 16 + 1) * 16);
+        let pt = aes_cbc_hmac::open(&ek, &mk, &iv, &ct, &tag).unwrap();
+        assert_eq!(pt.as_slice(), msg);
+        let mut bad_ct = ct.clone();
+        bad_ct[0] ^= 1;
+        assert_eq!(
+            aes_cbc_hmac::open(&ek, &mk, &iv, &bad_ct, &tag),
+            Err(CryptoError::Auth)
+        );
+        let mut bad_iv = iv;
+        bad_iv[15] ^= 1;
+        assert_eq!(
+            aes_cbc_hmac::open(&ek, &mk, &bad_iv, &ct, &tag),
+            Err(CryptoError::Auth)
+        );
+        assert_eq!(
+            aes_cbc_hmac::open(&ek, &[8u8; 32], &iv, &ct, &tag),
+            Err(CryptoError::Auth)
+        );
+    }
+}

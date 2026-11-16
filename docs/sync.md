@@ -320,6 +320,53 @@ A passkey whose credential id is already in hirz is reported as already present 
 is the same, and skipped when it differs. The file may be at most 64 MiB and hold at most
 100000 passkeys; JSON nesting is limited to 128 levels.
 
+### Importing from Bitwarden and KeePassXC
+
+```
+hirz import --bitwarden ~/bitwarden_export.json
+hirz import --keepassxc ~/passkeys/            # a .passkey file, or a folder of them
+```
+
+Duplicates, skipped passkeys and the report work as for CXF imports. Imported passkeys are
+backup eligible (BE) like every hirz passkey, keep their original credential ids and start
+with a signature counter of 0. Only passkey fields are read: passwords, notes, TOTP
+secrets, card and identity data are never stored or shown, and the file contents are wiped
+from memory after reading.
+
+**Bitwarden** JSON exports (File > Export vault, format `.json`):
+
+- Unencrypted exports are read directly.
+- Password protected exports (`"passwordProtected": true`) ask for the file password, three
+  tries. The key is derived from the password and the file's `salt` with PBKDF2-SHA256
+  (5000 to 2000000 iterations) or Argon2id (2 to 10 iterations, 16 to 1024 MiB, 1 to 16
+  lanes), the ranges Bitwarden accepts, then expanded with HKDF into an AES-256-CBC key and
+  an HMAC-SHA256 key. The MAC is checked in constant time before anything is decrypted.
+- Account restricted exports (encrypted with the Bitwarden account key) cannot be read
+  outside Bitwarden; hirz says so. Export again as password protected or unencrypted.
+
+From each item hirz reads `login.fido2Credentials` only:
+
+| Field | Rule |
+|---|---|
+| `credentialId` | `b64.` followed by base64url is used as is; otherwise a GUID that stands for its 16 bytes, as Bitwarden does |
+| `keyType`, `keyAlgorithm`, `keyCurve` | must be `public-key`, `ECDSA`, `P-256`; other key types are skipped and named |
+| `keyValue` | base64url PKCS#8 that must parse as a P-256 key |
+| `rpId` | as for CXF |
+| `userHandle` | base64url, at most 64 bytes; empty or missing is allowed |
+| `userName`, `userDisplayName`, `rpName` | text up to 1024 bytes |
+| `discoverable` | `"true"` or `true` makes a discoverable passkey; anything else does not |
+| `creationDate` | RFC 3339 UTC time; missing, malformed or in the future means now |
+| `counter` | ignored |
+
+The file may be at most 64 MiB with at most 200000 items and 100000 passkeys.
+
+**KeePassXC** `.passkey` files (Entry > Passkey > Export) hold `relyingParty`, `username`,
+`credentialId` and `userHandle` (base64url) and `privateKey` (a PKCS#8 PEM block). P-256
+and Ed25519 keys are imported; RSA keys are skipped. Each file may be at most 64 KiB. A
+folder is read non-recursively, every `*.passkey` file in name order; a file that cannot be
+read is listed as skipped. KeePass XML exports, which keep passkeys in `KPEX_PASSKEY_*`
+entry attributes, are not supported: export the passkeys as `.passkey` files instead.
+
 ### Encrypted export file
 
 The encrypted export is the CXF JSON document inside a small binary envelope:

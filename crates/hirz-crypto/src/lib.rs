@@ -5,7 +5,7 @@
 //! may change; signatures change only together with their callers.
 #![forbid(unsafe_code)]
 
-use aws_lc_rs::{constant_time, digest, hkdf, hmac, rand as lc_rand};
+use aws_lc_rs::{constant_time, digest, hkdf, hmac, pbkdf2, rand as lc_rand};
 
 /// Re-exported so crates without a direct zeroize dependency can hold secrets.
 pub use zeroize::{Zeroize, Zeroizing};
@@ -68,6 +68,55 @@ pub fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8], out: &mut [u8]) -> Resu
         .expand(&info_parts, OutLen(out.len()))
         .map_err(|_| CryptoError::Invalid)?;
     okm.fill(out).map_err(|_| CryptoError::Invalid)
+}
+
+/// HKDF-Expand with SHA-256 (RFC 5869 section 2.3), using `prk` as the pseudorandom key
+/// without an extract step. `out.len()` at most 255 * 32.
+pub fn hkdf_sha256_expand(prk: &[u8], info: &[u8], out: &mut [u8]) -> Result<()> {
+    if prk.is_empty() || out.is_empty() || out.len() > HKDF_SHA256_MAX_OUT {
+        return Err(CryptoError::Invalid);
+    }
+    let prk = hkdf::Prk::new_less_safe(hkdf::HKDF_SHA256, prk);
+    let info_parts = [info];
+    let okm = prk
+        .expand(&info_parts, OutLen(out.len()))
+        .map_err(|_| CryptoError::Invalid)?;
+    okm.fill(out).map_err(|_| CryptoError::Invalid)
+}
+
+/// Checks an HMAC-SHA-256 tag in constant time.
+pub fn hmac_sha256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<()> {
+    let k = hmac::Key::new(hmac::HMAC_SHA256, key);
+    hmac::verify(&k, data, tag).map_err(|_| CryptoError::Auth)
+}
+
+/// Largest PBKDF2 iteration count this crate runs, so a count read from a hostile file
+/// cannot stall the caller for hours.
+pub const PBKDF2_MAX_ITERATIONS: u32 = 10_000_000;
+
+/// PBKDF2-HMAC-SHA-256 (RFC 8018). `iterations` from 1 to [`PBKDF2_MAX_ITERATIONS`], output
+/// from 1 to 1024 bytes.
+pub fn pbkdf2_hmac_sha256(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    out_len: usize,
+) -> Result<Secret> {
+    let iterations = core::num::NonZeroU32::new(iterations)
+        .filter(|i| i.get() <= PBKDF2_MAX_ITERATIONS)
+        .ok_or(CryptoError::Invalid)?;
+    if out_len == 0 || out_len > 1024 {
+        return Err(CryptoError::Invalid);
+    }
+    let mut out = Zeroizing::new(vec![0u8; out_len]);
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iterations,
+        salt,
+        password,
+        out.as_mut_slice(),
+    );
+    Ok(out)
 }
 
 fn to_array(src: &[u8]) -> [u8; 32] {
@@ -429,6 +478,76 @@ pub mod ctap_pin_uv {
             DecryptionContext::Iv128(FixedLength::from(*iv)),
         )
         .map_err(|_| CryptoError::Invalid)?;
+        Ok(buf)
+    }
+}
+
+/// AES-256-CBC with PKCS#7 padding followed by HMAC-SHA-256 over `iv || ciphertext`
+/// (encrypt then MAC), as some password manager export formats use it.
+pub mod aes_cbc_hmac {
+    use super::{CryptoError, Result, Secret};
+    use aws_lc_rs::cipher::{
+        AES_256, DecryptionContext, EncryptionContext, PaddedBlockDecryptingKey,
+        PaddedBlockEncryptingKey, UnboundCipherKey,
+    };
+    use aws_lc_rs::hmac;
+    use aws_lc_rs::iv::FixedLength;
+    use zeroize::Zeroizing;
+
+    pub const KEY_LEN: usize = 32;
+    pub const IV_LEN: usize = 16;
+    pub const TAG_LEN: usize = 32;
+
+    fn tag(mac_key: &[u8; KEY_LEN], iv: &[u8], ciphertext: &[u8]) -> hmac::Tag {
+        let mut ctx = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, mac_key));
+        ctx.update(iv);
+        ctx.update(ciphertext);
+        ctx.sign()
+    }
+
+    /// Encrypts under a fresh random IV. Returns (iv, ciphertext, tag).
+    pub fn seal(
+        enc_key: &[u8; KEY_LEN],
+        mac_key: &[u8; KEY_LEN],
+        plaintext: &[u8],
+    ) -> Result<([u8; IV_LEN], Vec<u8>, [u8; TAG_LEN])> {
+        let mut iv = [0u8; IV_LEN];
+        super::random_fill(&mut iv)?;
+        let k = UnboundCipherKey::new(&AES_256, enc_key).map_err(|_| CryptoError::Invalid)?;
+        let ek = PaddedBlockEncryptingKey::cbc_pkcs7(k).map_err(|_| CryptoError::Invalid)?;
+        let mut buf = plaintext.to_vec();
+        ek.less_safe_encrypt(&mut buf, EncryptionContext::Iv128(FixedLength::from(iv)))
+            .map_err(|_| CryptoError::Invalid)?;
+        let t = tag(mac_key, &iv, &buf);
+        Ok((iv, buf, super::to_array(t.as_ref())))
+    }
+
+    /// Checks the tag in constant time, then decrypts and removes the padding.
+    pub fn open(
+        enc_key: &[u8; KEY_LEN],
+        mac_key: &[u8; KEY_LEN],
+        iv: &[u8; IV_LEN],
+        ciphertext: &[u8],
+        mac: &[u8],
+    ) -> Result<Secret> {
+        let expected = tag(mac_key, iv, ciphertext);
+        if !super::ct_eq(expected.as_ref(), mac) {
+            return Err(CryptoError::Auth);
+        }
+        if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
+            return Err(CryptoError::Invalid);
+        }
+        let k = UnboundCipherKey::new(&AES_256, enc_key).map_err(|_| CryptoError::Invalid)?;
+        let dk = PaddedBlockDecryptingKey::cbc_pkcs7(k).map_err(|_| CryptoError::Invalid)?;
+        let mut buf = Zeroizing::new(ciphertext.to_vec());
+        let len = dk
+            .decrypt(
+                buf.as_mut_slice(),
+                DecryptionContext::Iv128(FixedLength::from(*iv)),
+            )
+            .map_err(|_| CryptoError::Invalid)?
+            .len();
+        buf.truncate(len);
         Ok(buf)
     }
 }

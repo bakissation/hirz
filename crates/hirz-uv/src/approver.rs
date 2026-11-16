@@ -11,6 +11,7 @@ use hirz_core::{
     RemovalApprovalContext,
 };
 use hirz_crypto::Secret;
+use hirz_proto::time::unix_now;
 
 use crate::config::{self, Config, Paths, UvMethod};
 use crate::display::{self, Step};
@@ -830,13 +831,6 @@ impl<R: CommandRunner> HirzApprover<R> {
             selected: None,
         })
     }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 impl<R: CommandRunner> Approver for HirzApprover<R> {

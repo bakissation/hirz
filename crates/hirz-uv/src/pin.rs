@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hirz_crypto::kdf::{self, Argon2Params};
+use hirz_proto::hex::encode as hex_encode;
 
 pub const MIN_PIN_CODE_POINTS: usize = 4;
 pub const MAX_PIN_BYTES: usize = 63;
@@ -90,33 +91,11 @@ pub struct Verifier {
     pub failures: u32,
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    use core::fmt::Write as _;
-    let mut s = String::with_capacity(bytes.len().saturating_mul(2));
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
 fn hex_decode(s: &str, min: usize, max: usize) -> Option<Vec<u8>> {
-    let raw = s.as_bytes();
-    if !raw.len().is_multiple_of(2)
-        || raw.len() < min.saturating_mul(2)
-        || raw.len() > max.saturating_mul(2)
-    {
+    if s.len() < min.saturating_mul(2) || s.len() > max.saturating_mul(2) {
         return None;
     }
-    let nibble = |b: u8| match b {
-        b'0'..=b'9' => b.checked_sub(b'0'),
-        b'a'..=b'f' => b.checked_sub(b'a').and_then(|v| v.checked_add(10)),
-        _ => None,
-    };
-    raw.as_chunks::<2>()
-        .0
-        .iter()
-        .map(|[hi, lo]| nibble(*hi)?.checked_mul(16)?.checked_add(nibble(*lo)?))
-        .collect()
+    hirz_proto::hex::decode(s).ok()
 }
 
 fn parse_u32(s: &str) -> Option<u32> {

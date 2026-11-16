@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use hirz_ctap::Ctap2Handler;
 use hirz_ctap::hid::{self, LoopEvent, StreamReportIo};
+use hirz_proto::hex::encode as hex;
 use hirz_uv::{HirzApprover, SystemRunner};
 
 use authenticator::{Notice, VaultAuthenticator};
@@ -84,15 +85,6 @@ impl hid::CborHandler for DebugHandler {
     fn wink(&self) {
         self.0.wink();
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for b in bytes {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 /// Serves the broker until the process is stopped, reconnecting whenever it goes away.

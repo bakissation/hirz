@@ -13,6 +13,7 @@ mod cxf;
 mod env;
 mod envelope;
 mod error;
+mod foreign;
 mod prompt;
 mod ui;
 

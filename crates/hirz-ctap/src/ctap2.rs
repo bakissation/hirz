@@ -66,13 +66,13 @@ pub const MAX_CREDENTIAL_COUNT_IN_LIST: u64 = 16;
 /// Advertised maxCredentialIdLength. hirz creates 32-byte ids, but imported passkeys keep
 /// their original ids (up to 1023 bytes) and browsers drop longer allow-list ids before
 /// sending them.
-pub const MAX_ACCEPTED_CREDENTIAL_ID_LEN: u64 = 1023;
+pub const MAX_ACCEPTED_CREDENTIAL_ID_LEN: u64 = MAX_CREDENTIAL_ID_LEN as u64;
 
 /// getInfo firmwareVersion: the package version as `major << 16 | minor << 8 | patch`.
 pub const FIRMWARE_VERSION: u64 = 0x00_01_00;
 
 /// Longest user handle (WebAuthn `user.id`).
-pub const MAX_USER_ID_LEN: usize = 64;
+pub const MAX_USER_ID_LEN: usize = hirz_proto::MAX_USER_ID_LEN;
 
 const PUBLIC_KEY: &str = "public-key";
 const MAX_ITEMS: usize = 2048;

@@ -282,6 +282,21 @@ a different one with the same credential id is skipped. Credential ids of any le
 to 1023 bytes (the WebAuthn limit) are kept as they are. Exit status 6 when at least one
 passkey was skipped; each one is listed with the reason.
 
+### `hirz import --bitwarden FILE`
+
+Reads the passkeys of a Bitwarden `.json` export, unencrypted or password protected (asks
+for the file password, three tries). Account restricted exports, encrypted with the
+Bitwarden account key, cannot be read; hirz explains how to export again. Only
+`login.fido2Credentials` entries are read, and only P-256 passkeys are imported; passwords,
+notes and other items are counted and ignored. Duplicates, skipped passkeys and the exit
+status work as for `--cxf`. Details: [sync.md](sync.md#importing-from-bitwarden-and-keepassxc).
+
+### `hirz import --keepassxc PATH`
+
+Reads a KeePassXC `.passkey` file, or every `*.passkey` file in the folder PATH. P-256 and
+Ed25519 passkeys are imported. KeePass XML exports are not supported. Duplicates, skipped
+passkeys and the exit status work as for `--cxf`.
+
 ### `hirz backup confirm [--yes]`
 
 Records that your passkeys exist somewhere other than this computer (a synced copy of the

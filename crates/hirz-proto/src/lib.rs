@@ -1,5 +1,5 @@
 //! Wire formats for hirz: strict CBOR, COSE_Key, authenticatorData, `none` attestation
-//! objects, clientDataJSON, base64url and a small strict JSON reader and writer.
+//! objects, clientDataJSON, base64url, hex and a small strict JSON reader and writer.
 //!
 //! Every decoder is a pure function over `&[u8]` with explicit limits, so it can be fuzzed
 //! directly (see `FUZZING.md`). This crate has no dependencies and does no cryptography.
@@ -11,7 +11,12 @@ pub mod base64url;
 pub mod cbor;
 pub mod client_data;
 pub mod cose;
+pub mod hex;
 pub mod json;
+pub mod time;
+
+/// Longest WebAuthn user handle (`user.id`).
+pub const MAX_USER_ID_LEN: usize = 64;
 
 use core::fmt;
 

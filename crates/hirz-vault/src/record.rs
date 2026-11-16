@@ -8,8 +8,8 @@ use hirz_crypto::Zeroizing;
 
 /// WebAuthn limit on credential id length. hirz creates 32-byte ids; imported passkeys keep
 /// the id their original authenticator chose.
-pub const MAX_CREDENTIAL_ID_LEN: usize = 1023;
-pub const MAX_USER_ID_LEN: usize = 64;
+pub const MAX_CREDENTIAL_ID_LEN: usize = hirz_proto::auth_data::MAX_CREDENTIAL_ID_LEN;
+pub const MAX_USER_ID_LEN: usize = hirz_proto::MAX_USER_ID_LEN;
 pub const MAX_STRING_LEN: usize = 1024;
 pub const MAX_PKCS8_LEN: usize = 1024;
 pub const MAX_DEVICE_NAME_LEN: usize = 256;

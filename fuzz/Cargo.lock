@@ -240,6 +240,7 @@ version = "0.1.0-dev"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
+ "hirz-proto",
  "hirz-sys",
 ]
 

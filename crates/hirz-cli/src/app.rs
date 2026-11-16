@@ -127,7 +127,7 @@ pub fn run(inv: Invocation, ctx: &mut Ctx<'_>) -> CliResult<Exit> {
         Command::BackupConfirm { yes } => crate::cmd_vault::backup_confirm(ctx, yes),
         Command::Pin(action) => crate::cmd_pin::pin(ctx, action),
         Command::Export { file, plain } => crate::cmd_cxf::export(ctx, &file, plain),
-        Command::Import { file } => crate::cmd_cxf::import(ctx, &file),
+        Command::Import { format, file } => crate::cmd_cxf::import(ctx, format, &file),
         Command::SetupFirefox { nmh_path, force } => {
             crate::cmd_setup::firefox(ctx, nmh_path, force)
         }
@@ -160,6 +160,7 @@ Devices and backups:
   backup confirm       Tell hirz that your passkeys are backed up
   export --cxf FILE    Save all passkeys to a file (encrypted by default)
   import --cxf FILE    Add passkeys from an export file
+                       (or --bitwarden FILE, --keepassxc PATH)
 
 Options for every command:
   --vault DIR          Use the vault in DIR instead of the one this computer uses
@@ -292,11 +293,18 @@ than this computer, for example on a USB drive.
 ";
 
 const HELP_IMPORT: &str = "\
-Usage: hirz import --cxf FILE
+Usage: hirz import --cxf FILE | --bitwarden FILE | --keepassxc PATH
 
-Adds passkeys from a CXF file: an encrypted hirz export or a plain CXF export from
-another passkey manager. Existing passkeys are never replaced. Passkeys hirz cannot
-use are skipped and listed.
+Adds passkeys from an export file. Existing passkeys are never replaced. Passkeys hirz
+cannot use are skipped and listed. Passwords, notes and everything else in the file
+are ignored.
+
+  --cxf FILE          An encrypted hirz export or a plain CXF export from another
+                      passkey manager
+  --bitwarden FILE    A Bitwarden .json export, unencrypted or password protected
+                      (asks for the file password). Account restricted exports cannot
+                      be read; export again as password protected.
+  --keepassxc PATH    A KeePassXC .passkey file, or a folder of them
 ";
 
 const HELP_BACKUP: &str = "\

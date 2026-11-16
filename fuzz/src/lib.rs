@@ -3,6 +3,11 @@
 
 #![forbid(unsafe_code)]
 
+/// The Bitwarden and KeePassXC import parsers of the `hirz` command, which has no library
+/// target.
+#[path = "../../crates/hirz-cli/src/foreign/mod.rs"]
+pub mod foreign;
+
 use hirz_core::{
     AAGUID, AssertionResponse, COSE_ALG_EDDSA, CoreError, GetAssertionRequest, HmacSecretWrap,
     MakeCredentialRequest, MakeCredentialResponse, UserEntity,

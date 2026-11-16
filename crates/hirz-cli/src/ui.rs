@@ -64,18 +64,7 @@ pub fn clean(s: &str, max_chars: usize) -> String {
     out
 }
 
-pub fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len().saturating_mul(2));
-    for b in bytes {
-        for nib in [b >> 4, b & 0x0f] {
-            if let Some(&d) = DIGITS.get(usize::from(nib)) {
-                s.push(char::from(d));
-            }
-        }
-    }
-    s
-}
+pub use hirz_proto::hex::encode as hex;
 
 /// The start of an id as `hirz list`, `hirz devices` and `hirz devices approve` show it.
 pub fn short_id(id: &[u8]) -> String {
@@ -130,12 +119,7 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-pub fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub use hirz_proto::time::unix_now as now;
 
 /// Renders rows as left-aligned columns separated by two spaces.
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {

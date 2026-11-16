@@ -205,3 +205,17 @@ path = "fuzz_targets/vault_event.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "import_bitwarden"
+path = "fuzz_targets/import_bitwarden.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_keepassxc"
+path = "fuzz_targets/import_keepassxc.rs"
+test = false
+doc = false
+bench = false

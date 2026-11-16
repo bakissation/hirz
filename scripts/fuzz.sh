@@ -32,7 +32,8 @@ max_len() {
     ctap2_*) echo 7609 ;;
     ctaphid_packet) echo 7700 ;;
     ctaphid_transport) echo 16640 ;;
-    json | webauthn_prepare | webauthn_handle) echo 262144 ;;
+    json | webauthn_prepare | webauthn_handle | import_bitwarden) echo 262144 ;;
+    import_keepassxc) echo 65536 ;;
     cbor_* | cose_key | auth_data | attestation | uv_config) echo 65536 ;;
     *) echo 8192 ;;
   esac

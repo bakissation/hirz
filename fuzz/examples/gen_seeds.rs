@@ -577,6 +577,85 @@ fn nmh_and_vault_record_seeds(o: &mut Out) {
     );
 }
 
+/// PKCS#8 P-256 key with private scalar 1 (public key = generator), so seeds are stable.
+fn p256_scalar_one_pkcs8() -> Vec<u8> {
+    let mut k = hex(
+        "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420",
+    );
+    k.extend_from_slice(&[0; 31]);
+    k.push(1);
+    k.extend_from_slice(&hex("a144034200"));
+    k.push(0x04);
+    k.extend_from_slice(&hex(P256_GX));
+    k.extend_from_slice(&hex(P256_GY));
+    assert!(hirz_crypto::es256::public_key(&k).is_ok(), "seed key parses");
+    k
+}
+
+fn import_seeds(o: &mut Out) {
+    let key = p256_scalar_one_pkcs8();
+    let b64 = base64url::encode(&key);
+    let entry = |id: &str, rp: &str, curve: &str| {
+        format!(
+            r#"{{"credentialId": "{id}", "keyType": "public-key", "keyAlgorithm": "ECDSA",
+"keyCurve": "{curve}", "keyValue": "{b64}", "rpId": "{rp}", "userHandle": "dXNlci0x",
+"userName": "alice", "counter": "0", "rpName": "Example", "userDisplayName": "Alice",
+"discoverable": "true", "creationDate": "2024-02-29T12:00:00.000Z"}}"#
+        )
+    };
+    let plain = format!(
+        r#"{{"encrypted": false, "folders": [], "items": [
+{{"id": "1", "type": 1, "name": "x", "login": {{"username": "alice", "password": "pw",
+"fido2Credentials": [{}, {}]}}}},
+{{"id": "2", "type": 2, "name": "note", "notes": "n", "secureNote": {{"type": 0}}}},
+{{"id": "3", "type": 1, "name": "y", "login": {{"fido2Credentials": [{}]}}}}]}}"#,
+        entry("6c7e3b2a-0d4f-4a8e-9b1c-2f3e4d5a6b7c", "example.com", "P-256"),
+        entry("b64.AQIDBA", "acme.example", "P-256"),
+        entry("b64.BQYH", "example.org", "P-384"),
+    );
+    o.put("import_bitwarden", "plain", plain.as_bytes());
+    let enc = "2.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==|\
+               AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    for (name, kdf) in [
+        ("pbkdf2", r#""kdfType": 0, "kdfIterations": 600000"#),
+        (
+            "argon2id",
+            r#""kdfType": 1, "kdfIterations": 3, "kdfMemory": 64, "kdfParallelism": 4"#,
+        ),
+    ] {
+        let doc = format!(
+            r#"{{"encrypted": true, "passwordProtected": true, "salt": "c2FsdA==", {kdf},
+"encKeyValidation_DO_NOT_EDIT": "{enc}", "data": "{enc}"}}"#
+        );
+        o.put("import_bitwarden", name, doc.as_bytes());
+    }
+    o.put(
+        "import_bitwarden",
+        "account_restricted",
+        br#"{"encrypted": true, "encKeyValidation_DO_NOT_EDIT": "2.a|b|c", "items": []}"#,
+    );
+
+    let mut std_b64 = b64.replace('-', "+").replace('_', "/");
+    while std_b64.len() % 4 != 0 {
+        std_b64.push('=');
+    }
+    let body: Vec<&str> = std_b64
+        .as_bytes()
+        .chunks(64)
+        .map(|c| std::str::from_utf8(c).expect("ascii"))
+        .collect();
+    let pem = format!(
+        "-----BEGIN PRIVATE KEY-----\\n{}\\n-----END PRIVATE KEY-----\\n",
+        body.join("\\n")
+    );
+    let file = format!(
+        "{{\n    \"credentialId\": \"AQIDBAUGBwgJCgsMDQ4PEA\",\n    \"privateKey\": \"{pem}\",\n    \
+         \"relyingParty\": \"example.com\",\n    \"url\": \"https://example.com\",\n    \
+         \"userHandle\": \"dXNlci0x\",\n    \"username\": \"alice\"\n}}\n"
+    );
+    o.put("import_keepassxc", "es256", file.as_bytes());
+}
+
 fn main() {
     let root = std::env::args_os()
         .nth(1)
@@ -587,5 +666,6 @@ fn main() {
     webauthn_seeds(&mut out);
     vault_and_uv_seeds(&mut out);
     nmh_and_vault_record_seeds(&mut out);
+    import_seeds(&mut out);
     println!("wrote {} bytes of seeds to {}", out.total, out.root.display());
 }

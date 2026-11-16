@@ -209,37 +209,9 @@ pub(crate) fn aad(label: &str, parts: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-const HEX: &[u8; 16] = b"0123456789abcdef";
-
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len().saturating_mul(2));
-    for b in bytes {
-        for nibble in [b.wrapping_shr(4), b & 0x0f] {
-            if let Some(c) = HEX.get(usize::from(nibble)) {
-                s.push(char::from(*c));
-            }
-        }
-    }
-    s
-}
-
-fn nibble(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => c.checked_sub(b'0'),
-        b'a'..=b'f' => c.checked_sub(b'a').and_then(|v| v.checked_add(10)),
-        _ => None,
-    }
-}
+pub(crate) use hirz_proto::hex::encode as hex;
 
 /// Strict lowercase hex decoding of exactly `N` bytes.
 pub(crate) fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != N.checked_mul(2)? {
-        return None;
-    }
-    let mut out = [0u8; N];
-    for (o, [hi, lo]) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
-        *o = nibble(*hi)?.wrapping_shl(4) | nibble(*lo)?;
-    }
-    Some(out)
+    hirz_proto::hex::decode_array(s).ok()
 }

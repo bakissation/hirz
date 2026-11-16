@@ -8,7 +8,7 @@
 )]
 
 use crate::app::{self, Ctx};
-use crate::args::{self, Command, DeleteTarget, Invocation, PinAction};
+use crate::args::{self, Command, DeleteTarget, ImportFormat, Invocation, PinAction};
 use crate::env::{Env, System};
 use crate::error::{CliError, Exit};
 use crate::prompt::Prompter;
@@ -551,7 +551,28 @@ fn parse_table() {
             inv(
                 None,
                 Command::Import {
+                    format: ImportFormat::Cxf,
                     file: "in.json".into(),
+                },
+            ),
+        ),
+        (
+            &["import", "--bitwarden=bw.json"],
+            inv(
+                None,
+                Command::Import {
+                    format: ImportFormat::Bitwarden,
+                    file: "bw.json".into(),
+                },
+            ),
+        ),
+        (
+            &["import", "--keepassxc", "keys"],
+            inv(
+                None,
+                Command::Import {
+                    format: ImportFormat::KeePassXc,
+                    file: "keys".into(),
                 },
             ),
         ),
@@ -591,6 +612,9 @@ fn parse_table() {
         &["pin", "frob"],
         &["export"],
         &["import"],
+        &["import", "--cxf", "a", "--bitwarden", "b"],
+        &["import", "--keepassxc", "a", "--json"],
+        &["import", "file.json"],
         &["backup"],
         &["backup", "now"],
         &["setup", "chrome"],
@@ -1096,6 +1120,182 @@ fn import_from_another_provider() {
     );
 }
 
+fn bitwarden_sample() -> (String, Vec<Zeroizing<Vec<u8>>>) {
+    use crate::foreign::bitwarden::{fido2_entry, plain_export};
+    let keys: Vec<_> = (0..3)
+        .map(|_| hirz_crypto::es256::generate().unwrap().0)
+        .collect();
+    let doc = plain_export(&[
+        vec![
+            fido2_entry(
+                "6c7e3b2a-0d4f-4a8e-9b1c-2f3e4d5a6b7c",
+                "example.com",
+                "alice",
+                "P-256",
+                &keys[0],
+            ),
+            fido2_entry("b64.AQIDBA", "acme.example", "bob", "P-256", &keys[1]),
+        ],
+        vec![fido2_entry(
+            "b64.BQYH",
+            "example.org",
+            "carol",
+            "P-521",
+            &keys[2],
+        )],
+    ]);
+    (doc, keys)
+}
+
+#[test]
+fn import_from_bitwarden() {
+    use crate::foreign::bitwarden::{Kdf, protect};
+    let m = Machine::new("bitwarden");
+    init(&m);
+    let (doc, keys) = bitwarden_sample();
+    let file = m.tmp.path("bitwarden_export.json");
+    fs::write(&file, &doc).unwrap();
+    let fs_ = file.to_str().unwrap();
+    let r = run(&m, &["import", "--bitwarden", fs_], &[]);
+    assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
+    assert!(r.out.contains("Imported 2 passkeys"), "{}", r.out);
+    assert!(r.out.contains("1 item of other kinds"), "{}", r.out);
+    assert!(
+        r.out
+            .contains("example.org (carol): its key type is ECDSA P-521")
+    );
+    assert!(!r.out.contains("hunter2") && !r.out.contains("secret note"));
+    let recs = records(&m, &m.default_vault());
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[0].credential_id, [1, 2, 3, 4]);
+    assert_eq!(recs[0].private_key_pkcs8, keys[1]);
+    assert_eq!(recs[1].credential_id[..4], [0x6c, 0x7e, 0x3b, 0x2a]);
+    assert_eq!(recs[1].private_key_pkcs8, keys[0]);
+    assert!(recs.iter().all(|r| r.backup_eligible && r.algorithm == -7));
+
+    let r = run(&m, &["import", "--bitwarden", fs_], &[]);
+    assert_eq!(r.exit(), Exit::Partial);
+    assert!(
+        r.out.contains("2 passkeys were already in hirz"),
+        "{}",
+        r.out
+    );
+    assert_eq!(records(&m, &m.default_vault()), recs);
+
+    let c = Machine::new("bitwarden-c");
+    init(&c);
+    let protected = protect(
+        doc.as_bytes(),
+        PASS,
+        "c2FsdHNhbHRzYWx0c2FsdA==",
+        Kdf::Pbkdf2 { iterations: 5_000 },
+    );
+    fs::write(&file, &protected).unwrap();
+    let r = run(
+        &c,
+        &["import", "--bitwarden", fs_],
+        &["wrong", "wrong too", "nope"],
+    );
+    assert_eq!(r.exit(), Exit::Denied, "{}", r.out);
+    assert_eq!(r.prompts.len(), 3);
+    assert!(records(&c, &c.default_vault()).is_empty());
+    let r = run(&c, &["import", "--bitwarden", fs_], &["wrong", PASS]);
+    assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
+    assert!(r.out.contains("password protected"));
+    assert!(r.out.contains("Wrong password"));
+    assert!(r.out.contains("Imported 2 passkeys"), "{}", r.out);
+    assert_eq!(records(&c, &c.default_vault()), recs);
+
+    let argon = protect(
+        doc.as_bytes(),
+        PASS,
+        "salt",
+        Kdf::Argon2id {
+            iterations: 2,
+            memory_mib: 16,
+            parallelism: 1,
+        },
+    );
+    fs::write(&file, argon.replace("\"data\": \"2.", "\"data\": \"2.A")).unwrap();
+    let r = run(&c, &["import", "--bitwarden", fs_], &[PASS]);
+    assert_eq!(r.exit(), Exit::Failed, "{}", r.out);
+    fs::write(&file, &argon).unwrap();
+    let r = run(&c, &["import", "--bitwarden", fs_], &[PASS]);
+    assert!(
+        r.out.contains("2 passkeys were already in hirz"),
+        "{}",
+        r.out
+    );
+
+    let account = r#"{"encrypted": true, "encKeyValidation_DO_NOT_EDIT": "2.a|b|c",
+        "folders": [], "items": []}"#;
+    fs::write(&file, account).unwrap();
+    let r = run(&c, &["import", "--bitwarden", fs_], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    assert!(r.message().contains("account key"), "{}", r.message());
+}
+
+#[test]
+fn import_from_keepassxc() {
+    use crate::foreign::keepassxc::passkey_file;
+    let m = Machine::new("keepassxc");
+    init(&m);
+    let dir = m.tmp.path("passkeys");
+    fs::create_dir_all(&dir).unwrap();
+    let es = hirz_crypto::es256::generate().unwrap().0;
+    let ed = hirz_crypto::ed25519::generate().unwrap().0;
+    let one = dir.join("Example.passkey");
+    fs::write(
+        &one,
+        passkey_file("example.com", "alice", &[9; 24], b"u-1", &es),
+    )
+    .unwrap();
+    let r = run(&m, &["import", "--keepassxc", one.to_str().unwrap()], &[]);
+    assert!(r.ok().contains("Imported 1 passkey"), "{}", r.out);
+
+    fs::write(
+        dir.join("Acme.passkey"),
+        passkey_file("acme.example", "bob", &[8; 16], b"u-2", &ed),
+    )
+    .unwrap();
+    fs::write(dir.join("broken.passkey"), "{").unwrap();
+    fs::write(dir.join("notes.txt"), "ignored").unwrap();
+    let r = run(&m, &["import", "--keepassxc", dir.to_str().unwrap()], &[]);
+    assert_eq!(r.exit(), Exit::Partial, "{}", r.out);
+    assert!(r.out.contains("Imported 1 passkey"), "{}", r.out);
+    assert!(
+        r.out.contains("1 passkey were already in hirz"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out.contains("broken.passkey: The file is not valid JSON"),
+        "{}",
+        r.out
+    );
+    let recs = records(&m, &m.default_vault());
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[0].credential_id, vec![8; 16]);
+    assert_eq!(recs[0].algorithm, -8);
+    assert_eq!(recs[1].credential_id, vec![9; 24]);
+    assert_eq!(recs[1].user_id, b"u-1");
+
+    let empty = m.tmp.path("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let r = run(&m, &["import", "--keepassxc", empty.to_str().unwrap()], &[]);
+    assert_eq!(r.exit(), Exit::Failed);
+    let r = run(
+        &m,
+        &[
+            "import",
+            "--keepassxc",
+            dir.join("notes.txt").to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(r.exit(), Exit::Failed);
+}
+
 #[test]
 fn import_rejects_bad_documents() {
     let m = Machine::new("badcxf");
@@ -1550,6 +1750,8 @@ fn commands_need_setup() {
         &["backup", "confirm"],
         &["export", "--cxf", "x"],
         &["import", "--cxf", "x"],
+        &["import", "--bitwarden", "x"],
+        &["import", "--keepassxc", "x"],
     ] {
         assert_eq!(run(&m, args, &[]).exit(), Exit::NotSetUp, "{args:?}");
     }
