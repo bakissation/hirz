@@ -89,6 +89,21 @@ fn or_placeholder(s: String, placeholder: &str) -> String {
     }
 }
 
+/// One table cell of the account list. Names are site-controlled: a leading "-" would be
+/// read by zenity as an option, so it becomes U+2010 HYPHEN, which looks the same.
+fn list_cell(value: Option<&str>) -> String {
+    let s = or_placeholder(
+        value
+            .map(|v| sanitize(v, MAX_FIELD_CHARS))
+            .unwrap_or_default(),
+        "(none)",
+    );
+    match s.strip_prefix('-') {
+        Some(rest) => format!("\u{2010}{rest}"),
+        None => s,
+    }
+}
+
 /// "Display Name (name)", or whichever of the two exists.
 pub fn account_label(name: Option<&str>, display_name: Option<&str>) -> String {
     let n = name
@@ -288,24 +303,13 @@ pub fn list_args(
         "--width=520".to_owned(),
         "--height=360".to_owned(),
         zenity_timeout(remaining),
-        "--".to_owned(),
     ];
+    // zenity 4 keeps a "--" argument as table data instead of ending its options, so rows
+    // follow the options directly and no cell may start with "-" (see `list_cell`).
     for (i, c) in candidates.iter().enumerate() {
         args.push(i.saturating_add(1).to_string());
-        args.push(or_placeholder(
-            c.user_name
-                .as_deref()
-                .map(|s| sanitize(s, MAX_FIELD_CHARS))
-                .unwrap_or_default(),
-            "-",
-        ));
-        args.push(or_placeholder(
-            c.user_display_name
-                .as_deref()
-                .map(|s| sanitize(s, MAX_FIELD_CHARS))
-                .unwrap_or_default(),
-            "-",
-        ));
+        args.push(list_cell(c.user_name.as_deref()));
+        args.push(list_cell(c.user_display_name.as_deref()));
     }
     args
 }
@@ -468,16 +472,25 @@ mod tests {
     }
 
     #[test]
-    fn list_args_put_rows_after_terminator() {
+    fn list_rows_never_start_with_a_dash() {
         let c = cands();
         let ctx = get_ctx(&c, None);
         let a = list_args(&ctx, &c, Step::Uv(UvMethod::Pin), Duration::from_secs(30));
-        let term = a.iter().position(|x| x == "--").unwrap();
-        assert!(a[..term].iter().all(|x| x.starts_with("--")));
+        assert!(!a.contains(&"--".to_owned()));
+        let first_row = a.iter().position(|x| x == "1").unwrap();
+        assert!(a[..first_row].iter().all(|x| x.starts_with("--")));
         assert_eq!(
-            &a[term + 1..],
-            ["1", "alice@example.com", "Alice", "2", "--help", "-"]
+            &a[first_row..],
+            [
+                "1",
+                "alice@example.com",
+                "Alice",
+                "2",
+                "\u{2010}-help",
+                "(none)"
+            ]
         );
+        assert!(a[first_row..].iter().all(|x| !x.starts_with('-')));
         assert!(a.contains(&"--no-markup".to_owned()));
         assert!(a.contains(&"--print-column=1".to_owned()));
         assert!(!a.iter().any(|x| x.starts_with("--hide-column")));
