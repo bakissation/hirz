@@ -9,8 +9,8 @@
 Sign in to websites with a passkey on Linux, using your fingerprint or your computer password. No passwords to type, no new account, and your passkeys stay in sync across your computers.</p>
 
 <p align="center">
-  <!-- Badges: enable when the repo is public and CI runs. -->
-  <!-- <a href="https://github.com/bakissation/hirz/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/bakissation/hirz"></a> -->
+  <a href="https://github.com/bakissation/hirz/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/bakissation/hirz"></a>
+  <!-- Enable once the add-on is public on addons.mozilla.org: -->
   <!-- <a href="https://addons.mozilla.org/firefox/addon/hirz/"><img alt="Firefox add-on" src="https://img.shields.io/amo/v/hirz"></a> -->
   <img alt="License: MIT or Apache 2.0" src="https://img.shields.io/badge/license-MIT%20or%20Apache%202.0-0F766E">
   <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-F59E0B">
@@ -61,14 +61,14 @@ hirz (حرز, say it like *hearts* without the t) is an old Arabic word for a sa
 
 ## Quick setup
 
-These steps are for Ubuntu. Debian, Fedora, Arch and other routes are in [docs/install.md](docs/install.md). Packages are published from the first release, coming soon.
-
+These steps are for Ubuntu. Debian, Fedora, Arch and other routes are in [docs/install.md](docs/install.md).
 1. Install hirz:
    ```
    sudo add-apt-repository ppa:bakissation/hirz
    sudo apt install hirz
    ```
-2. Open a site that offers passkeys and try to register one. The first time, hirz opens a setup window: click Set up, write the 24 recovery words on paper when hirz shows them, and type the two it asks for. Then try the site again. To sync with your other computers, create the vault in a terminal instead, inside a folder you already sync:
+   If apt cannot find hirz right after a new release, Launchpad is still building it: try again later, or use the [hirz apt repository](docs/install.md#apt-repository-debian-and-ubuntu).
+2. Open a site that offers passkeys and try to register one. The first time, hirz opens a setup window: click Set up, write the 24 recovery words on paper when hirz shows them, and type the three it asks for. Then try the site again. To sync with your other computers, create the vault in a terminal instead, inside a folder you already sync:
    ```
    hirz init --vault ~/Sync/hirz
    ```
