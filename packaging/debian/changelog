@@ -1,3 +1,9 @@
+hirz (0.1.0-1) unstable; urgency=medium
+
+  * New upstream release 0.1.0.
+
+ -- Abdelbaki Berkati <bakissation@users.noreply.github.com>  Tue, 17 Nov 2026 13:53:59 +0000
+
 hirz (0.1.0~dev-1) unstable; urgency=medium
 
   * Initial source package.
