@@ -1,0 +1,39 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: hirz
+Label: hirz
+Suite: stable
+Codename: stable
+Date: Tue, 17 Nov 2026 14:45:10 UTC
+Architectures: amd64 arm64
+Components: main
+Description: hirz packages for Debian and Ubuntu
+MD5Sum:
+ 629e02cff81079d6eff9e390d5b6f55d 1141 main/binary-amd64/Packages
+ b0e98d8e997b262856fee1460b1696e1 754 main/binary-amd64/Packages.gz
+ 16d06b32a4ce14a2ed2538305a55e1d4 126 main/binary-amd64/Release
+ 81d436c940dade60699b3319f4b1e0de 1140 main/binary-arm64/Packages
+ b873a02e0e42f0f5416e3589c9275d20 751 main/binary-arm64/Packages.gz
+ 872fea7948a6539d381777671ac036f8 126 main/binary-arm64/Release
+SHA1:
+ e03519a94b76673ccb7e2c2db3768f5de88d6dc9 1141 main/binary-amd64/Packages
+ 6aca6223253c4e56c8d34023557548dace08ee48 754 main/binary-amd64/Packages.gz
+ e1680e96b2184422a6b59ee39eb5f56b21ef103b 126 main/binary-amd64/Release
+ 6d4e7e4f2d763ed90ac9956b16f75ae42dd50ba3 1140 main/binary-arm64/Packages
+ caad0914afb9bbf74c7e1f03adc477b806ecbafa 751 main/binary-arm64/Packages.gz
+ f897fe6b20aead5df5dd752e37198cf69e4275c4 126 main/binary-arm64/Release
+SHA256:
+ 04a5c52fd3f4d7c8e25466a386937ccd38f57acfc1625bc47c1b658719c2cb64 1141 main/binary-amd64/Packages
+ 702ed3ee891c0d55b5b4bfe25478f71fc69d6fda2535a47cba315bde976f63f6 754 main/binary-amd64/Packages.gz
+ c0e7f7444c6247adcfe88cfb184e9550fb8a2ce8254c563f4efeda9f8a194a0b 126 main/binary-amd64/Release
+ ec7941cb26a5ba256ee6cfc3f12d3ab9c58240c83a46552d98372630f23bd541 1140 main/binary-arm64/Packages
+ a74a9a513aa835ae2c820fea1389ee22e3ee8519d5fe2791f97321d932a758b4 751 main/binary-arm64/Packages.gz
+ 072d77f19cbf77c41156b787e7f6c7d26694b173f380cf8eb8df1b198489f018 126 main/binary-arm64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQRYMRbCVbhyr4iMqUDlmVMxAmF3mgUCavxodgAKCRDlmVMxAmF3
+mvkoAP9gAl9a/A9rjFn3gLI6Srv7pBwfZfZFoi2lNHU107L//AD/fSLk+aSGxKlc
+EktwwQEu9G/xNxJdkiescS0PXRtwsQI=
+=TrBg
+-----END PGP SIGNATURE-----

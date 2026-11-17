@@ -1,0 +1,6 @@
+Archive: stable
+Component: main
+Origin: hirz
+Label: hirz
+Architecture: amd64
+Description: hirz packages for Debian and Ubuntu

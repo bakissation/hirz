@@ -1,0 +1,27 @@
+Package: hirz
+Version: 0.1.0-1
+Architecture: amd64
+Maintainer: Abdelbaki Berkati <bakissation@users.noreply.github.com>
+Installed-Size: 13065
+Depends: libc6 (>= 2.39), libgcc-s1, polkitd, zenity (>= 4)
+Recommends: fprintd
+Suggests: xdg-native-messaging-proxy
+Homepage: https://github.com/bakissation/hirz
+Priority: optional
+Section: utils
+Filename: pool/main/h/hirz/hirz_0.1.0-1_amd64.deb
+Size: 2015904
+SHA256: 617eee75a38ebe2859dc99bbf96c37f5f36e7c9fe9b4b6a0ed570a1119ab07ff
+SHA1: 482325a7bc152b7730c34a93f634d646b98aa6df
+MD5sum: 6e8c6652e137421eac403bd02ed1feb9
+Description: passkey authenticator for Linux
+ hirz keeps your passkeys (WebAuthn / FIDO2) in an encrypted vault folder that
+ your own folder sync can copy between your computers. It appears to browsers
+ as a USB security key, so it works in Firefox and Chromium, and offers a
+ Firefox extension as a second path. Every signature needs your approval:
+ your account password through polkit, your fingerprint through fprintd, or a
+ hirz PIN.
+ .
+ The daemon starts with every desktop session. The first time a site asks
+ for a passkey, hirz opens a window that sets up the vault.
+
