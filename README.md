@@ -67,6 +67,7 @@ These steps are for Ubuntu. Debian, Fedora, Arch and other routes are in [docs/i
    sudo add-apt-repository ppa:bakissation/hirz
    sudo apt install hirz
    ```
+   If apt cannot find hirz right after a new release, Launchpad is still building it: try again later, or use the [hirz apt repository](docs/install.md#apt-repository-debian-and-ubuntu).
 2. Open a site that offers passkeys and try to register one. The first time, hirz opens a setup window: click Set up, write the 24 recovery words on paper when hirz shows them, and type the three it asks for. Then try the site again. To sync with your other computers, create the vault in a terminal instead, inside a folder you already sync:
    ```
    hirz init --vault ~/Sync/hirz

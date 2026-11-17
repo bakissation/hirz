@@ -76,6 +76,12 @@ sudo add-apt-repository ppa:bakissation/hirz
 sudo apt install hirz
 ```
 
+Launchpad builds each new version itself after the release, which usually takes a few hours
+and can take longer. Until it has finished, `apt install hirz` finds nothing (or keeps the
+version you have). The [hirz apt repository](#apt-repository-debian-and-ubuntu) has every new
+version right away. If `add-apt-repository` stops with an error from Launchpad (for example
+"HTTP Error 500"), wait a few minutes and run it again.
+
 Launchpad builds the packages and signs the PPA archive with its own key, which
 `add-apt-repository` installs and which the PPA's page shows; apt trusts that key, not ours.
 The source packages in the PPA were uploaded signed with the hirz PPA upload key
