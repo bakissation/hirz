@@ -5,7 +5,7 @@
 name: hirz
 title: hirz
 icon: assets/brand/hirz-app-icon.svg
-version: '0.1.0-dev'
+version: '0.1.0'
 summary: Passkey authenticator for Linux, seen by browsers as a USB security key
 description: |
   hirz keeps your passkeys (WebAuthn / FIDO2) in an encrypted vault folder that your own
