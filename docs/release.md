@@ -34,7 +34,7 @@ Settings to make once:
 |---|---|
 | General | Default branch `dev`; allow merge commits only; allow auto-merge |
 | Rulesets, `dev` and `main` | Require a pull request; require status check `ci`; require signed commits; block force pushes and deletion |
-| Rulesets, `main` (in addition) | Require one approving review, dismiss stale approvals and require approval of the most recent reviewable push: a human must approve the release PR as it will be merged, after the version stamps, and every promotion; the release GitHub App cannot give that approval |
+| Rulesets, `main` (in addition) | Require one approving review, dismiss stale approvals and require approval of the most recent reviewable push: a human must approve the release PR as it will be merged, after the version stamps, and every promotion; the release GitHub App cannot give that approval. While the project has one maintainer, the repository admins are on the bypass list, because GitHub does not let the author of a pull request approve it; remove them once there is a second maintainer |
 | Rulesets, tags `v*` | Restrict creation, update and deletion to maintainers and the release GitHub App. **This ruleset is the real control** (see "Environments and protections") |
 | Rulesets, branch `gh-pages` | Restrict creation, updates and deletion, block force pushes; bypass list: the release GitHub App only (the `pkgrepo` job pushes with its token) |
 | Rulesets, branches `release-plz-*` | Restrict creation, updates and deletion, block force pushes, require signed commits; bypass list: the release GitHub App and the repository admins (a maintainer who picks another version pushes there, see "A stable release"). The `sync-versions` job treats the branch as data either way |
@@ -88,7 +88,8 @@ release tag, and look at it again after any change of maintainers:
 2. **Repository secrets.** Delete every repository-level copy of those secrets (a secret
    that exists at both levels stays readable by any workflow). Keep only variables there.
 3. **Rulesets** (the settings table at the top of this page): `dev` and `main`; `main` with the approving review and
-   approval of the most recent push; `v*` tags (restrict creation, update and deletion;
+   approval of the most recent push (bypass: the repository admins, only while there is one
+   maintainer); `v*` tags (restrict creation, update and deletion;
    bypass: maintainers and the release GitHub App, a short list); `gh-pages` (bypass: the
    App only); `release-plz-*` (bypass: the App and the repository admins).
 4. **Actions, General.** Workflow permissions read-only; "Allow GitHub Actions to create and
