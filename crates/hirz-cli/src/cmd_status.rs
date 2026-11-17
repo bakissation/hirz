@@ -133,6 +133,7 @@ struct Report {
     flatpak: bool,
     broker_socket: PathBuf,
     broker: Broker,
+    hirzd: Option<bool>,
 }
 
 fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
@@ -212,6 +213,7 @@ fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
         flatpak: flatpak_firefox(env),
         broker_socket,
         broker,
+        hirzd: ctx.sys.hirzd_running(),
     })
 }
 
@@ -291,6 +293,7 @@ fn to_json(r: &Report) -> Value {
             "present": r.broker != Broker::Missing,
             "state": r.broker.name(),
         },
+        "hirzd": { "running": r.hirzd },
     })
 }
 
@@ -514,6 +517,17 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
             ),
         }
     ))?;
+    ctx.say(match (r.hirzd, &r.broker) {
+        (Some(true), _) => "hirzd:          running",
+        (Some(false), Broker::Missing) => {
+            "hirzd:          not running (only needed for the virtual security key; see docs/uhid.md)"
+        }
+        (Some(false), _) => {
+            "hirzd:          not running, so browsers cannot see the hirz security key.\n                \
+             Start it: systemctl --user start hirzd (or log out and back in)"
+        }
+        (None, _) => "hirzd:          could not check whether it runs",
+    })?;
     Ok(())
 }
 

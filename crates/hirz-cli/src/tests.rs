@@ -103,6 +103,9 @@ impl System for FakeSys {
     fn hostname(&self) -> Option<String> {
         Some("test-host".into())
     }
+    fn hirzd_running(&self) -> Option<bool> {
+        Some(true)
+    }
     fn pairing_approver<'s>(&'s self, _env: &Env) -> Box<dyn Approver + 's> {
         Box::new(FakeApprover {
             result: Ok(VERIFIED),
@@ -1746,6 +1749,7 @@ fn status_before_and_after_setup() {
     assert!(out.contains("all vault files read correctly"));
     assert!(out.contains("Polkit action:  installed"));
     assert!(out.contains("broker socket"));
+    assert!(out.contains("hirzd:          running"));
 
     let vault = m.default_vault();
     let dev_dir = fs::read_dir(vault.join("records"))
@@ -2452,6 +2456,9 @@ impl System for PairSys<'_> {
     fn hostname(&self) -> Option<String> {
         Some("new-host".into())
     }
+    fn hirzd_running(&self) -> Option<bool> {
+        FakeSys.hirzd_running()
+    }
     fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn Approver + 's> {
         FakeSys.pairing_approver(env)
     }
@@ -2656,6 +2663,9 @@ impl System for UvSys {
     }
     fn hostname(&self) -> Option<String> {
         Some("test-host".into())
+    }
+    fn hirzd_running(&self) -> Option<bool> {
+        Some(true)
     }
     fn pairing_approver<'s>(&'s self, _env: &Env) -> Box<dyn Approver + 's> {
         Box::new(FakeApprover {
@@ -3558,6 +3568,9 @@ impl System for OpenSys {
     fn hostname(&self) -> Option<String> {
         FakeSys.hostname()
     }
+    fn hirzd_running(&self) -> Option<bool> {
+        FakeSys.hirzd_running()
+    }
     fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn Approver + 's> {
         FakeSys.pairing_approver(env)
     }
@@ -4039,4 +4052,87 @@ fn status_tells_a_stale_broker_socket_from_a_live_one() {
     fs::remove_file(&socket).unwrap();
     fs::write(&socket, b"").unwrap();
     assert_eq!(status(&m), "missing");
+}
+
+struct NoHirzd(Option<bool>);
+
+impl System for NoHirzd {
+    fn uv_methods(&self, env: &Env) -> Result<Vec<UvMethod>, String> {
+        FakeSys.uv_methods(env)
+    }
+    fn zenity(&self) -> bool {
+        true
+    }
+    fn hostname(&self) -> Option<String> {
+        FakeSys.hostname()
+    }
+    fn hirzd_running(&self) -> Option<bool> {
+        self.0
+    }
+    fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn Approver + 's> {
+        FakeSys.pairing_approver(env)
+    }
+}
+
+#[test]
+fn status_says_when_hirzd_is_not_running() {
+    let m = Machine::new("hirzd-down");
+    init(&m);
+    let status = |m: &Machine, sys: &NoHirzd, args: &[&str]| {
+        run_opts(
+            m,
+            args,
+            &[],
+            Opts {
+                sys,
+                program: "hirz",
+                terminal: false,
+                wrong_words: false,
+            },
+        )
+    };
+
+    // Without the broker socket the virtual security key is not installed, so a stopped hirzd
+    // is expected and gets no start hint.
+    let r = status(&m, &NoHirzd(Some(false)), &["status"]);
+    assert_eq!(r.exit(), Exit::Ok);
+    assert!(r.out.contains("hirzd:          not running (only needed"));
+    assert!(!r.out.contains("systemctl --user start hirzd"));
+
+    // A socket file that nobody listens on still means the broker is installed.
+    let socket = m.env.broker_socket.clone();
+    fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    let r = status(&m, &NoHirzd(Some(false)), &["status"]);
+    assert!(r.out.contains("cannot see the hirz security key"));
+    assert!(r.out.contains("systemctl --user start hirzd"));
+
+    let r = status(&m, &NoHirzd(None), &["status"]);
+    assert!(r.out.contains("hirzd:          could not check"));
+
+    let json = |sys: &NoHirzd| {
+        let r = status(&m, sys, &["status", "--json"]);
+        let v: Value = serde_json::from_str(&r.out).unwrap();
+        v["hirzd"]["running"].clone()
+    };
+    assert_eq!(json(&NoHirzd(Some(false))), Value::Bool(false));
+    assert_eq!(json(&NoHirzd(Some(true))), Value::Bool(true));
+    assert_eq!(json(&NoHirzd(None)), Value::Null);
+}
+
+#[test]
+fn process_check_matches_the_name_and_skips_non_pid_entries() {
+    let m = Machine::new("proc");
+    let proc = m.tmp.path("proc");
+    let process = |dir: &str, comm: &str| {
+        fs::create_dir_all(proc.join(dir)).unwrap();
+        fs::write(proc.join(dir).join("comm"), comm).unwrap();
+    };
+    assert_eq!(crate::env::process_running_in(&proc, "hirzd"), None);
+    fs::create_dir_all(proc.join("self")).unwrap();
+    process("41", "hirzd-other\n");
+    process("hirzd", "hirzd\n");
+    assert_eq!(crate::env::process_running_in(&proc, "hirzd"), Some(false));
+    process("42", "hirzd\n");
+    assert_eq!(crate::env::process_running_in(&proc, "hirzd"), Some(true));
 }
