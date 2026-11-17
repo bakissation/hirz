@@ -228,6 +228,8 @@ pub trait System {
     fn zenity(&self) -> bool;
     fn hostname(&self) -> Option<String>;
     fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn hirz_core::Approver + 's>;
+    /// Whether hirzd runs as this user; None when that cannot be checked.
+    fn hirzd_running(&self) -> Option<bool>;
     fn now(&self) -> u64 {
         crate::ui::now()
     }
@@ -275,4 +277,36 @@ impl System for RealSystem {
         let s = s.trim();
         (!s.is_empty()).then(|| s.to_string())
     }
+
+    fn hirzd_running(&self) -> Option<bool> {
+        process_running_in(Path::new("/proc"), "hirzd")
+    }
+}
+
+/// Whether a process named `name` runs as the same user as this one, read from `proc` (normally
+/// `/proc`). None when `proc` cannot be read. Checks the process directory's owner rather than
+/// asking systemd, so a hirzd started by hand counts too.
+pub fn process_running_in(proc: &Path, name: &str) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let me = fs::metadata(proc.join("self")).ok()?.uid();
+    for entry in fs::read_dir(proc).ok()?.flatten() {
+        let file_name = entry.file_name();
+        let is_pid = file_name
+            .to_str()
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if !is_pid {
+            continue;
+        }
+        let dir = entry.path();
+        if fs::metadata(&dir).ok().map(|m| m.uid()) != Some(me) {
+            continue;
+        }
+        let mut comm = String::new();
+        let read =
+            fs::File::open(dir.join("comm")).and_then(|f| f.take(64).read_to_string(&mut comm));
+        if read.is_ok() && comm.trim_end() == name {
+            return Some(true);
+        }
+    }
+    Some(false)
 }

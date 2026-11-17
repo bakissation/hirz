@@ -215,7 +215,10 @@ Shows:
   Snap or a Flatpak;
 - whether something answers on the uhid broker socket: hirz connects to it and closes the
   connection at once (waiting at most one second), so a socket file that nobody listens on
-  any more is reported as stale. With socket activation systemd answers for the broker.
+  any more is reported as stale. With socket activation systemd answers for the broker;
+- whether `hirzd`, the user daemon behind the virtual security key, runs as your user. When
+  it does not, browsers cannot see the hirz security key; start it with
+  `systemctl --user start hirzd`, or log out and back in.
 
 Exit status 3 when this computer is not set up or the vault folder is missing, 1 when the
 vault cannot be read or this device was removed from it.
@@ -239,14 +242,15 @@ vault cannot be read or this device was removed from it.
   "firefox": { "manifests": [{"path": "...", "scope": "your user", "state": "ok",
                               "program": "/usr/lib/hirz/hirz-nmh"}],
                "snap": false, "flatpak": false },
-  "uhid_broker": { "socket": "/run/hirz/uhid.sock", "present": true, "state": "answers" }
+  "uhid_broker": { "socket": "/run/hirz/uhid.sock", "present": true, "state": "answers" },
+  "hirzd": { "running": true }
 }
 ```
 
 Manifest `state` is `ok`, `missing`, `program_missing` or `invalid`. The broker `state` is
 `answers`, `missing`, `stale` (the socket file exists but the connection is refused),
 `no_answer` (no answer within one second) or `error`; `present` says whether a socket file
-exists.
+exists. `hirzd.running` is `null` when hirz cannot read `/proc`.
 
 ### When another device removed this one
 
