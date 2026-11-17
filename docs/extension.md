@@ -43,9 +43,13 @@ written.
 - `browser_specific_settings.gecko.id` is `hirz@berkati.xyz`, on the
   maintainer's domain. AMO binds the listing to this id for good, and the
   native manifest's `allowed_extensions` must carry the same value.
-- `strict_min_version` is `140.0`: `world: "MAIN"` content scripts (128),
+- `strict_min_version` is `142.0`: `world: "MAIN"` content scripts (128),
   `Uint8Array.prototype.toBase64` / `Uint8Array.fromBase64` (133),
-  `data_collection_permissions` (140). Also used, and older: `AbortSignal.any` (124),
+  `data_collection_permissions` (140 on desktop, 142 on Android). AMO checks
+  this key against the Firefox for Android minimum too, which follows this
+  value because the manifest has no `gecko_android` key. hirz is listed for
+  desktop Firefox only: Firefox for Android has no native messaging.
+  Also used, and older: `AbortSignal.any` (124),
   `String.prototype.isWellFormed` (119), constructable stylesheets (101).
 - `data_collection_permissions.required` is `["none"]`. Request data goes only
   to a native program on the same machine, which is part of the same product,
