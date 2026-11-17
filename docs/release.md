@@ -52,24 +52,21 @@ access pushes to any branch. The release secrets therefore live in two environme
 
 | Environment | Used by | Deployment branches and tags | Required reviewers | Secrets |
 |---|---|---|---|---|
-| `release` | every job of `release.yml` that signs or holds a publishing secret: `publish`, `snap-attest`, `ppa`, `copr`, `aur`, `pkgrepo`, `amo`, `snap` | selected tags only: `v*` | at least one maintainer (turn on "Prevent self-review" once there are two) | `PPA_GPG_PRIVATE_KEY`, `PPA_GPG_PASSPHRASE`, `COPR_CONFIG`, `AUR_SSH_PRIVATE_KEY`, `REPO_GPG_PRIVATE_KEY`, `REPO_GPG_PASSPHRASE`, `AMO_JWT_ISSUER`, `AMO_JWT_SECRET`, `SNAPCRAFT_STORE_CREDENTIALS`, and `RELEASE_APP_PRIVATE_KEY` (a second copy, for the push to `gh-pages`) |
+| `release` | every job of `release.yml` that signs or holds a publishing secret: `publish`, `snap-attest`, `ppa`, `copr`, `aur`, `pkgrepo`, `amo`, `snap` | selected tags only: `v*` | none (the human step is the approving review of the release PR on `main`; the `v*` tag ruleset decides who can start a release) | `PPA_GPG_PRIVATE_KEY`, `PPA_GPG_PASSPHRASE`, `COPR_CONFIG`, `AUR_SSH_PRIVATE_KEY`, `REPO_GPG_PRIVATE_KEY`, `REPO_GPG_PASSPHRASE`, `AMO_JWT_ISSUER`, `AMO_JWT_SECRET`, `SNAPCRAFT_STORE_CREDENTIALS`, and `RELEASE_APP_PRIVATE_KEY` (a second copy, for the push to `gh-pages`) |
 | `release-plz` | the jobs of `release-plz.yml` and `backmerge.yml` | selected branches only: `main` | none (a review on every push to `main` would stop the release PR flow) | `RELEASE_APP_PRIVATE_KEY`, `RELEASE_TAG_SSH_KEY` |
 
 Set both up in Settings, Environments, then delete the repository-level copies of those
 secrets: a secret that also exists at repository level is still readable by any workflow. A
-run of `release.yml` waits at its first protected job (`publish`) for a reviewer and, after
-that, at the channel jobs and at `snap-attest`: approve all pending deployments that are
-waiting ("Review pending deployments"); the snap upload waits once more after `snap-attest`.
-Variables (names, not keys) stay repository level.
+run of `release.yml` does not wait for an approval: it runs from the tag to the channels on its
+own. Variables (names, not keys) stay repository level.
 
 One environment, not one per channel: all jobs are in one workflow file, so a change that
-reads one channel's secrets can name any other environment too, and the reviewer sees the
-same list either way. Split it later if different people should approve different channels.
+reads one channel's secrets can name any other environment too. Split it later if different
+people should approve different channels.
 
 What this does and does not do. The environment keeps the secrets away from workflows on
-branches and from tags that do not match `v*`, and puts a person in front of each release.
-It does not stop someone who can create a `v*` tag that points to a commit with a changed
-`release.yml`: the "tag is on main" check in the `meta` job is part of that same file. The
+branches and from tags that do not match `v*`. It does not stop someone who can create a `v*`
+tag that points to a commit with a changed `release.yml`: the "tag is on main" check in the `meta` job is part of that same file. The
 **tag ruleset is the real control**: only maintainers and the release GitHub App can create
 a `v*` tag, so keep that list short, and verify with the recipe below that a release tag
 points into `main`.
@@ -82,8 +79,8 @@ the sums that channels use are bound to a digest). The rest is configuration in 
 the checks above are only as strong as it is. Apply all of it before the first push of a
 release tag, and look at it again after any change of maintainers:
 
-1. **Environments.** `release`: deployment tags `v*` only, at least one required reviewer,
-   "Prevent self-review" once there are two maintainers; `release-plz`: deployment branch
+1. **Environments.** `release`: deployment tags `v*` only, no required reviewer (the
+   release PR's approving review on `main` is the human step); `release-plz`: deployment branch
    `main` only. The secrets in the tables below are stored there and nowhere else.
 2. **Repository secrets.** Delete every repository-level copy of those secrets (a secret
    that exists at both levels stays readable by any workflow). Keep only variables there.
