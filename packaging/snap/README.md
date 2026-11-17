@@ -63,9 +63,12 @@ for a snap, so the draft adds a command an administrator runs once:
 ```sh
 sudo snap install hirz --classic
 sudo snap run hirz.setup-system install
-hirz init
-systemctl --user enable --now hirzd
 ```
+
+Like the packages, `setup-system install` also enables `hirzd` for every user
+(`systemctl --global enable`) and starts it for users already logged in; the first passkey
+request then opens the setup window, and `hirz init` does the same in a terminal.
+`setup-system remove` stops it for logged-in users and disables it again.
 
 The broker's service is installed disabled (`install-mode: disable`), so its world-writable
 socket does not exist until `setup-system install` has written the udev rules that bind each

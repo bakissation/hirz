@@ -260,7 +260,7 @@ pub enum Step {
 
 fn step_hint(step: Step) -> &'static str {
     match step {
-        Step::ClickToAllow => "Allow only if you started this on the site above.",
+        Step::ClickToAllow => "Go on only if you started this on the site above.",
         Step::Uv(UvMethod::Polkit) => "Next, your system will ask for your password.",
         Step::Uv(UvMethod::Fingerprint) => "After you continue, touch the fingerprint reader.",
         Step::Uv(UvMethod::Pin) => "Next, enter your hirz PIN.",
@@ -268,7 +268,7 @@ fn step_hint(step: Step) -> &'static str {
 }
 
 /// Click-to-allow for an SSH key: there is no site to point at.
-const SSH_ALLOW_HINT: &str = "Allow only if you just started this with ssh yourself.";
+const SSH_ALLOW_HINT: &str = "Go on only if you just started this with ssh yourself.";
 const PIN_ENTRY_HINT: &str = "Enter your hirz PIN to continue.";
 pub const FINGER_HINT: &str = "Touch the fingerprint reader.";
 /// Account list: the same for every method, since what follows depends on what is available.
@@ -329,7 +329,9 @@ fn header(ctx: &ApprovalContext<'_>) -> Vec<String> {
         (Ceremony::Create, true) => "Create a new",
         (Ceremony::Get, true) => "Use your",
     };
-    let mut lines = vec![verb.to_owned(), format!("    {}", site_label(ctx.rp_id))];
+    // One line: zenity centres the text, so a site on an indented line of its own reads as
+    // misaligned. A long id keeps its right end (`site_label`).
+    let mut lines = vec![format!("{verb} {}", site_label(ctx.rp_id))];
     if let Some(origin) = ctx.origin {
         lines.push(format!(
             "Requested by: {}",
@@ -437,6 +439,18 @@ fn pin_entry(title: &str, text: &str, remaining: Duration) -> Vec<String> {
     ]
 }
 
+/// The approval button names what it does: an SSH key is used, a sign-in signs in, a registration
+/// creates a passkey.
+pub fn approve_label(ctx: &ApprovalContext<'_>) -> &'static str {
+    if ssh_key_name(ctx.rp_id).is_some() {
+        return "Use key";
+    }
+    match ctx.ceremony {
+        Ceremony::Get => "Sign in",
+        Ceremony::Create => "Create passkey",
+    }
+}
+
 /// Yes/no dialog. Click-to-allow puts the focus on Cancel so a stray Enter does not approve.
 pub fn question_args(
     ctx: &ApprovalContext<'_>,
@@ -445,14 +459,10 @@ pub fn question_args(
     notice: Option<&str>,
     remaining: Duration,
 ) -> Vec<String> {
-    let ok = match step {
-        Step::ClickToAllow => "Allow",
-        Step::Uv(_) => "Continue",
-    };
     question(
         &title(ctx),
         &prompt_text(ctx, selected, step, notice),
-        ok,
+        approve_label(ctx),
         460,
         remaining,
         step == Step::ClickToAllow,
@@ -1101,11 +1111,11 @@ mod tests {
         let ctx = get_ctx(&c, Some("https://login.example.com"));
         let t = prompt_text(&ctx, Some(0), Step::Uv(UvMethod::Polkit), None);
         let lines: Vec<&str> = t.lines().collect();
-        assert_eq!(lines[0], "Sign in with a passkey on");
-        assert_eq!(lines[1], "    example.com");
-        assert_eq!(lines[2], "Requested by: https://login.example.com");
-        assert!(lines[3].starts_with("Name the site gives: \u{FF1C}b\u{FF1E}Example"));
-        assert_eq!(lines[4], "Account: Alice (alice@example.com)");
+        assert_eq!(lines[0], "Sign in with a passkey on example.com");
+        assert_eq!(lines[1], "Requested by: https://login.example.com");
+        assert!(lines[2].starts_with("Name the site gives: \u{FF1C}b\u{FF1E}Example"));
+        assert_eq!(lines[3], "Account: Alice (alice@example.com)");
+        assert!(lines.iter().all(|l| !l.starts_with(' ')));
         assert!(t.ends_with("Next, your system will ask for your password."));
         assert!(!t.contains('<') && !t.contains('&'));
     }
@@ -1132,9 +1142,7 @@ mod tests {
             Step::Uv(UvMethod::Pin),
             Some("Wrong PIN. 3 attempts left."),
         );
-        assert!(
-            t.starts_with("Create a passkey for\n    example.com\nAccount: Bob Evil line (bob)\n")
-        );
+        assert!(t.starts_with("Create a passkey for example.com\nAccount: Bob Evil line (bob)\n"));
         assert!(!t.contains("Name the site gives"));
         assert!(t.contains("Wrong PIN. 3 attempts left.\nEnter your hirz PIN"));
     }
@@ -1166,9 +1174,8 @@ mod tests {
             ctx.rp_name = Some(rp);
             let t = prompt_text(&ctx, Some(0), Step::ClickToAllow, None);
             let lines: Vec<&str> = t.lines().collect();
-            assert_eq!(lines[0], "Use your");
-            assert_eq!(lines[1], format!("    {label}"));
-            assert_eq!(lines[2], "Account: Alice (alice@example.com)");
+            assert_eq!(lines[0], format!("Use your {label}"));
+            assert_eq!(lines[1], "Account: Alice (alice@example.com)");
             assert!(t.ends_with(SSH_ALLOW_HINT));
             assert!(!t.contains("ssh:") && !t.contains("Name the site gives"));
             let a = question_args(
@@ -1189,7 +1196,7 @@ mod tests {
 
             ctx.ceremony = Ceremony::Create;
             let t = prompt_text(&ctx, None, Step::Uv(UvMethod::Polkit), None);
-            assert!(t.starts_with(&format!("Create a new\n    {label}\n")));
+            assert!(t.starts_with(&format!("Create a new {label}\n")));
             assert!(t.ends_with("Next, your system will ask for your password."));
         }
     }
@@ -1208,7 +1215,7 @@ mod tests {
         assert_eq!(a[0], "--question");
         assert!(a.contains(&"--no-markup".to_owned()));
         assert!(a.contains(&"--default-cancel".to_owned()));
-        assert!(a.contains(&"--ok-label=Allow".to_owned()));
+        assert!(a.contains(&"--ok-label=Sign in".to_owned()));
         assert!(a.contains(&"--timeout=120".to_owned()));
         assert!(a.contains(&"--title=hirz: example.com".to_owned()));
         let a = question_args(
@@ -1224,6 +1231,44 @@ mod tests {
         )));
         assert!(a.contains(&"--timeout=1".to_owned()));
         assert!(a.iter().all(|x| x.starts_with("--")));
+    }
+
+    #[test]
+    fn the_approval_button_names_the_action() {
+        let c = cands();
+        let get = get_ctx(&c, None);
+        let user = UserEntity {
+            id: vec![1],
+            name: Some("alice".into()),
+            display_name: None,
+        };
+        let create_for = |rp_id| ApprovalContext {
+            ceremony: Ceremony::Create,
+            rp_id,
+            candidates: &[],
+            new_account: Some(&user),
+            ..get_ctx(&c, None)
+        };
+        let create = create_for("example.com");
+        let ssh = ApprovalContext {
+            rp_id: "ssh:",
+            ..get_ctx(&c, None)
+        };
+        let ssh_create = create_for("ssh:github");
+        let d = Duration::from_secs(30);
+        for (ctx, label) in [
+            (&get, "Sign in"),
+            (&create, "Create passkey"),
+            (&ssh, "Use key"),
+            (&ssh_create, "Use key"),
+        ] {
+            for step in [Step::ClickToAllow, Step::Uv(UvMethod::Polkit)] {
+                let a = question_args(ctx, Some(0), step, None, d);
+                assert!(a.contains(&format!("--ok-label={label}")), "{a:?}");
+                assert!(a.contains(&"--cancel-label=Cancel".to_owned()));
+                assert!(!a.iter().any(|x| x.contains("Allow")), "{a:?}");
+            }
+        }
     }
 
     #[test]

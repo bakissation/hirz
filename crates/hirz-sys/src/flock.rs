@@ -23,6 +23,24 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
     }
 }
 
+/// Takes an exclusive `flock(2)` lock on `file` without waiting: `Ok(false)` when another open
+/// file description holds it. The lock ends like the one of [`lock_exclusive`].
+pub fn try_lock_exclusive(file: &File) -> io::Result<bool> {
+    loop {
+        // SAFETY: `file` keeps the descriptor open for the call and the operation is a constant.
+        let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if r == 0 {
+            return Ok(true);
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK) => return Ok(false),
+            Some(libc::EINTR) => {}
+            _ => return Err(err),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -51,6 +69,18 @@ mod tests {
         drop(first);
         waiter.join().expect("waiter");
         assert!(got.load(Ordering::SeqCst));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn try_lock_does_not_wait() {
+        let path = std::env::temp_dir().join(format!("hirz-sys-flock-try-{}", std::process::id()));
+        let first = File::create(&path).expect("create");
+        assert!(try_lock_exclusive(&first).expect("first lock"));
+        let second = File::open(&path).expect("open");
+        assert!(!try_lock_exclusive(&second).expect("second try"));
+        drop(first);
+        assert!(try_lock_exclusive(&second).expect("free again"));
         let _ = std::fs::remove_file(path);
     }
 }

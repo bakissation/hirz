@@ -23,12 +23,19 @@ use hirz_uv::{CommandRunner, HirzApprover, SystemRunner};
 use hirz_vault::{CredentialRecord, Vault};
 use hirz_webauthn::envelope::{MAX_SAFE_INTEGER, error_reply};
 use hirz_webauthn::{Error, PROTOCOL_VERSION};
-use session::{Session, Settings, VaultStatus};
+use session::{FirstRun, Hold, Session, Settings, SetupLauncher, SetupOffer, VaultStatus};
+use std::time::Duration;
 
 const LIMITS: Limits = Limits {
     max_len: INBOUND_MAX,
     max_depth: 32,
     max_items: 65_536,
+};
+/// How long a ceremony waits for the setup window: the longest timeout the extension gives a
+/// request. A shorter page timeout ends the wait earlier with a `cancel`.
+const NMH_HOLD: Hold = Hold {
+    limit: Duration::from_secs(600),
+    poll: session::HOLD_POLL,
 };
 /// Requests that may wait behind a running prompt; more are refused at once.
 const QUEUE: usize = 64;
@@ -57,6 +64,8 @@ struct HostEngine<'s, A> {
     cancelled: &'s dyn Fn() -> bool,
     /// The last word before a registration is final (see [`commit_ceremony`]).
     commit: Option<&'s dyn Fn() -> bool>,
+    /// Tells the desktop that a sign-in found no passkey for the site.
+    no_passkey: &'s dyn Fn(&str),
 }
 
 impl<A: Approver> hirz_webauthn::Engine for HostEngine<'_, A> {
@@ -82,6 +91,10 @@ impl<A: Approver> hirz_webauthn::Engine for HostEngine<'_, A> {
             .with_engine_observed(self.cancelled, None, |e| {
                 e.get_assertion(request, Some(origin_for_display), None)
             });
+        if matches!(result, Err(CoreError::NoCredentials)) && !asked {
+            // Firefox takes the request over; hirzd shares the rate limit, so the user is told once.
+            (self.no_passkey)(&request.rp_id);
+        }
         match result {
             // "No credential" after a prompt is a refusal: Firefox must not ask the user again.
             // A refusal before any window shows up as `NothingShown`, which looks like "no
@@ -332,13 +345,15 @@ fn abort_reply(id: u64) -> Json {
     ])
 }
 
-struct Host<A> {
+struct Host<A, L> {
     session: Session<A>,
     pending: Arc<Mutex<Pending>>,
     removed_told: bool,
+    first_run: FirstRun<L>,
+    hold: Hold,
 }
 
-impl<A: Approver + UvProbe> Host<A> {
+impl<A: Approver + UvProbe, L: SetupLauncher> Host<A, L> {
     /// Logged when the vault folder starts to report a fork and when it stops, not per request.
     fn report_fork(&mut self) {
         match self.session.take_fork_change() {
@@ -346,11 +361,6 @@ impl<A: Approver + UvProbe> Host<A> {
             Some(false) => diag(format_args!("{}", session::FORK_ENDED_NOTICE)),
             None => {}
         }
-    }
-
-    fn vault_ready(&mut self) -> bool {
-        let status = self.session.ensure_vault();
-        self.vault_status(status)
     }
 
     /// For requests that only read and never ask the user (`list`, capabilities): the last look at
@@ -407,14 +417,46 @@ impl<A: Approver + UvProbe> Host<A> {
         if lock(&self.pending).cancelled.contains(&id) {
             return abort_reply(id);
         }
-        if !self.vault_ready() {
-            return error_reply(
-                Some(id),
-                &Error::NotHandled("no usable hirz vault on this device"),
-            );
+        let mut status = self.session.ensure_vault();
+        let mut why = "no usable hirz vault on this device";
+        let create = msg.get("type").and_then(Json::as_str) == Some("create");
+        if status == VaultStatus::Missing {
+            match self.first_run.offer() {
+                offer @ (SetupOffer::Opened | SetupOffer::AlreadyOpen) => {
+                    if offer == SetupOffer::Opened {
+                        diag(format_args!(
+                            "no hirz vault on this device yet; a setup window was opened"
+                        ));
+                    }
+                    // A sign-in has nothing to use yet: Firefox goes on with other methods, and
+                    // the setup window is the feedback. Only a registration waits.
+                    if !create {
+                        return error_reply(
+                            Some(id),
+                            &Error::NotHandled("no hirz vault yet; a setup window is open"),
+                        );
+                    }
+                    // Wait for the window like for a prompt; the extension's own timer ends
+                    // the wait with a cancel.
+                    let pending = Arc::clone(&self.pending);
+                    let cancelled = move || lock(&pending).cancelled.contains(&id);
+                    status =
+                        self.first_run
+                            .wait_for_setup(&mut self.session, &cancelled, self.hold);
+                    why = "hirz was not set up";
+                }
+                SetupOffer::QuietNotice => why = session::QUIET_NOTICE,
+                SetupOffer::NotOffered => {}
+            }
+        }
+        if !self.vault_status(status) {
+            if lock(&self.pending).cancelled.contains(&id) {
+                return abort_reply(id);
+            }
+            return error_reply(Some(id), &Error::NotHandled(why));
         }
         // Signing in still works; a registration would only fail after the user approved it.
-        if msg.get("type").and_then(Json::as_str) == Some("create") && self.session.read_only() {
+        if create && self.session.read_only() {
             return error_reply(
                 Some(id),
                 &Error::NotHandled("hirz cannot save new passkeys right now"),
@@ -429,11 +471,14 @@ impl<A: Approver + UvProbe> Host<A> {
         let for_commit = Arc::clone(&pending);
         let cancelled = move || ceremony.is_some_and(|id| lock(&pending).cancelled.contains(&id));
         let commit = move || ceremony.is_none_or(|id| commit_ceremony(&for_commit, id));
+        let first_run = &self.first_run;
+        let no_passkey = |rp_id: &str| first_run.no_passkey_notice(rp_id);
         let mut engine = HostEngine {
             session: &mut self.session,
             uv,
             cancelled: &cancelled,
             commit: Some(&commit),
+            no_passkey: &no_passkey,
         };
         let reply = hirz_webauthn::handle(msg, &mut engine);
         self.report_fork();
@@ -441,16 +486,19 @@ impl<A: Approver + UvProbe> Host<A> {
     }
 }
 
-fn run<R, W, A>(
+fn run<R, W, A, L>(
     input: R,
     output: &mut W,
     session: Session<A>,
+    first_run: FirstRun<L>,
+    hold: Hold,
     debug: bool,
 ) -> Result<(), FrameError>
 where
     R: Read + Send + 'static,
     W: Write,
     A: Approver + UvProbe,
+    L: SetupLauncher,
 {
     let pending = Arc::new(Mutex::new(Pending::default()));
     let backlog = Arc::new(Backlog::default());
@@ -464,6 +512,8 @@ where
         session,
         pending,
         removed_told: false,
+        first_run,
+        hold,
     };
     for inbound in rx {
         let reply = match inbound {
@@ -512,9 +562,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let first_run = FirstRun::from_process(&settings);
     let session = Session::new(settings, approver);
     let mut output = io::stdout().lock();
-    match run(io::stdin(), &mut output, session, debug) {
+    match run(
+        io::stdin(),
+        &mut output,
+        session,
+        first_run,
+        NMH_HOLD,
+        debug,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             diag(format_args!("{e}"));

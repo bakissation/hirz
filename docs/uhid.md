@@ -33,27 +33,33 @@ connection it:
 
 1. Reads the peer credentials with `SO_PEERCRED`. The kernel records them at `connect`
    time, so the client cannot forge them.
-2. Admits the peer only if every check in "Who may connect" below passes: the uid is
+2. Reads the client's hello: exactly 8 bytes, within 2 seconds in total. `hirzdev1` asks for
+   a device and goes on below. `hirzprb1` is a probe (what `hirz status` sends): the broker
+   answers `hirzok01` and closes the connection, without the checks below, without creating a
+   device, without spending the uid's creation budget and without a log line. Anything else,
+   end of input or the time running out closes the connection. At most 16 connections, and 2
+   per uid, may wait for their hello at the same time; further ones are closed at once.
+3. For a device, admits the peer only if every check in "Who may connect" below passes: the uid is
    between `--min-uid` (default 1000, never 0) and `--max-uid` (default 60513), the uid owns
    an active login session on a seat, the three hirz udev rule files are in effect, the uid has no
    device yet, fewer than `--max-connections` (default 8) devices exist and the uid has
    not created devices too fast. Refusal closes the socket. Refusals are logged at most
    once per uid every 30 seconds, with a count of the lines left out.
-3. Opens `/dev/uhid` and writes `UHID_CREATE2` with fixed values: name
+4. Opens `/dev/uhid` and writes `UHID_CREATE2` with fixed values: name
    `hirz virtual authenticator`, bus `BUS_USB`, vendor `0x1209`, product `0x0007`, the
    client's decimal uid in the `phys` field, and the FIDO report descriptor (usage page
    `0xF1D0`, usage `0x01`, one 64-byte input and one 64-byte output report, no report ids).
    Nothing in the request comes from the client.
-4. Relays reports. Output reports (`UHID_OUTPUT`) go to the client as exactly 64 bytes;
+5. Relays reports. Output reports (`UHID_OUTPUT`) go to the client as exactly 64 bytes;
    hidraw writers prefix the report number 0, so the kernel delivers 65 bytes and the
    broker strips the first byte. Every 64 bytes the client sends become one `UHID_INPUT2`.
    Anything else is dropped. Feature report requests (`UHID_GET_REPORT`,
    `UHID_SET_REPORT`) are answered with `EIO`, since the descriptor declares none.
-5. When the client disconnects, or the uid stops passing the session check (re-checked every
+6. When the client disconnects, or the uid stops passing the session check (re-checked every
    5 seconds), writes `UHID_DESTROY` and closes the descriptor and the client socket. The
    device disappears; the uid's slot is freed.
 
-There is no handshake and no other message type: the framing is 64 bytes per message in
+After the hello there is no other message type: the framing is 64 bytes per message in
 each direction. Writes to a client time out after 2 seconds, so a stuck client cannot block
 the broker. The broker logs uids, pids and report counts, never report contents.
 
@@ -323,9 +329,10 @@ canonical CBOR.
 - authenticatorClientPIN supports only getKeyAgreement. Every other subcommand needs
   clientPin or a pinUvAuthToken, neither of which getInfo advertises, so it answers
   `CTAP2_ERR_INVALID_SUBCOMMAND`.
-- Status mapping: a refused or unavailable approval is `CTAP2_ERR_NOT_ALLOWED` and a lock is
-  `UV_BLOCKED` rather than `PIN_BLOCKED`, because hirz has no clientPin and platforms retry
-  built-in UV in a loop on `UV_INVALID` and `OPERATION_DENIED` (see "Refusals end the
+- Status mapping: a user who declines, or an approval window that times out, gives
+  `CTAP2_ERR_OPERATION_DENIED`; an approval that is unavailable or showed nothing gives
+  `CTAP2_ERR_NOT_ALLOWED`; a lock is `UV_BLOCKED` rather than `PIN_BLOCKED`, because hirz has no
+  clientPin and platforms retry built-in UV in a loop on `UV_INVALID` (see "Refusals end the
   ceremony").
 
 ## hirzd
@@ -339,9 +346,18 @@ answers with the engine of `hirz-core` over the user's vault, asking `hirz-uv`
   `HIRZ_STATE`, else `$XDG_STATE_HOME/hirz`. The vault is opened on the first request and
   reloaded by the engine for every ceremony, so credentials created by the extension path
   or synced from another device are seen at once. Without a vault, makeCredential,
-  getAssertion and authenticatorSelection return `CTAP2_ERR_NOT_ALLOWED`, hirzd logs
-  "run `hirz init` first" and shows a desktop notification (`zenity --notification`, at
-  most once every 10 minutes).
+  authenticatorSelection and silent probes return `CTAP2_ERR_NOT_ALLOWED` (a sign-in gets
+  `CTAP2_ERR_NO_CREDENTIALS`, see below), hirzd logs
+  "run `hirz init` first" and shows a desktop notification ([approval.md](approval.md),
+  "Notifications", at
+  most once every 10 minutes). A request that would ask the user (not a silent probe) also
+  opens the setup window, `hirz init --gui`, within the limits described in
+  [approval.md](approval.md), "Setting up hirz". A sign-in or touch request is then answered
+  at once with `CTAP2_ERR_NO_CREDENTIALS`. A registration waits for the window like for an
+  approval (keepalives keep flowing, at most 115 seconds, a CTAPHID_CANCEL ends it); when the
+  window leaves a vault behind, it goes on with the normal approval, otherwise it is refused
+  as above. A sign-in that finds no passkey for the site shows "hirz has no passkey for SITE."
+  at most once per site and minute ([approval.md](approval.md), "No passkey for the site").
 - **getInfo** comes from `hirz_ctap::ctap2::get_info_response_with()`: versions `FIDO_2_0` and
   `FIDO_2_1`, extensions `credProtect` and `hmac-secret`, the hirz AAGUID, options `rk`,
   `up`, `uv` and `plat` false, maxMsgSize 7609, PIN/UV auth protocols 2 and 1,
@@ -538,9 +554,29 @@ approval method (for example the polkit action).
 
 ### Refusals end the ceremony
 
-hirz answers a refused, cancelled or unavailable approval with `CTAP2_ERR_NOT_ALLOWED`, not
-`CTAP2_ERR_OPERATION_DENIED`. For an authenticator with built-in user verification, Firefox
-(authenticator-rs, `ctap2/mod.rs`, `handle_errors!`) treats `OPERATION_DENIED` and
-`PIN_AUTH_INVALID` as a failed verification and resends the request at once; a user who
-clicks Cancel would then see the prompt again forever. Timeouts use
-`CTAP2_ERR_USER_ACTION_TIMEOUT`. Both end the ceremony with `NotAllowedError` in the page.
+When the user clicks Cancel, or the approval window times out, hirzd answers
+`CTAP2_ERR_OPERATION_DENIED`, as CTAP 2.2 asks for makeCredential and getAssertion (sections 6.1
+and 6.2: "If the user declines permission, or the operation times out"). Browsers treat it
+differently:
+
+- Chromium (`device/fido/fido_device_authenticator.cc`, the functions that convert a device
+  response code) ends the request on `OPERATION_DENIED` (user consent denied). Any other code
+  except a few PIN errors, `CTAP2_ERR_NOT_ALLOWED` and `CTAP2_ERR_USER_ACTION_TIMEOUT`
+  included, only drops the key, and the browser's dialog then waits until its own timeout.
+  Chromium's rule that a denial faster than 300 ms means a locked key applies only to
+  authenticators that also offer a clientPin, which hirz does not.
+- Firefox (authenticator-rs, `src/ctap2/mod.rs`, `register` and `sign` with the
+  `handle_errors!` macro) treats `OPERATION_DENIED` from an authenticator with built-in user
+  verification, which hirz reports while a verifying method works, as a failed verification:
+  it repeats its silent pre-flight probes and resends the same command at once (same client data
+  hash, RP id and lists), with no delay or limit, until the request ends. Any other error ends
+  it.
+
+So hirzd remembers each declined makeCredential and getAssertion with user presence for 5
+seconds: its command, RP id and client data hash, nothing else, at most four of them, in the
+running process only. The same request again within that time is answered
+`CTAP2_ERR_NOT_ALLOWED` at once, without a window, a notification or the prompt budget, which ends
+Firefox's ceremony; the entry is then forgotten. A page that asks again gets a new challenge,
+so a new client data hash, and is asked as usual; silent probes are never remembered. An
+approval that was unavailable or showed nothing stays `CTAP2_ERR_NOT_ALLOWED`. Both browsers then
+reject the page's call with `NotAllowedError`.

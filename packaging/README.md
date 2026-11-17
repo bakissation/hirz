@@ -19,10 +19,12 @@ manifest points to the same `hirz-nmh` path everywhere.
 | Firefox native manifest | `/usr/lib/mozilla/native-messaging-hosts/hirz.json` | same, plus `/usr/lib64/mozilla/native-messaging-hosts/hirz.json` (a relative symlink to it) | same as Debian | 0644 |
 | Manual pages | `/usr/share/man/man1/hirz.1`, `hirzd.1`, `hirz-nmh.1` and `/usr/share/man/man8/hirz-uhid-broker.8` (compressed by the package tools) | same | same | 0644 |
 | Preset enabling the broker socket | none | `/usr/lib/systemd/system-preset/80-hirz.preset` | none | 0644 |
+| Preset enabling `hirzd` for every user | none | `/usr/lib/systemd/user-preset/80-hirz.preset` | none | 0644 |
 | License texts | `/usr/share/doc/hirz/copyright` (MIT and Apache-2.0 terms, per-file licenses), `MPL-2.0.txt` and `LICENSE-BIP39` next to it | `/usr/share/licenses/hirz/`: `LICENSE-MIT`, `LICENSE-APACHE`, `MPL-2.0.txt`, `LICENSE-BIP39` | same as Fedora | 0644 |
 
 All files and directories are owned by root. Nothing is installed in `/etc` (no conffiles)
-and nothing in a home directory.
+and nothing in a home directory. The enablement links the install scripts create under
+`/etc/systemd/system` and `/etc/systemd/user` are not package files.
 
 ## Sources of the installed files
 
@@ -62,14 +64,18 @@ suggest removing it.
 
 | Step | Debian / Ubuntu | Fedora | Arch |
 |---|---|---|---|
-| After install | enable `hirz-uhid-broker.socket` with `deb-systemd-helper` (first install, or again if it was enabled before), `daemon-reload`, `udevadm control --reload`, `modprobe uhid`, start the socket | `%systemd_post` with the preset, `%udev_rules_update`, `modprobe uhid`, start the socket | pacman hooks reload systemd and udev; `hirz.install` loads `uhid` and prints the command to enable the socket |
-| Upgrade | restart the broker if it runs and `hirzd` for every logged-in user; an administrator's `disable` is kept | `%systemd_postun_with_restart` for the broker and `%systemd_user_postun_with_restart` for `hirzd` | restarts the broker and `hirzd` of every logged-in user, and prints a reminder |
-| Before removal | stop the broker socket and service | `%systemd_preun` | `systemctl disable --now` the socket and service |
-| After removal | mask the socket on `remove` (state kept for a reinstall), forget it on `purge`; `daemon-reload`, `udevadm control --reload` | `%udev_rules_update` | pacman hooks |
+| After install | enable `hirz-uhid-broker.socket`, and `hirzd.service` globally (`deb-systemd-helper --user`, as `dh_installsystemduser` does), on first install or again if they were enabled before; `daemon-reload`, `udevadm control --reload`, `modprobe uhid`, start the socket; on first install start `hirzd` for every logged-in user | `%systemd_post` and `%systemd_user_post` with the presets, `%udev_rules_update`, `modprobe uhid`, start the socket; on first install start `hirzd` for every logged-in user | `hirz.install` loads `uhid`, runs `daemon-reload`, `systemctl enable --now` the socket, `systemctl --global enable hirzd.service`, and starts `hirzd` for every logged-in user |
+| Upgrade | restart the broker if it runs and `hirzd` for every logged-in user; an administrator's `disable` or `--global disable` is kept | `%systemd_postun_with_restart` for the broker and `%systemd_user_postun_with_restart` for `hirzd` | restarts the broker and `hirzd` of every logged-in user, and prints a reminder |
+| Before removal | stop the broker socket and service, and `hirzd` for every logged-in user | `%systemd_preun`, and `%systemd_user_preun` (global disable, then disable and stop for every logged-in user) | stop `hirzd` for every logged-in user, `systemctl --global disable hirzd.service`, `systemctl disable --now` the socket and service |
+| After removal | mask the socket and `hirzd.service` on `remove` (state kept for a reinstall), forget both on `purge`; `daemon-reload` for the system and user managers, `udevadm control --reload` | `%udev_rules_update` | pacman hooks |
 
-The user unit `hirzd.service` is never enabled by a package: each user runs
-`systemctl --user enable --now hirzd` after `hirz init`. Arch packages do not enable
-services on install, so the Arch package prints the broker command instead of running it.
+Every package enables the user unit `hirzd.service` for all users (`systemctl --global`),
+so it starts with every graphical session of a regular user (`ConditionUser=!@system` keeps
+it out of login-screen and other system accounts). With no vault yet, the first passkey request opens
+the setup window (`hirz init --gui`, see `docs/approval.md`); `hirz init` stays for terminal
+users. A user opts out with `systemctl --user mask --now hirzd`: a per-user `disable` does
+not override a global enable. The Arch package also enables services on install, unlike
+most Arch packages, so that hirz works without any command.
 Removal never touches vaults or device state in home directories (`~/.local/share/hirz`,
 `~/.local/state/hirz`, `~/.config/hirz`, or a vault inside a sync folder).
 

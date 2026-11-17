@@ -10,9 +10,9 @@ use hirz_vault::{CredentialRecord, DeviceInfo, RecoveryPhrase, Vault, VaultError
 use serde_json::{Value, json};
 use std::path::Path;
 
-const PHRASE_WORDS: usize = 24;
-const QUIZ_WORDS: usize = 3;
-const QUIZ_ROUNDS: usize = 3;
+pub(crate) const PHRASE_WORDS: usize = 24;
+pub(crate) const QUIZ_WORDS: usize = 3;
+pub(crate) const QUIZ_ROUNDS: usize = 3;
 const PHRASE_ATTEMPTS: usize = 3;
 const MAX_NAME_CHARS: usize = 64;
 /// The recovery phrase is shown on the terminal's alternate screen, which terminals and
@@ -22,7 +22,7 @@ const LEAVE_PHRASE_SCREEN: &str = "\x1b[2J\x1b[3J\x1b[H\x1b[?1049l";
 const PHRASE_TO_FILE: &str = "hirz: the recovery phrase is written to standard output, which is not a \
 terminal.\nAnything that stores that output (a file, a log, a pipe) keeps the phrase.\n";
 
-fn device_name(ctx: &Ctx<'_>, given: Option<String>) -> CliResult<String> {
+pub(crate) fn device_name(ctx: &Ctx<'_>, given: Option<String>) -> CliResult<String> {
     let name = match given {
         Some(n) => n.trim().to_string(),
         None => ctx
@@ -78,10 +78,12 @@ fn show_phrase(ctx: &mut Ctx<'_>, words: &[&str]) -> CliResult {
     ctx.say("")
 }
 
-fn random_positions() -> CliResult<Vec<usize>> {
-    let mut picked: Vec<usize> = Vec::with_capacity(QUIZ_WORDS);
+/// `count` different word positions, in order.
+pub(crate) fn random_positions(count: usize) -> CliResult<Vec<usize>> {
+    let count = count.min(PHRASE_WORDS);
+    let mut picked: Vec<usize> = Vec::with_capacity(count);
     let mut guard = 0u32;
-    while picked.len() < QUIZ_WORDS {
+    while picked.len() < count {
         guard = guard.saturating_add(1);
         if guard > 10_000 {
             return Err(CliError::failed("Could not pick random words."));
@@ -103,9 +105,9 @@ fn random_positions() -> CliResult<Vec<usize>> {
     Ok(picked)
 }
 
-fn word_matches(typed: &str, word: &str) -> bool {
-    let t = typed.trim().to_lowercase();
-    t == word || (t.chars().count() >= 4 && word.starts_with(&t))
+pub(crate) fn word_matches(typed: &str, word: &str) -> bool {
+    let t = hirz_crypto::Zeroizing::new(typed.trim().to_lowercase());
+    *t == word || (t.chars().count() >= 4 && word.starts_with(t.as_str()))
 }
 
 fn quiz(ctx: &mut Ctx<'_>, words: &[&str]) -> CliResult<bool> {
@@ -124,7 +126,7 @@ fn quiz(ctx: &mut Ctx<'_>, words: &[&str]) -> CliResult<bool> {
         }
         ctx.say("To check, type the words hirz asks for.")?;
         let mut all_ok = true;
-        for pos in random_positions()? {
+        for pos in random_positions(QUIZ_WORDS)? {
             let Some(word) = words.get(pos) else {
                 return Err(CliError::failed("Internal error: word position."));
             };
@@ -165,7 +167,12 @@ fn on_phrase_screen<T>(
     result
 }
 
-pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<Exit> {
+/// Where `init` creates the vault and the device name, after every check that comes before
+/// anything is created.
+pub(crate) fn init_target(
+    ctx: &Ctx<'_>,
+    name: Option<String>,
+) -> CliResult<(std::path::PathBuf, String)> {
     let dir = ctx.env.new_vault_dir(ctx.vault_flag.as_deref())?;
     if ctx.env.device_state_exists() {
         return Err(already_set_up(ctx));
@@ -189,12 +196,54 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
         )));
     }
     let name = device_name(ctx, name)?;
-    let (vault, phrase) = match Vault::create(&dir, ctx.env.state_dir(), &name) {
-        Ok(v) => v,
-        Err(VaultError::AlreadyExists) => return Err(already_set_up(ctx)),
-        Err(e) => return Err(e.into()),
-    };
-    drop(vault);
+    Ok((dir, name))
+}
+
+pub(crate) fn create_vault(ctx: &Ctx<'_>, dir: &Path, name: &str) -> CliResult<RecoveryPhrase> {
+    match Vault::create(dir, ctx.env.state_dir(), name) {
+        Ok((vault, phrase)) => {
+            drop(vault);
+            Ok(phrase)
+        }
+        Err(VaultError::AlreadyExists) => Err(already_set_up(ctx)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The phrase could not be shown in full (`what` says why).
+pub(crate) fn phrase_not_shown(ctx: &Ctx<'_>, dir: &Path, what: &str, init: &str) -> String {
+    format!(
+        "{what}\nThe vault was created in {} and the recovery phrase may not have been shown. \
+         Start over: delete that folder and the files in {}, then run `{init}` again.",
+        dir.display(),
+        ctx.env.state_dir().display()
+    )
+}
+
+/// The vault exists but its folder could not be recorded (`what` says why).
+pub(crate) fn not_recorded(ctx: &Ctx<'_>, dir: &Path, what: &str) -> String {
+    format!(
+        "{what}\nThe vault exists in {d} and the recovery phrase shown is valid. Fix the problem, \
+         then run `{p} forget-local` and `{p} join --vault {d}` with the phrase, or give \
+         --vault {d} to every command.",
+        d = dir.display(),
+        p = ctx.program
+    )
+}
+
+pub(crate) fn not_confirmed(ctx: &Ctx<'_>, dir: &Path, init: &str) -> String {
+    format!(
+        "The recovery phrase was not confirmed. The vault was still created and works.\n\
+         If you did not save the phrase and have no passkeys in it yet, start over: delete\n\
+         the folder {} and the files in {}, then run `{init}` again.",
+        dir.display(),
+        ctx.env.state_dir().display()
+    )
+}
+
+pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<Exit> {
+    let (dir, name) = init_target(ctx, name)?;
+    let phrase = create_vault(ctx, &dir, &name)?;
 
     let phrase_text = phrase.to_words();
     let words: Vec<&str> = phrase_text.split(' ').collect();
@@ -231,37 +280,14 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
         }
         quiz(ctx, &words)
     });
-    let confirmed = shown.map_err(|e| {
-        CliError::new(
-            e.exit,
-            format!(
-                "{}\nThe vault was created in {} and the recovery phrase may not have been shown. \
-                 Start over: delete that folder and the files in {}, then run `hirz init` again.",
-                e.message,
-                dir.display(),
-                ctx.env.state_dir().display()
-            ),
-        )
-    })?;
+    let confirmed = shown
+        .map_err(|e| CliError::new(e.exit, phrase_not_shown(ctx, &dir, &e.message, "hirz init")))?;
     if let Err(e) = recorded {
-        return Err(CliError::failed(format!(
-            "{}\nThe vault exists in {d} and the recovery phrase shown is valid. Fix the problem, \
-             then run `{p} forget-local` and `{p} join --vault {d}` with the phrase, or give \
-             --vault {d} to every command.",
-            e.message,
-            d = dir.display(),
-            p = ctx.program
-        )));
+        return Err(CliError::failed(not_recorded(ctx, &dir, &e.message)));
     }
     if !saved {
         if !confirmed {
-            return Err(CliError::cancelled(format!(
-                "The recovery phrase was not confirmed. The vault was still created and works.\n\
-                 If you did not save the phrase and have no passkeys in it yet, start over: delete\n\
-                 the folder {} and the files in {}, then run `hirz init` again.",
-                dir.display(),
-                ctx.env.state_dir().display()
-            )));
+            return Err(CliError::cancelled(not_confirmed(ctx, &dir, "hirz init")));
         }
         if screen {
             ctx.say(&format!("Your vault is in {}.", dir.display()))?;
@@ -278,7 +304,39 @@ pub fn init(ctx: &mut Ctx<'_>, name: Option<String>, saved: bool) -> CliResult<E
          - Check everything with: {p} status",
         p = ctx.program
     ))?;
+    offer_firefox_addon(ctx);
     Ok(Exit::Ok)
+}
+
+/// The last step of `init`: offer the extension's page when Firefox is here without it. Nothing
+/// that goes wrong here fails `init`.
+fn offer_firefox_addon(ctx: &mut Ctx<'_>) {
+    if crate::firefox::addon_state(ctx.env) != crate::firefox::AddonState::Missing {
+        return;
+    }
+    let _ = ctx.say("");
+    let open = confirm(
+        ctx.prompt,
+        "Firefox is installed without the hirz extension. Open its page on addons.mozilla.org \
+         to add it?",
+    )
+    .unwrap_or(false);
+    if !open {
+        let _ = ctx.say(&format!(
+            "To add it later, open {} in Firefox.",
+            hirz_uv::first_run::ADDON_PAGE
+        ));
+        return;
+    }
+    let said = if ctx.sys.open_url(hirz_uv::first_run::ADDON_PAGE) {
+        "Opened the page. Click \"Add to Firefox\" there.".to_string()
+    } else {
+        format!(
+            "Could not open a browser. Open {} in Firefox and click \"Add to Firefox\".",
+            hirz_uv::first_run::ADDON_PAGE
+        )
+    };
+    let _ = ctx.say(&said);
 }
 
 pub(crate) fn join_target(

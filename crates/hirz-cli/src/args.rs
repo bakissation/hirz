@@ -42,6 +42,10 @@ pub enum Command {
         name: Option<String>,
         saved: bool,
     },
+    /// `init --gui`: the first-run setup in windows instead of the terminal.
+    InitGui {
+        name: Option<String>,
+    },
     Join {
         name: Option<String>,
         /// Ask an existing device for approval instead of typing the recovery phrase.
@@ -131,6 +135,7 @@ const BOOL_OPTS: &[&str] = &[
     "--force",
     "--request",
     "--accept-fork",
+    "--gui",
 ];
 
 fn split_raw(args: &[OsString]) -> CliResult<Raw> {
@@ -288,8 +293,18 @@ pub fn parse(args: &[OsString]) -> CliResult<Invocation> {
             expect_args(rest, 0, "init")?;
             let name = raw.string_value("--name")?;
             let saved = raw.flag("--yes-i-saved-it");
+            let gui = raw.flag("--gui");
             raw.finish("init")?;
-            Command::Init { name, saved }
+            match (gui, saved) {
+                (true, true) => {
+                    return Err(CliError::usage(
+                        "--gui checks the recovery phrase in a window; it does not go with \
+                         --yes-i-saved-it.",
+                    ));
+                }
+                (true, false) => Command::InitGui { name },
+                (false, _) => Command::Init { name, saved },
+            }
         }
         "join" => {
             expect_args(rest, 0, "join")?;

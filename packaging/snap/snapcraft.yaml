@@ -18,7 +18,8 @@ description: |
 
       sudo snap run hirz.setup-system install
 
-  Then each user runs "hirz init" and "systemctl --user enable --now hirzd".
+  It also turns on hirzd for every user. The first time a site asks for a passkey, hirz
+  opens a setup window; "hirz init" does the same in a terminal.
 license: (MIT OR Apache-2.0) AND MPL-2.0
 website: https://github.com/bakissation/hirz
 source-code: https://github.com/bakissation/hirz

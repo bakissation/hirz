@@ -127,6 +127,309 @@ pub const FORK_NOTICE: &str = "the vault folder no longer holds the key changes 
 pub const FORK_ENDED_NOTICE: &str =
     "the vault folder is consistent again; new passkeys can be saved";
 
+/// After the setup window was started, the same process does not start it again for this long,
+/// whatever happened to it: a page that sends request after request starts at most one window per
+/// interval, and the window's own lock keeps a second one from opening.
+pub const SETUP_RETRY: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupOffer {
+    /// `hirz init --gui` was started.
+    Opened,
+    /// A setup window is open already (started by this or another process).
+    AlreadyOpen,
+    /// The user cancelled the window a moment ago; [`QUIET_NOTICE`] was shown instead, once for
+    /// that quiet period.
+    QuietNotice,
+    NotOffered,
+}
+
+/// How long a request that would ask the user waits for the setup window
+/// ([`FirstRun::wait_for_setup`]), and how often it looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hold {
+    pub limit: Duration,
+    pub poll: Duration,
+}
+
+pub const HOLD_POLL: Duration = Duration::from_millis(500);
+/// A window that was just started counts as open this long, before it has taken its lock.
+pub const SETUP_START_GRACE: Duration = Duration::from_secs(10);
+
+/// Shown, once, to a request that comes while a cancelled setup keeps quiet.
+pub const QUIET_NOTICE: &str =
+    "hirz is not set up. Try again in a minute, or run hirz init in a terminal.";
+
+/// How [`FirstRun`] starts the setup window; tests count the starts instead.
+pub trait SetupLauncher {
+    /// The window can be drawn (zenity is installed in a trusted directory).
+    fn can_draw(&self) -> bool;
+    fn launch(&self, program: &Path, runtime_dir: &Path) -> std::io::Result<()>;
+    /// A desktop notification, best effort.
+    fn notify(&self, text: &str);
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemLauncher;
+
+impl SetupLauncher for SystemLauncher {
+    fn can_draw(&self) -> bool {
+        hirz_uv::runner::resolve_tool("zenity").is_some()
+    }
+
+    fn notify(&self, text: &str) {
+        hirz_uv::first_run::notify_desktop(text);
+    }
+
+    fn launch(&self, program: &Path, runtime_dir: &Path) -> std::io::Result<()> {
+        let (exe, args) = setup_command(
+            program,
+            runtime_dir,
+            hirz_uv::runner::resolve_tool("systemd-run").as_deref(),
+            |k| std::env::var_os(k),
+        );
+        hirz_uv::first_run::spawn_detached(&exe, &args)
+    }
+}
+
+/// The transient user unit the setup window runs in. A fixed name: while one runs, starting a
+/// second one fails.
+pub const SETUP_UNIT: &str = "hirz-setup.service";
+
+/// Passed on to the setup window when they are set here: where the vault and state live, and the
+/// display. A transient unit otherwise gets the user manager's environment, not ours.
+const SETUP_ENV: [&str; 8] = [
+    VAULT_ENV,
+    STATE_ENV,
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CONFIG_HOME",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+];
+
+/// What starts `hirz init --gui`: `systemd-run --user` when there is a user service manager (its
+/// socket `$XDG_RUNTIME_DIR/systemd/private`) and `systemd_run` was found in a trusted system
+/// directory, so the window runs in a unit of its own, outside the daemon's cgroup and sandbox,
+/// and outlives a daemon restart. Otherwise `program` itself, started detached. Never a shell.
+pub fn setup_command(
+    program: &Path,
+    runtime_dir: &Path,
+    systemd_run: Option<&Path>,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> (PathBuf, Vec<OsString>) {
+    let manager = runtime_dir.join("systemd").join("private");
+    let direct = || {
+        (
+            program.to_path_buf(),
+            vec![OsString::from("init"), OsString::from("--gui")],
+        )
+    };
+    let Some(run) = systemd_run.filter(|_| manager.exists()) else {
+        return direct();
+    };
+    let mut args: Vec<OsString> = [
+        "--user",
+        "--quiet",
+        "--collect",
+        "--no-block",
+        "--description=hirz setup",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    args.insert(4, OsString::from(format!("--unit={SETUP_UNIT}")));
+    for key in SETUP_ENV {
+        if let Some(value) = env(key).filter(|v| !v.is_empty()) {
+            let mut arg = OsString::from(format!("--setenv={key}="));
+            arg.push(value);
+            args.push(arg);
+        }
+    }
+    args.push(OsString::from("--"));
+    args.push(program.as_os_str().to_owned());
+    args.push(OsString::from("init"));
+    args.push(OsString::from("--gui"));
+    (run.to_path_buf(), args)
+}
+
+/// Opens the graphical first-run setup (`hirz init --gui`) when a request that would ask the user
+/// finds no vault (docs/approval.md, "Setting up hirz"). Silent probes must not call it.
+#[derive(Debug)]
+pub struct FirstRun<L = SystemLauncher> {
+    runtime_dir: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+    graphical: bool,
+    program: Option<PathBuf>,
+    launcher: L,
+    last_launch: Option<Instant>,
+}
+
+/// The `hirz` program to start: the one next to the running program, else `/usr/bin/hirz`. `PATH`
+/// is never searched.
+pub fn setup_program(current_exe: Option<&Path>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |p: &Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    current_exe
+        .and_then(Path::parent)
+        .map(|d| d.join("hirz"))
+        .filter(|p| executable(p))
+        .or_else(|| Some(PathBuf::from("/usr/bin/hirz")).filter(|p| executable(p)))
+}
+
+impl FirstRun<SystemLauncher> {
+    /// Never opens anything.
+    pub fn disabled() -> Self {
+        FirstRun::new(None, None, false, None, SystemLauncher)
+    }
+
+    /// Reads `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY` and `DISPLAY` once.
+    pub fn from_process(settings: &Settings) -> Self {
+        let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+        FirstRun::new(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute()),
+            settings.state_dir().ok(),
+            set("WAYLAND_DISPLAY") || set("DISPLAY"),
+            setup_program(std::env::current_exe().ok().as_deref()),
+            SystemLauncher,
+        )
+    }
+}
+
+impl<L: SetupLauncher> FirstRun<L> {
+    pub fn new(
+        runtime_dir: Option<PathBuf>,
+        state_dir: Option<PathBuf>,
+        graphical: bool,
+        program: Option<PathBuf>,
+        launcher: L,
+    ) -> Self {
+        FirstRun {
+            runtime_dir,
+            state_dir,
+            graphical,
+            program,
+            launcher,
+            last_launch: None,
+        }
+    }
+
+    pub fn offer(&mut self) -> SetupOffer {
+        let unix_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.offer_at(Instant::now(), unix_now)
+    }
+
+    /// Nothing is started without a graphical session, while a setup window is open, within
+    /// [`SETUP_RETRY`] of the last start by this process, within a minute of a setup the user
+    /// cancelled, or on a computer that is set up and only misses its vault folder (a sync tool
+    /// that has not copied it yet).
+    pub fn offer_at(&mut self, now: Instant, unix_now: u64) -> SetupOffer {
+        let (true, Some(runtime), Some(program)) = (
+            self.graphical,
+            self.runtime_dir.as_deref(),
+            self.program.as_deref(),
+        ) else {
+            return SetupOffer::NotOffered;
+        };
+        if self
+            .state_dir
+            .as_deref()
+            .is_none_or(hirz_vault::Vault::is_set_up)
+        {
+            return SetupOffer::NotOffered;
+        }
+        if hirz_uv::first_run::window_open(runtime) {
+            return SetupOffer::AlreadyOpen;
+        }
+        if let Some(at) = hirz_uv::first_run::cancelled_at(runtime, unix_now) {
+            if hirz_uv::first_run::claim_quiet_notice(runtime, at) {
+                self.launcher.notify(QUIET_NOTICE);
+                return SetupOffer::QuietNotice;
+            }
+            return SetupOffer::NotOffered;
+        }
+        if self
+            .last_launch
+            .is_some_and(|t| now.saturating_duration_since(t) < SETUP_RETRY)
+            || !self.launcher.can_draw()
+        {
+            return SetupOffer::NotOffered;
+        }
+        self.last_launch = Some(now);
+        match self.launcher.launch(program, runtime) {
+            Ok(()) => SetupOffer::Opened,
+            Err(_) => SetupOffer::NotOffered,
+        }
+    }
+}
+
+impl<L: SetupLauncher> FirstRun<L> {
+    fn setup_running(&self, runtime: &Path, now: Instant) -> bool {
+        hirz_uv::first_run::window_open(runtime)
+            || self
+                .last_launch
+                .is_some_and(|t| now.saturating_duration_since(t) < SETUP_START_GRACE)
+    }
+
+    /// After [`FirstRun::offer`] said `Opened` or `AlreadyOpen`: waits while the setup window
+    /// runs, then looks at the vault folder. The vault is not used while the window is still
+    /// open (it exists before its phrase was checked). A request that is cancelled or runs out of
+    /// `hold.limit` first gets `Missing`, and the window says when hirz is ready.
+    pub fn wait_for_setup<A: Approver>(
+        &mut self,
+        session: &mut Session<A>,
+        cancelled: &dyn Fn() -> bool,
+        hold: Hold,
+    ) -> VaultStatus {
+        let Some(runtime) = self.runtime_dir.clone() else {
+            return VaultStatus::Missing;
+        };
+        let started = Instant::now();
+        loop {
+            let now = Instant::now();
+            if !self.setup_running(&runtime, now) {
+                return session.ensure_vault();
+            }
+            let waited = now.saturating_duration_since(started);
+            if cancelled() || waited >= hold.limit {
+                hirz_uv::first_run::mark_waiter_gone(&runtime);
+                return VaultStatus::Missing;
+            }
+            std::thread::sleep(hold.poll.min(hold.limit.saturating_sub(waited)));
+        }
+    }
+
+    /// "hirz has no passkey for SITE." on the desktop, at most once per site and minute for all
+    /// processes of the user. For requests that asked for the user's presence and found nothing.
+    pub fn no_passkey_notice(&self, rp_id: &str) {
+        let unix_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.no_passkey_notice_at(rp_id, unix_now);
+    }
+
+    pub fn no_passkey_notice_at(&self, rp_id: &str, unix_now: u64) -> bool {
+        let (true, Some(runtime)) = (self.graphical, self.runtime_dir.as_deref()) else {
+            return false;
+        };
+        if !hirz_uv::first_run::claim_no_passkey_notice(runtime, rp_id, unix_now) {
+            return false;
+        }
+        self.launcher.notify(&format!(
+            "hirz has no passkey for {}.",
+            hirz_uv::display::site_label(rp_id)
+        ));
+        true
+    }
+}
+
 pub struct Session<A> {
     settings: Settings,
     vault: Option<Vault>,
@@ -702,5 +1005,358 @@ mod session_tests {
         });
         assert_eq!(r.unwrap_err(), CoreError::Approval(ApprovalError::Denied));
         assert!(session.vault.as_ref().unwrap().list_all().is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+mod first_run_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[derive(Debug, Default)]
+    struct Counting {
+        launches: Cell<u32>,
+        notices: std::cell::RefCell<Vec<String>>,
+        cannot_draw: bool,
+    }
+
+    impl SetupLauncher for &Counting {
+        fn can_draw(&self) -> bool {
+            !self.cannot_draw
+        }
+        fn launch(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            self.launches.set(self.launches.get() + 1);
+            Ok(())
+        }
+        fn notify(&self, text: &str) {
+            self.notices.borrow_mut().push(text.to_owned());
+        }
+    }
+
+    #[test]
+    fn the_setup_runs_in_a_user_unit_of_its_own_when_systemd_is_there() {
+        let d = Dir::new();
+        let runtime = d.0.join("run");
+        let program = Path::new("/usr/bin/hirz");
+        let run = Path::new("/usr/bin/systemd-run");
+        let env = |k: &str| match k {
+            VAULT_ENV => Some(OsString::from("/srv/sync/hirz")),
+            "DISPLAY" => Some(OsString::from(":0")),
+            "WAYLAND_DISPLAY" => Some(OsString::new()),
+            "PATH" => Some(OsString::from("/tmp/evil")),
+            _ => None,
+        };
+
+        let (exe, args) = setup_command(program, &runtime, Some(run), env);
+        assert_eq!(exe, program, "no user manager: started directly");
+        assert_eq!(args, ["init", "--gui"]);
+
+        std::fs::create_dir_all(runtime.join("systemd")).unwrap();
+        std::fs::write(runtime.join("systemd").join("private"), b"").unwrap();
+        let (exe, args) = setup_command(program, &runtime, None, env);
+        assert_eq!(exe, program, "no systemd-run: started directly");
+        assert_eq!(args, ["init", "--gui"]);
+
+        let (exe, args) = setup_command(program, &runtime, Some(run), env);
+        assert_eq!(exe, run);
+        let args: Vec<String> = args.into_iter().map(|a| a.into_string().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--user",
+                "--quiet",
+                "--collect",
+                "--no-block",
+                "--unit=hirz-setup.service",
+                "--description=hirz setup",
+                "--setenv=HIRZ_VAULT=/srv/sync/hirz",
+                "--setenv=DISPLAY=:0",
+                "--",
+                "/usr/bin/hirz",
+                "init",
+                "--gui",
+            ]
+        );
+        assert!(args.iter().any(|a| a == &format!("--unit={SETUP_UNIT}")));
+    }
+
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new() -> Dir {
+            let mut r = [0u8; 8];
+            hirz_crypto::random_fill(&mut r).unwrap();
+            let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+            let p = std::env::temp_dir().join(format!("hirz-first-run-test-{hex}"));
+            std::fs::create_dir_all(&p).unwrap();
+            Dir(p)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const NOW: u64 = 1_700_000_000;
+
+    fn first_run<'a>(d: &Dir, l: &'a Counting) -> FirstRun<&'a Counting> {
+        FirstRun::new(
+            Some(d.0.join("run")),
+            Some(d.0.join("state")),
+            true,
+            Some(PathBuf::from("/usr/bin/hirz")),
+            l,
+        )
+    }
+
+    #[test]
+    fn a_burst_of_requests_starts_one_window() {
+        let d = Dir::new();
+        let l = Counting::default();
+        let mut f = first_run(&d, &l);
+        let t0 = Instant::now();
+        assert_eq!(f.offer_at(t0, NOW), SetupOffer::Opened);
+        for i in 1..1000 {
+            let at = t0 + Duration::from_millis(i * 25);
+            assert_eq!(f.offer_at(at, NOW), SetupOffer::NotOffered);
+        }
+        assert_eq!(l.launches.get(), 1);
+        assert_eq!(f.offer_at(t0 + SETUP_RETRY, NOW), SetupOffer::Opened);
+        assert_eq!(l.launches.get(), 2);
+    }
+
+    #[test]
+    fn nothing_starts_while_a_setup_window_is_open() {
+        let d = Dir::new();
+        let l = Counting::default();
+        let runtime = d.0.join("run");
+        let held = hirz_uv::first_run::try_lock(&runtime).unwrap().unwrap();
+        let mut f = first_run(&d, &l);
+        let t0 = Instant::now();
+        assert_eq!(f.offer_at(t0, NOW), SetupOffer::AlreadyOpen);
+        assert_eq!(
+            first_run(&d, &l).offer_at(t0, NOW),
+            SetupOffer::AlreadyOpen,
+            "another process sees the same lock"
+        );
+        drop(held);
+        assert_eq!(f.offer_at(t0, NOW), SetupOffer::Opened);
+        assert_eq!(l.launches.get(), 1);
+    }
+
+    #[test]
+    fn a_cancelled_setup_keeps_quiet_for_a_minute_with_one_notice() {
+        let d = Dir::new();
+        let l = Counting::default();
+        let runtime = d.0.join("run");
+        hirz_uv::first_run::mark_cancelled(&runtime, NOW).unwrap();
+        let t0 = Instant::now();
+        let mut f = first_run(&d, &l);
+        let mut other = first_run(&d, &l);
+        assert_eq!(f.offer_at(t0, NOW + 1), SetupOffer::QuietNotice);
+        assert_eq!(f.offer_at(t0, NOW + 2), SetupOffer::NotOffered);
+        assert_eq!(
+            other.offer_at(t0, NOW + 3),
+            SetupOffer::NotOffered,
+            "one notice per quiet period, whichever process asks"
+        );
+        assert_eq!(f.offer_at(t0, NOW + 59), SetupOffer::NotOffered);
+        assert_eq!(l.launches.get(), 0);
+        assert_eq!(l.notices.borrow().as_slice(), [QUIET_NOTICE]);
+        assert_eq!(f.offer_at(t0, NOW + 60), SetupOffer::Opened);
+
+        hirz_uv::first_run::mark_cancelled(&runtime, NOW + 100).unwrap();
+        assert_eq!(other.offer_at(t0, NOW + 101), SetupOffer::QuietNotice);
+        assert_eq!(l.notices.borrow().len(), 2, "a new cancel, a new notice");
+    }
+
+    #[test]
+    fn only_a_visible_graphical_session_without_hirz_gets_a_window() {
+        let d = Dir::new();
+        let l = Counting::default();
+        let t0 = Instant::now();
+        let runtime = Some(d.0.join("run"));
+        let state = Some(d.0.join("state"));
+        let program = Some(PathBuf::from("/usr/bin/hirz"));
+        let cases: [FirstRun<&Counting>; 4] = [
+            FirstRun::new(runtime.clone(), state.clone(), false, program.clone(), &l),
+            FirstRun::new(None, state.clone(), true, program.clone(), &l),
+            FirstRun::new(runtime.clone(), state.clone(), true, None, &l),
+            FirstRun::new(runtime.clone(), None, true, program.clone(), &l),
+        ];
+        for mut f in cases {
+            assert_eq!(f.offer_at(t0, NOW), SetupOffer::NotOffered);
+        }
+        let no_zenity = Counting {
+            cannot_draw: true,
+            ..Counting::default()
+        };
+        let mut f = FirstRun::new(
+            runtime.clone(),
+            state.clone(),
+            true,
+            program.clone(),
+            &no_zenity,
+        );
+        assert_eq!(f.offer_at(t0, NOW), SetupOffer::NotOffered);
+
+        Vault::create(&d.0.join("elsewhere"), &d.0.join("state"), "laptop").unwrap();
+        let mut f = first_run(&d, &l);
+        assert_eq!(
+            f.offer_at(t0, NOW),
+            SetupOffer::NotOffered,
+            "set up, waiting for the sync tool"
+        );
+        assert_eq!(l.launches.get(), 0);
+        assert_eq!(
+            FirstRun::disabled().offer_at(t0, NOW),
+            SetupOffer::NotOffered
+        );
+    }
+
+    const FAST: Hold = Hold {
+        limit: Duration::from_secs(5),
+        poll: Duration::from_millis(10),
+    };
+
+    fn session(d: &Dir) -> Session<Allow> {
+        Session::new(
+            Settings::from_vars(|k| match k {
+                VAULT_ENV => Some(d.0.join("vault").into_os_string()),
+                STATE_ENV => Some(d.0.join("state").into_os_string()),
+                _ => None,
+            }),
+            Allow,
+        )
+    }
+
+    struct Allow;
+
+    impl Approver for Allow {
+        fn approve(&self, _: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+            Ok(Approval {
+                user_present: true,
+                user_verified: false,
+                selected: None,
+            })
+        }
+    }
+
+    #[test]
+    fn a_held_request_gets_the_vault_once_the_window_closes() {
+        let d = Dir::new();
+        let l = Counting::default();
+        let runtime = d.0.join("run");
+        let lock = hirz_uv::first_run::try_lock(&runtime).unwrap().unwrap();
+        let mut f = first_run(&d, &l);
+        assert_eq!(f.offer(), SetupOffer::AlreadyOpen);
+        let mut s = session(&d);
+        let vault = d.0.join("vault");
+        let state = d.0.join("state");
+        let window = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            Vault::create(&vault, &state, "laptop").unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            drop(lock);
+        });
+        let started = Instant::now();
+        assert_eq!(
+            f.wait_for_setup(&mut s, &|| false, FAST),
+            VaultStatus::Ready
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "not before the window closed"
+        );
+        window.join().unwrap();
+        assert!(!hirz_uv::first_run::take_waiter_gone(&runtime));
+    }
+
+    #[test]
+    fn a_held_request_ends_on_cancel_on_time_or_when_setup_ends_empty() {
+        let d = Dir::new();
+        let l = Counting::default();
+        let runtime = d.0.join("run");
+        let lock = hirz_uv::first_run::try_lock(&runtime).unwrap().unwrap();
+        let mut f = first_run(&d, &l);
+        let mut s = session(&d);
+        assert_eq!(
+            f.wait_for_setup(&mut s, &|| true, FAST),
+            VaultStatus::Missing
+        );
+        assert!(hirz_uv::first_run::take_waiter_gone(&runtime), "cancelled");
+        let short = Hold {
+            limit: Duration::from_millis(100),
+            ..FAST
+        };
+        let started = Instant::now();
+        assert_eq!(
+            f.wait_for_setup(&mut s, &|| false, short),
+            VaultStatus::Missing
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(hirz_uv::first_run::take_waiter_gone(&runtime), "timed out");
+        drop(lock);
+        assert_eq!(
+            f.wait_for_setup(&mut s, &|| false, FAST),
+            VaultStatus::Missing
+        );
+        assert!(
+            !hirz_uv::first_run::take_waiter_gone(&runtime),
+            "the window closed without a vault: nothing to announce"
+        );
+    }
+
+    #[test]
+    fn no_passkey_notices_are_rate_limited_per_site() {
+        let d = Dir::new();
+        let l = Counting::default();
+        let a = first_run(&d, &l);
+        let b = first_run(&d, &l);
+        assert!(a.no_passkey_notice_at("example.com", NOW));
+        assert!(
+            !b.no_passkey_notice_at("example.com", NOW + 30),
+            "other process"
+        );
+        assert!(a.no_passkey_notice_at("acme.example", NOW + 30));
+        assert!(b.no_passkey_notice_at("example.com", NOW + 60));
+        assert_eq!(
+            l.notices.borrow().as_slice(),
+            [
+                "hirz has no passkey for example.com.",
+                "hirz has no passkey for acme.example.",
+                "hirz has no passkey for example.com."
+            ]
+        );
+        let hidden = FirstRun::new(None, None, false, None, &l);
+        assert!(!hidden.no_passkey_notice_at("example.org", NOW));
+    }
+
+    #[test]
+    fn the_program_is_never_looked_up_in_path() {
+        let d = Dir::new();
+        let bin = d.0.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let me = bin.join("hirzd");
+        std::fs::write(&me, b"").unwrap();
+        let next = bin.join("hirz");
+        std::fs::write(&next, b"#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let fallback = Path::new("/usr/bin/hirz")
+            .is_file()
+            .then(|| PathBuf::from("/usr/bin/hirz"));
+        assert_eq!(setup_program(Some(&me)), fallback, "not executable");
+        std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(setup_program(Some(&me)), Some(next));
+        assert_eq!(setup_program(None), fallback);
     }
 }

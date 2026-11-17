@@ -14,8 +14,8 @@ Firefox on Flathub runs with `--device=all`, so it sees `/dev/hidraw*` like a Fi
 the distribution. The hidraw node of the hirz device belongs to your user with mode 0600
 (see `docs/uhid.md`), and the Flatpak runs as your user, so Firefox can open it.
 
-1. Install the hirz package and run the first-run steps in `docs/install.md`
-   (`hirz init`, `systemctl --user enable --now hirzd`).
+1. Install the hirz package and set up your vault as `docs/install.md` describes (the setup
+   window, or `hirz init`).
 2. Check the device exists: `hirz status` shows the broker socket, and
    `ls -l /dev/hidraw*` shows one node owned by you.
 3. Open a site that supports passkeys and choose "security key" when asked.

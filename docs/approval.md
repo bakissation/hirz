@@ -10,7 +10,7 @@ alone.
 | System password (polkit) | UP + UV | on when the polkit action is installed | Your login password, asked by your desktop's polkit agent |
 | Fingerprint (fprintd) | UP + UV | on when a finger is enrolled | A finger on the reader |
 | hirz PIN | UP + UV | on once you set a PIN | A PIN that hirz checks itself |
-| Click-to-allow | UP only | off, opt-in per site | Nothing: someone clicked Allow |
+| Click-to-allow | UP only | off, opt-in per site | Nothing: someone clicked the button |
 
 Every approval needs a prompt drawn by hirz itself (with zenity) that shows the site. A web
 page cannot draw, hide or click it.
@@ -90,8 +90,14 @@ extension path that is answered like "no credential for this site": the request 
 Firefox and its own sign-in interface, so a page cannot tell, from how fast or how a request
 failed, whether hirz holds a passkey for it. Only a window the user saw can end in a refusal
 (Cancel, a timeout, a wrong PIN too often). For `hirzd` the answer is the CTAP "not allowed"
-status in both cases. The CLI does not use this path: its commands say which method is missing
+status when nothing was shown, and "operation denied" when the user declined or the window timed
+out (docs/uhid.md, "Refusals end the ceremony"). The CLI does not use this path: its commands say which method is missing
 and how to set it up.
+
+The approval button says what it does: "Sign in" for a sign-in, "Create passkey" for a
+registration and "Use key" for an OpenSSH security key (`ssh:` ids), next to "Cancel". The
+same verb is used whether a click is enough or a password, finger or PIN follows. Windows
+for devices, exports and repairs keep their own buttons.
 
 ## System password (polkit)
 
@@ -264,11 +270,11 @@ guarantee (see [vault-format.md](vault-format.md), section 11).
 
 ## Click-to-allow
 
-A zenity question showing the site and account, with Allow and Cancel; the focus starts on
-Cancel so a stray Enter does not approve. On a sign-in with several accounts the question
+A zenity question showing the site and account, with an approval button and Cancel; the focus
+starts on Cancel so a stray Enter does not approve. On a sign-in with several accounts the question
 comes after the account list: choosing an account in the list (its Continue button, or a stray
 Enter on the list, which starts with the first row selected) never approves anything alone.
-Click-to-allow still asks "Allow?" for the chosen account, with the focus on Cancel; the other
+Click-to-allow still asks for the chosen account, with the focus on Cancel; the other
 methods then ask for a password, a finger or the PIN. This sets UP and leaves UV unset: hirz
 reports honestly that it did not verify you.
 
@@ -371,6 +377,101 @@ verifying method is available no window is shown and the CLI explains how to set
 the polkit action. Cancel or a failed check leaves the request waiting. The busy rule and the
 prompt limit apply as for sites, with all pairing prompts counted under one shared key (the two
 questions of one approval count once).
+
+## Setting up hirz
+
+The first time an app asks hirz for a passkey and the user has no vault yet, hirz opens a setup
+window instead of only refusing: `hirz init --gui`, described in [cli.md](cli.md). It creates
+the vault as `hirz init` does, shows the 24 words of the recovery phrase in a window, checks three
+of them, offers the Firefox extension and ends with a backup reminder in plain words. The phrase reaches
+zenity only on its standard input.
+
+**What starts it.** `hirzd` for makeCredential (including the throwaway requests browsers send
+to wait for a touch), getAssertion with user presence and authenticatorSelection; `hirz-nmh`
+for `create` and `get`. A silent probe (getAssertion with `up: false`), an account list or a
+capability check never starts it.
+
+**Only a registration waits.** A sign-in (getAssertion with user presence in `hirzd`, a modal
+`get` in `hirz-nmh`), a touch request or a security key choice that finds no vault opens the
+window under the same rules but is answered at once: there is nothing to sign in with yet.
+`hirzd` answers a sign-in and a touch request with CTAP2_ERR_NO_CREDENTIALS, so the browser says
+that the key holds no passkey for the site, and authenticatorSelection with CTAP2_ERR_NOT_ALLOWED
+(CTAP allows no "no credential" answer there); `hirz-nmh` answers `NotHandled`, so Firefox offers
+its other methods. The setup window is the feedback: no "no passkey" notice is shown.
+
+A registration (a real makeCredential, a `create`) that started the window, or finds one open,
+waits for it the way it waits for an approval: `hirzd` keeps the CTAPHID keepalives flowing and holds no more
+than an approval does (the transport serves one request at a time either way), and `hirz-nmh`
+keeps reading `cancel` while later requests queue behind it. Every 500 ms it looks whether the
+window is still open (its lock, or a start less than 10 seconds ago). The new vault is not used
+while the window is open, since it exists before its phrase was checked. Once the window has
+closed and a vault is there, the registration goes on as usual, with the normal approval window,
+and creates the passkey. Setting hirz up never counts as an approval. When the window closes without a vault (Cancel, the join answer, an
+error), the request fails as before: CTAP2_ERR_NOT_ALLOWED from `hirzd`, `NotHandled` from
+`hirz-nmh`, so Firefox goes on with its own interface. A silent probe never waits.
+
+The wait ends early when the request is cancelled (the browser's CTAPHID_CANCEL, the page's
+abort or the extension's timer) or runs out of time: in `hirzd` the CTAPHID transaction limit
+less the approval margin (115 of 120 seconds), in `hirz-nmh` 600 seconds, the longest timeout the
+extension gives a request (the page's own timeout, 30 to 600 seconds, ends it earlier with a
+`cancel`). The request then fails and writes `$XDG_RUNTIME_DIR/hirz/setup-waiter-gone`; when the
+window then completes the setup, it shows the desktop notification "hirz is ready. Go back to
+the site and try again." right after its last window closes. It looks for the note only after it
+has released its lock, so a request that gave up at any moment before is never missed (a request
+that still waits then sees the setup ended and goes on), and it logs a line when it sends the
+notice. A window that starts removes an old note first. An approval that follows
+a long wait has less time left before the browser ends the transaction; when it is answered too
+late, the request counts as cancelled and nothing is created.
+
+**How.** The daemon starts the `hirz` program next to its own executable, else `/usr/bin/hirz`;
+`PATH` is never searched, and no shell is involved. When the user has a systemd service manager
+(`$XDG_RUNTIME_DIR/systemd/private` exists) and `systemd-run` is in a trusted system directory,
+the window runs as the transient user unit `hirz-setup.service` (`systemd-run --user --collect`).
+It is then outside the daemon's cgroup and sandbox: it survives a restart of `hirzd`, and a
+browser it opens for the Firefox extension runs unconfined. The fixed unit name makes a second
+start fail while one runs. `HIRZ_VAULT`, `HIRZ_STATE`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_CONFIG_HOME`, `DISPLAY`, `WAYLAND_DISPLAY` and `XAUTHORITY` are passed on with `--setenv`
+when the daemon has them. Without a user service manager the daemon starts the program itself,
+in a session of its own, with standard input and output on `/dev/null` and its own environment.
+
+**Limits.** A web page can make a browser send request after request, so these limits are part of
+the design, and tests cover them:
+
+- Nothing is started without a visible graphical session (`WAYLAND_DISPLAY` or `DISPLAY`), without
+  `XDG_RUNTIME_DIR`, without zenity in a trusted system directory, or on a computer that is set
+  up and only misses its vault folder (a sync tool that has not copied it yet).
+- One setup window per user: the window holds an exclusive lock on
+  `$XDG_RUNTIME_DIR/hirz/setup.lock` for as long as it runs. A daemon that finds the lock taken
+  starts nothing, and a second `hirz init --gui` exits at once.
+- A daemon starts the window at most once every 30 seconds, whatever became of the last one.
+- Cancel in the first window, or the answer "I already use hirz on another computer", writes the
+  time to `$XDG_RUNTIME_DIR/hirz/setup-cancelled`. For the next minute no request opens the
+  window again. The first request in that minute shows one desktop notification instead
+  (see "Notifications" below): "hirz is not set up. Try again in a minute, or run hirz init in a
+  terminal." Which minute was already announced is kept in
+  `$XDG_RUNTIME_DIR/hirz/setup-quiet-noticed`, so hirzd and every hirz-nmh together show it once.
+  After the minute the window opens again as before.
+
+## Notifications
+
+Desktop notices (no vault, no passkey for a site, setup cancelled, hirz ready, a removed device,
+a fork) go to the desktop's notification service, `org.freedesktop.Notifications.Notify`,
+through `gdbus` from a trusted system directory (no shell, no `PATH`), with the application name
+"hirz", the installed hirz icon and an expiry of ten seconds. The text is cleaned like every text
+in a hirz window and passed as one quoted GVariant string. When `gdbus` is missing or the call
+fails, `zenity --notification` shows it instead. Opening the setup window shows no notice: the
+window is the feedback.
+
+## No passkey for the site
+
+A sign-in that asked for your presence (getAssertion with `up: true` in `hirzd`, a `get` in
+`hirz-nmh`) and finds no passkey for the site makes the browser show only a generic error. hirz
+then shows a desktop notification, "hirz has no passkey for SITE.", with the site written as in
+the approval windows. At most one such notice is shown per site and minute, counted for `hirzd`
+and every `hirz-nmh` together in `$XDG_RUNTIME_DIR/hirz/no-passkey/` (one file per site, named by
+a hash of its id; old entries are dropped once there are 256). So when the extension hands a
+request on to Firefox and Firefox then asks the virtual security key, the user is told once.
+Silent probes and the extension's passkey suggestions (conditional mediation) never show it.
 
 ## Configuration
 

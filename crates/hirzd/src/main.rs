@@ -27,7 +27,7 @@ const SOCKET_ENV: &str = "HIRZ_BROKER_SOCKET";
 const MLOCK_ENV: &str = "HIRZ_MLOCK";
 /// The ceremony timeout is capped below the CTAPHID transaction limit, so a prompt ends before the
 /// browser is told the request timed out (docs/approval.md).
-const APPROVAL_MARGIN: Duration = Duration::from_secs(5);
+pub(crate) const APPROVAL_MARGIN: Duration = Duration::from_secs(5);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const STABLE_CONNECTION: Duration = Duration::from_secs(30);
@@ -124,7 +124,11 @@ fn serve(
 ) {
     let mut delay = MIN_BACKOFF;
     loop {
-        match UnixStream::connect(path) {
+        match UnixStream::connect(path).and_then(|mut stream| {
+            use std::io::Write;
+            stream.write_all(&hirz_sys::broker::HELLO_DEVICE)?;
+            Ok(stream)
+        }) {
             Ok(stream) => {
                 log(format_args!(
                     "connected to the broker at {}",
@@ -203,8 +207,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let first_run = session::FirstRun::from_process(&settings);
     let authenticator =
-        VaultAuthenticator::new(Session::new(settings, approver), Notice::new(true));
+        VaultAuthenticator::new(Session::new(settings, approver), Notice::new(true))
+            .with_first_run(first_run);
     let path = std::env::var_os(SOCKET_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));

@@ -1,9 +1,34 @@
 #!/bin/sh
-# hirz postinst. Safe to run more than once; unit state follows debhelper: the broker socket is
-# enabled on first install and an administrator's "systemctl disable" survives upgrades.
+# hirz postinst. Safe to run more than once; unit state follows debhelper: the broker socket and
+# the hirzd user unit (for every user, globally) are enabled on first install, and an
+# administrator's "systemctl disable" or "systemctl --global disable" survives upgrades.
 set -e
 
 UNIT=hirz-uhid-broker.socket
+USER_UNIT=hirzd.service
+
+# Runs systemctl in the user manager of every logged-in user; failures are ignored.
+for_each_user() {
+    for dir in /run/user/*; do
+        [ -d "$dir" ] || continue
+        user=$(getent passwd "${dir##*/}" | cut -d: -f1)
+        [ -n "$user" ] || continue
+        "$@" "$user" || true
+    done
+}
+
+restart_hirzd() {
+    systemctl --user --machine="$1@.host" try-restart "$USER_UNIT" >/dev/null 2>&1
+}
+
+# The unit has Requisite=graphical-session.target, so it only starts in a graphical session. A
+# user who masked it, or an administrator who disabled it globally, is skipped.
+start_hirzd() {
+    systemctl --user --machine="$1@.host" daemon-reload >/dev/null 2>&1 || return 0
+    state=$(systemctl --user --machine="$1@.host" is-enabled "$USER_UNIT" 2>/dev/null || true)
+    [ "$state" = enabled ] || return 0
+    systemctl --user --machine="$1@.host" start --no-block "$USER_UNIT" >/dev/null 2>&1
+}
 
 case "$1" in
     configure|abort-upgrade|abort-deconfigure|abort-remove)
@@ -14,6 +39,13 @@ case "$1" in
                 deb-systemd-helper enable "$UNIT" >/dev/null || true
             else
                 deb-systemd-helper update-state "$UNIT" >/dev/null || true
+            fi
+
+            deb-systemd-helper --user unmask "$USER_UNIT" >/dev/null || true
+            if deb-systemd-helper --quiet --user was-enabled "$USER_UNIT"; then
+                deb-systemd-helper --user enable "$USER_UNIT" >/dev/null || true
+            else
+                deb-systemd-helper --user update-state "$USER_UNIT" >/dev/null || true
             fi
         fi
 
@@ -34,24 +66,23 @@ case "$1" in
             deb-systemd-invoke start "$UNIT" >/dev/null || true
         fi
 
-        # A running hirzd keeps the old binary until it restarts, which would leave a security
-        # fix unapplied until the next login: restart it for every logged-in user.
-        if [ -n "$2" ] && [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-            for dir in /run/user/*; do
-                [ -d "$dir" ] || continue
-                user=$(getent passwd "${dir##*/}" | cut -d: -f1)
-                [ -n "$user" ] || continue
-                systemctl --user --machine="$user@.host" try-restart hirzd.service >/dev/null 2>&1 || true
-            done
-            echo "hirz was upgraded. If hirzd still runs the old version, restart it: systemctl --user restart hirzd"
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            if [ -n "$2" ]; then
+                # A running hirzd keeps the old binary until it restarts, which would leave a
+                # security fix unapplied until the next login.
+                for_each_user restart_hirzd
+                echo "hirz was upgraded. If hirzd still runs the old version, restart it: systemctl --user restart hirzd"
+            else
+                for_each_user start_hirzd
+            fi
         fi
         ;;
 esac
 
 if [ "$1" = "configure" ] && [ -z "$2" ]; then
-    echo "hirz is installed. Each user sets it up with:"
-    echo "    hirz init"
-    echo "    systemctl --user enable --now hirzd"
+    echo "hirz is installed and starts with every desktop session."
+    echo "The first time a site asks for a passkey, hirz opens a setup window."
+    echo "To set it up in a terminal instead, run: hirz init"
 fi
 
 exit 0

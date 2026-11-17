@@ -17,6 +17,7 @@ pub enum Tool {
     Pkcheck,
     FprintdVerify,
     FprintdList,
+    Gdbus,
 }
 
 impl Tool {
@@ -26,6 +27,7 @@ impl Tool {
             Tool::Pkcheck => "pkcheck",
             Tool::FprintdVerify => "fprintd-verify",
             Tool::FprintdList => "fprintd-list",
+            Tool::Gdbus => "gdbus",
         }
     }
 }
@@ -94,6 +96,13 @@ pub enum Race {
 pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> RunResult;
     fn run_with_dialog(&self, main: &CommandSpec, dialog: &CommandSpec) -> Race;
+    /// Like [`CommandRunner::run`] with `input` on the program's standard input instead of
+    /// `/dev/null`. The only way a secret text reaches a window: never argv, the environment or a
+    /// file. At most [`MAX_INPUT`] bytes.
+    fn run_with_input(&self, spec: &CommandSpec, input: &[u8]) -> RunResult {
+        let _ = (spec, input);
+        RunResult::Failed("standard input is not supported".into())
+    }
     fn window_icon(&self) -> Option<PathBuf> {
         None
     }
@@ -126,6 +135,8 @@ pub const WINDOW_ICONS: &[&str] = &[
     "/usr/local/share/icons/hicolor/scalable/apps/hirz.svg",
 ];
 
+/// Fits the smallest pipe buffer Linux gives (one page), so writing it never waits for the program.
+pub const MAX_INPUT: usize = 4096;
 const CHILD_PATH: &str = "/usr/bin:/bin";
 const OUTPUT_CAP: usize = 16 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -205,12 +216,23 @@ struct Running {
 
 impl Running {
     fn start(spec: &CommandSpec) -> Result<Running, RunResult> {
+        Running::start_with(spec, None)
+    }
+
+    fn start_with(spec: &CommandSpec, input: Option<&[u8]>) -> Result<Running, RunResult> {
+        if input.is_some_and(|i| i.len() > MAX_INPUT) {
+            return Err(RunResult::Failed("input over the size limit".into()));
+        }
         let Some(path) = resolve_tool(spec.tool.binary_name()) else {
             return Err(RunResult::NotFound);
         };
         let mut cmd = Command::new(path);
         cmd.args(&spec.args)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env_clear()
@@ -232,6 +254,11 @@ impl Running {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(RunResult::NotFound),
             Err(e) => return Err(RunResult::Failed(format!("spawn failed: {}", e.kind()))),
         };
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+            use std::io::Write;
+            // A program that exits without reading closes the pipe; its exit status tells why.
+            let _ = stdin.write_all(input);
+        }
         let out = spawn_reader(child.stdout.take());
         let err = spawn_reader(child.stderr.take());
         Ok(Running {
@@ -273,9 +300,9 @@ fn past(deadline: Option<Instant>) -> bool {
     deadline.is_some_and(|d| Instant::now() >= d)
 }
 
-impl CommandRunner for SystemRunner {
-    fn run(&self, spec: &CommandSpec) -> RunResult {
-        let mut child = match Running::start(spec) {
+impl SystemRunner {
+    fn run_started(started: Result<Running, RunResult>, spec: &CommandSpec) -> RunResult {
+        let mut child = match started {
             Ok(c) => c,
             Err(r) => return r,
         };
@@ -292,6 +319,16 @@ impl CommandRunner for SystemRunner {
             }
             std::thread::sleep(POLL_INTERVAL);
         }
+    }
+}
+
+impl CommandRunner for SystemRunner {
+    fn run(&self, spec: &CommandSpec) -> RunResult {
+        SystemRunner::run_started(Running::start(spec), spec)
+    }
+
+    fn run_with_input(&self, spec: &CommandSpec, input: &[u8]) -> RunResult {
+        SystemRunner::run_started(Running::start_with(spec, Some(input)), spec)
     }
 
     fn run_with_dialog(&self, main: &CommandSpec, dialog: &CommandSpec) -> Race {
@@ -545,6 +582,30 @@ mod tests {
             RunResult::Exited { code, stdout, .. } => {
                 assert_eq!(code, Some(0));
                 assert!(stdout.starts_with(b"pkcheck"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_reaches_standard_input_and_nothing_else() {
+        if resolve_tool("pkcheck").is_none() {
+            return;
+        }
+        let spec = CommandSpec {
+            tool: Tool::Pkcheck,
+            args: vec!["--version".into()],
+            env: EnvPolicy::System,
+            timeout: Duration::from_secs(10),
+        };
+        assert!(matches!(
+            SystemRunner.run_with_input(&spec, &vec![b'x'; MAX_INPUT.saturating_add(1)]),
+            RunResult::Failed(_)
+        ));
+        match SystemRunner.run_with_input(&spec, b"alpha bravo") {
+            RunResult::Exited { code, stdout, .. } => {
+                assert_eq!(code, Some(0));
+                assert!(!stdout.windows(5).any(|w| w == b"alpha"));
             }
             other => panic!("unexpected {other:?}"),
         }

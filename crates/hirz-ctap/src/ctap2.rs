@@ -98,6 +98,51 @@ pub trait Authenticator: Send {
 
 /// How long a getInfo answer about user verification is reused: the check may start helper programs.
 const UV_CACHE: Duration = Duration::from_secs(10);
+/// How long a declined request is remembered (docs/uhid.md, "Refusals end the ceremony").
+pub const DECLINE_MEMORY: Duration = Duration::from_secs(5);
+const MAX_DECLINES: usize = 4;
+
+/// A declined makeCredential or getAssertion: the command, the RP id and the client data hash,
+/// nothing else.
+type Declined = (u8, String, [u8; 32]);
+
+/// Requests the user declined a moment ago. Firefox resends a request that got
+/// CTAP2_ERR_OPERATION_DENIED from an authenticator with built-in user verification at once and
+/// without end; the same request again within [`DECLINE_MEMORY`] is refused with
+/// CTAP2_ERR_NOT_ALLOWED, which ends Firefox's ceremony, without asking anyone.
+#[derive(Debug)]
+struct Declines {
+    memory: Duration,
+    recent: Vec<(Instant, Declined)>,
+}
+
+impl Declines {
+    fn forget_old(&mut self, now: Instant) {
+        let memory = self.memory;
+        self.recent
+            .retain(|(at, _)| now.saturating_duration_since(*at) < memory);
+    }
+
+    /// True, once, when `key` was declined within the memory time.
+    fn take(&mut self, key: &Declined, now: Instant) -> bool {
+        self.forget_old(now);
+        match self.recent.iter().position(|(_, k)| k == key) {
+            Some(i) => {
+                self.recent.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn remember(&mut self, key: Declined, now: Instant) {
+        self.forget_old(now);
+        if self.recent.len() >= MAX_DECLINES {
+            self.recent.remove(0);
+        }
+        self.recent.push((now, key));
+    }
+}
 
 type Res<T> = Result<T, Status>;
 
@@ -567,6 +612,7 @@ pub struct Ctap2Handler<A> {
     engine: Mutex<A>,
     keys: Mutex<KeyAgreementKeys>,
     uv_seen: Mutex<Option<(Instant, bool)>>,
+    declines: Mutex<Declines>,
 }
 
 impl<A: Authenticator> Ctap2Handler<A> {
@@ -575,7 +621,34 @@ impl<A: Authenticator> Ctap2Handler<A> {
             engine: Mutex::new(engine),
             keys: Mutex::new(KeyAgreementKeys::new()),
             uv_seen: Mutex::new(None),
+            declines: Mutex::new(Declines {
+                memory: DECLINE_MEMORY,
+                recent: Vec::new(),
+            }),
         }
+    }
+
+    /// Changes how long a declined request is remembered (tests).
+    pub fn with_decline_memory(self, memory: Duration) -> Self {
+        self.declines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .memory = memory;
+        self
+    }
+
+    /// Runs a user-facing makeCredential or getAssertion: refused at once when the user declined the
+    /// same request a moment ago, and remembered when the user declines it now.
+    fn unless_declined<T>(&self, key: Declined, run: impl FnOnce() -> Res<T>) -> Res<T> {
+        let declines = || self.declines.lock().unwrap_or_else(PoisonError::into_inner);
+        if declines().take(&key, Instant::now()) {
+            return Err(Status::NotAllowed);
+        }
+        let result = run();
+        if result.as_ref().err() == Some(&Status::OperationDenied) {
+            declines().remember(key, Instant::now());
+        }
+        result
     }
 
     /// The `uv` option of getInfo. Never waits for a request that holds the authenticator: it then
@@ -666,7 +739,14 @@ impl<A: Authenticator> Ctap2Handler<A> {
             return self.touch_probe(ctx);
         }
         let req = p.into_request()?;
-        let resp = self.with_engine(ctx, |e| e.make_credential(&req, ctx))?;
+        let key = (
+            command::MAKE_CREDENTIAL,
+            req.rp.id.clone(),
+            req.client_data_hash,
+        );
+        let resp = self.unless_declined(key, || {
+            self.with_engine(ctx, |e| e.make_credential(&req, ctx))
+        })?;
         encode_make_credential(&resp)
     }
 
@@ -692,7 +772,17 @@ impl<A: Authenticator> Ctap2Handler<A> {
         };
         let user_selected = req.allow_list.is_empty() && req.up;
         let hmac = wrapper.as_ref().map(|w| w as &dyn HmacSecretWrap);
-        let resp = self.with_engine(ctx, |e| e.get_assertion(&req, hmac, ctx))?;
+        let ask = || self.with_engine(ctx, |e| e.get_assertion(&req, hmac, ctx));
+        let resp = if req.up {
+            let key = (
+                command::GET_ASSERTION,
+                req.rp_id.clone(),
+                req.client_data_hash,
+            );
+            self.unless_declined(key, ask)?
+        } else {
+            ask()?
+        };
         encode_get_assertion(&resp, user_selected)
     }
 

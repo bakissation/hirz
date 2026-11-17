@@ -18,6 +18,7 @@ HIRZD="/snap/hirz/current/bin/hirzd"
 
 UDEV_DIR=/etc/udev/rules.d
 UNIT=/etc/systemd/user/hirzd.service
+WANTS=/etc/systemd/user/graphical-session.target.wants/hirzd.service
 MODULES=/etc/modules-load.d/hirz.conf
 MANIFEST=/usr/lib/mozilla/native-messaging-hosts/hirz.json
 POLICY_NAME=dev.hirz.authenticate.policy
@@ -25,6 +26,16 @@ POLICY_NAME=dev.hirz.authenticate.policy
 die() {
   echo "hirz.setup-system: $*" >&2
   exit 1
+}
+
+# Runs systemctl in the user manager of every logged-in user; failures are ignored.
+each_user() {
+  for dir in /run/user/*; do
+    [ -d "$dir" ] || continue
+    user=$(getent passwd "${dir##*/}" | cut -d: -f1)
+    [ -n "$user" ] || continue
+    systemctl --user --machine="$user@.host" "$@" >/dev/null 2>&1 || true
+  done
 }
 
 # polkit 126 and newer also read actions from /etc; older versions only from /usr/share.
@@ -75,9 +86,13 @@ do_install() {
   systemctl daemon-reload 2>/dev/null || true
   # Only now, with the rules in place, may the broker's socket accept clients.
   snap start --enable hirz.uhid-broker || die "could not start the broker: snap start --enable hirz.uhid-broker"
-  echo "hirz host files installed and the broker started. Each user now runs:"
-  echo "    hirz init"
-  echo "    systemctl --user enable --now hirzd"
+  # As the packages do: hirzd for every user, started now for those logged in (graphical only).
+  systemctl --global enable hirzd.service 2>/dev/null || true
+  grep -qxF "$WANTS" "$LIST" 2>/dev/null || echo "$WANTS" >>"$LIST"
+  each_user daemon-reload
+  each_user start --no-block hirzd.service
+  echo "hirz host files installed, the broker started and hirzd enabled for every user."
+  echo "The first time a site asks for a passkey, hirz opens a setup window (or run: hirz init)."
 }
 
 do_remove() {
@@ -86,6 +101,8 @@ do_remove() {
   if [ "${1:-}" != --no-service ]; then
     snap stop --disable hirz.uhid-broker 2>/dev/null || true
   fi
+  each_user stop hirzd.service
+  systemctl --global disable hirzd.service 2>/dev/null || true
   if [ -f "$LIST" ]; then
     while IFS= read -r f; do
       rm -f "$f"

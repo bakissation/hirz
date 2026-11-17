@@ -34,6 +34,9 @@ fi
 
 CARGO_BUILD_JOBS=4 cargo build --release --locked -p hirz-cli -p hirzd -p hirz-nmh -p hirz-uhid-broker
 
+if ! "$REL/hirz" status >/dev/null 2>&1 && [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+  "$REL/hirz" init --gui || true
+fi
 if ! "$REL/hirz" status >/dev/null 2>&1; then
   echo "No hirz vault yet. Create one first (it shows your recovery phrase once):"
   echo "  $REL/hirz init"

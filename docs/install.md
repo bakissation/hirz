@@ -160,45 +160,53 @@ signature; [release.md](release.md#verifying-a-release) shows how to check them.
    makepkg -si
    ```
 
-2. Arch packages do not start services on their own. Start the virtual security key broker:
-
-   ```sh
-   sudo systemctl enable --now hirz-uhid-broker.socket
-   ```
-
-On Ubuntu, Debian and Fedora the package starts the broker for you.
+Every package, the AUR one included, starts the virtual security key broker and turns on the
+hirz daemon (`hirzd`) for every user, at every login to the desktop. Users who are logged in
+while you install get it right away.
 
 ## 2. Set up hirz for your user
 
-Do this once per user account, without `sudo`.
+Each user does this once. There is nothing to start: the package already runs hirz in the
+background.
 
-1. Create your vault. To use your passkeys on several computers, put the vault in a folder
-   your sync tool copies (see [sync.md](sync.md)), for example:
+### In the setup window
 
-   ```sh
-   hirz init --vault ~/Sync/hirz
-   ```
+The first time a site asks your browser for a passkey or a security key, for example when
+you click Register on https://webauthn.io, hirz opens a setup window. That first request
+fails; try again when setup is done.
 
-   Or keep it on this computer only:
+1. Click **Set up**. hirz creates your vault in `~/.local/share/hirz/vault`, on this computer
+   only.
+2. hirz shows a 24-word recovery phrase. Write it down on paper and keep it safe: it is the
+   only way back to your passkeys if you lose your computers. hirz then asks for two of the
+   words to check.
+3. If Firefox is installed without the hirz add-on, hirz offers to open the add-on's page on
+   addons.mozilla.org. Click "Add to Firefox" there, or skip it (see section 3).
 
-   ```sh
-   hirz init
-   ```
+If you close the window, hirz does not open it again for 10 minutes; `hirz init` works at
+any time.
 
-   hirz shows a 24-word recovery phrase. Write it down on paper and keep it safe: it is the
-   only way back to your passkeys if you lose your computers. hirz then asks for three of
-   the words to check.
+On a second computer, click **I already use hirz on another computer** instead: the window
+shows the two commands that join this computer to your vault.
 
-   On a second computer, wait until your sync tool has copied the vault folder, then run
-   `hirz join --vault ~/Sync/hirz` instead and type the recovery phrase.
+### In a terminal
 
-2. Start the hirz daemon now and at every login:
+To put the vault in a folder your sync tool copies, so your passkeys reach your other
+computers (see [sync.md](sync.md)), create it in a terminal instead, for example:
 
-   ```sh
-   systemctl --user enable --now hirzd
-   ```
+```sh
+hirz init --vault ~/Sync/hirz
+```
 
-3. Check that everything is found:
+`hirz init` alone keeps it on this computer. The terminal shows the same 24 words, asks for
+three of them, and ends with the same offer for the Firefox add-on.
+
+On a second computer, wait until your sync tool has copied the vault folder, then run
+`hirz join --vault ~/Sync/hirz` instead and type the recovery phrase.
+
+### Check
+
+Check that everything is found:
 
    ```sh
    hirz status
@@ -208,14 +216,29 @@ From now on, sites that ask for a security key or passkey can use hirz in Firefo
 Chromium. Every time a site wants a passkey, hirz shows a window naming the site and asks
 for your password, your fingerprint or your hirz PIN (see [approval.md](approval.md)).
 
+### Turning hirz off for one user
+
+The package turns `hirzd` on for all users, so `systemctl --user disable` does not turn it
+off. Mask it instead:
+
+```sh
+systemctl --user mask --now hirzd
+```
+
+`systemctl --user unmask hirzd` turns it back on from the next login. An administrator turns
+it off for every user with `sudo systemctl --global disable hirzd`; package upgrades keep
+that choice.
+
 ## 3. Optional: the Firefox extension
 
 The extension lets Firefox use hirz as a passkey provider instead of a security key, so
 sites see a regular passkey prompt. The virtual security key works without it.
 
 Once Mozilla has reviewed it (submitted with each release, available from the first
-release), install it from addons.mozilla.org: search for "hirz" in Firefox's add-ons
-manager. Check that the developer link points to github.com/bakissation/hirz.
+release), install it from addons.mozilla.org: hirz offers to open its page
+(https://addons.mozilla.org/firefox/addon/hirz/) at the end of setup, or search for "hirz"
+in Firefox's add-ons manager. Check that the developer link points to
+github.com/bakissation/hirz.
 
 Until then the extension is unsigned, so regular Firefox only loads it until the next
 restart:
@@ -247,13 +270,7 @@ See [packaging/flatpak/README.md](../packaging/flatpak/README.md).
 
 ## Uninstalling
 
-1. Stop the daemon for your user (each user who enabled it):
-
-   ```sh
-   systemctl --user disable --now hirzd
-   ```
-
-2. Remove the package:
+1. Remove the package. It stops `hirzd` for every logged-in user and turns it off:
 
    ```sh
    sudo apt remove hirz      # Ubuntu, Debian
@@ -261,7 +278,10 @@ See [packaging/flatpak/README.md](../packaging/flatpak/README.md).
    sudo pacman -Rns hirz     # Arch
    ```
 
-3. Remove the extension in Firefox under `about:addons`, if you installed it.
+   `sudo apt purge hirz` also forgets whether the broker and `hirzd` were turned on, so a
+   later install starts from the defaults again.
+
+2. Remove the extension in Firefox under `about:addons`, if you installed it.
 
 Removing the package never deletes your vault. Your passkeys stay in the vault folder and
 in `~/.local/state/hirz` (this computer's keys). Delete those folders only if you are sure
@@ -274,7 +294,7 @@ Start with `hirz status`. It shows each part and what is missing.
 
 | What `hirz status` says | What to do |
 |---|---|
-| Not set up | Run `hirz init`, or `hirz join --vault DIR` on a second computer |
+| Not set up | Ask a site for a passkey to get the setup window, or run `hirz init`, or `hirz join --vault DIR` on a second computer |
 | Vault folder missing | Your sync tool has not copied it yet, or it moved. Check the folder |
 | Broker socket not present | `sudo systemctl enable --now hirz-uhid-broker.socket` |
 | polkit action not installed, or zenity missing or older than 4 | Reinstall the package, or update zenity |

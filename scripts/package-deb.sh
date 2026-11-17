@@ -221,7 +221,8 @@ Description: passkey authenticator for Linux
  your account password through polkit, your fingerprint through fprintd, or a
  hirz PIN.
  .
- Each user turns the daemon on with: systemctl --user enable --now hirzd
+ The daemon starts with every desktop session. The first time a site asks
+ for a passkey, hirz opens a window that sets up the vault.
 EOF
 install -m 0755 packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm "$pkg/DEBIAN/"
 (

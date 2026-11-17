@@ -13,6 +13,81 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 
 const MAX_LISTED_SKIPPED: usize = 10;
+const BROKER_ANSWER_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a connection to the broker socket found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Broker {
+    Missing,
+    /// Something accepted the connection: the broker, or systemd holding its socket.
+    Answers,
+    /// The socket file is there but nobody listens on it.
+    Stale,
+    NoAnswer,
+    Error(String),
+}
+
+impl Broker {
+    fn name(&self) -> &'static str {
+        match self {
+            Broker::Missing => "missing",
+            Broker::Answers => "answers",
+            Broker::Stale => "stale",
+            Broker::NoAnswer => "no_answer",
+            Broker::Error(_) => "error",
+        }
+    }
+}
+
+/// Sends the broker's probe hello and waits for its answer; the broker creates no device for it.
+/// Runs on its own thread so a socket whose backlog is full cannot hold `hirz status` up for more
+/// than `wait`.
+pub fn probe_broker(path: &std::path::Path, wait: std::time::Duration) -> Broker {
+    if !std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+        return Broker::Missing;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = path.to_path_buf();
+    let started = std::thread::Builder::new()
+        .name("broker-probe".into())
+        .spawn(move || {
+            let _ = tx.send(ask_broker(&target, wait));
+        });
+    if started.is_err() {
+        return Broker::Error("cannot start a thread".into());
+    }
+    match rx.recv_timeout(wait) {
+        Ok(Ok(true)) => Broker::Answers,
+        Ok(Ok(false)) => Broker::Error("it did not answer like the hirz broker".into()),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Broker::Stale,
+        Ok(Err(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Broker::NoAnswer
+        }
+        Ok(Err(e)) => Broker::Error(crate::error::describe_io(e.kind())),
+        Err(_) => Broker::NoAnswer,
+    }
+}
+
+/// True when the answer is the broker's `ALIVE`; reads at most that many bytes.
+fn ask_broker(path: &std::path::Path, wait: std::time::Duration) -> std::io::Result<bool> {
+    use hirz_sys::broker::{ALIVE, HELLO_PROBE};
+    use std::io::{Read, Write};
+    let mut s = std::os::unix::net::UnixStream::connect(path)?;
+    s.set_write_timeout(Some(wait))?;
+    s.set_read_timeout(Some(wait))?;
+    s.write_all(&HELLO_PROBE)?;
+    let mut answer = [0u8; ALIVE.len()];
+    match s.read_exact(&mut answer) {
+        Ok(()) => Ok(answer == ALIVE),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
 
 #[derive(Debug, Default)]
 struct VaultInfo {
@@ -57,7 +132,7 @@ struct Report {
     snap: bool,
     flatpak: bool,
     broker_socket: PathBuf,
-    broker_present: bool,
+    broker: Broker,
 }
 
 fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
@@ -116,9 +191,7 @@ fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
         })
         .collect();
     let broker_socket = env.broker_socket.clone();
-    let broker_present = std::fs::metadata(&broker_socket)
-        .map(|m| m.file_type().is_socket())
-        .unwrap_or(false);
+    let broker = probe_broker(&broker_socket, BROKER_ANSWER_TIME);
     Ok(Report {
         vault_dir,
         state_dir: env.state_dir().to_path_buf(),
@@ -138,7 +211,7 @@ fn gather(ctx: &Ctx<'_>) -> CliResult<Report> {
         snap: snap_firefox(env),
         flatpak: flatpak_firefox(env),
         broker_socket,
-        broker_present,
+        broker,
     })
 }
 
@@ -215,7 +288,8 @@ fn to_json(r: &Report) -> Value {
         },
         "uhid_broker": {
             "socket": r.broker_socket.display().to_string(),
-            "present": r.broker_present,
+            "present": r.broker != Broker::Missing,
+            "state": r.broker.name(),
         },
     })
 }
@@ -418,13 +492,26 @@ fn print_text(ctx: &mut Ctx<'_>, r: &Report) -> CliResult {
     }
     ctx.say(&format!(
         "Security key:   {}",
-        if r.broker_present {
-            format!("broker socket found ({})", r.broker_socket.display())
-        } else {
-            format!(
+        match &r.broker {
+            Broker::Answers => format!("the broker answers ({})", r.broker_socket.display()),
+            Broker::Missing => format!(
                 "broker socket {} not found (only needed for the virtual security key; see docs/uhid.md)",
                 r.broker_socket.display()
-            )
+            ),
+            Broker::Stale => format!(
+                "broker socket {} is stale: nothing answers on it. Restart the broker\n                \
+                 (systemctl restart hirz-uhid-broker.socket; see docs/uhid.md)",
+                r.broker_socket.display()
+            ),
+            Broker::NoAnswer => format!(
+                "the broker socket {} did not answer within {} s",
+                r.broker_socket.display(),
+                BROKER_ANSWER_TIME.as_secs()
+            ),
+            Broker::Error(why) => format!(
+                "cannot connect to the broker socket {}: {why}",
+                r.broker_socket.display()
+            ),
         }
     ))?;
     Ok(())

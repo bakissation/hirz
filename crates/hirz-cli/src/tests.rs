@@ -93,6 +93,7 @@ impl Machine {
 struct FakeSys;
 
 impl System for FakeSys {
+    fn notify(&self, _: &str) {}
     fn uv_methods(&self, _env: &Env) -> Result<Vec<UvMethod>, String> {
         Ok(vec![UvMethod::Pin])
     }
@@ -433,6 +434,15 @@ fn parse_table() {
             ),
         ),
         (
+            &["init", "--gui", "--name", "laptop"],
+            inv(
+                None,
+                Command::InitGui {
+                    name: Some("laptop".into()),
+                },
+            ),
+        ),
+        (
             &["join", "--vault", "/v", "--name", "desk"],
             inv(
                 Some("/v"),
@@ -696,6 +706,8 @@ fn parse_table() {
         &["devices", "deny"],
         &["devices", "frob"],
         &["init", "--request"],
+        &["init", "--gui", "--yes-i-saved-it"],
+        &["status", "--gui"],
     ];
     for args in usage {
         let e = args::parse(&os(args)).unwrap_err();
@@ -3405,4 +3417,626 @@ fn remove_device_lists_the_devices_it_approved_and_devices_flags_shared_names() 
     );
     let out = run(&a, &["devices"], &[]).ok().to_string();
     assert!(out.contains("2 devices in use"), "{out}");
+}
+
+type Window = (Vec<String>, Option<Vec<u8>>);
+
+/// zenity as `hirz init --gui` drives it: answers by window type, records every window and what
+/// reached its standard input.
+#[derive(Default)]
+struct ScriptedZenity {
+    calls: RefCell<Vec<Window>>,
+    /// Exit status and output of the first window.
+    welcome: (i32, &'static str),
+    wrong_words: bool,
+    cancel_phrase: bool,
+    open_firefox_page: bool,
+    zenity_major: Option<u32>,
+    /// A held request gives up while the phrase window is open.
+    gave_up: Option<PathBuf>,
+    cancel_word: bool,
+    /// A link (path, target) appears while the phrase window is open.
+    plant_link: Option<(PathBuf, PathBuf)>,
+}
+
+impl ScriptedZenity {
+    fn calls(&self) -> Vec<Window> {
+        self.calls.borrow().clone()
+    }
+    fn texts(&self, kind: &str) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter(|(args, _)| args[0] == kind)
+            .filter_map(|(args, _)| {
+                args.iter()
+                    .find_map(|a| a.strip_prefix("--text=").map(str::to_string))
+            })
+            .collect()
+    }
+    fn phrases(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter_map(|(_, input)| input.map(|i| String::from_utf8(i).unwrap()))
+            .collect()
+    }
+}
+
+fn exited(code: i32, stdout: &[u8]) -> hirz_uv::runner::RunResult {
+    hirz_uv::runner::RunResult::Exited {
+        code: Some(code),
+        stdout: Zeroizing::new(stdout.to_vec()),
+        stderr: Vec::new(),
+        elapsed: std::time::Duration::ZERO,
+    }
+}
+
+impl hirz_uv::CommandRunner for &ScriptedZenity {
+    fn run(&self, spec: &hirz_uv::runner::CommandSpec) -> hirz_uv::runner::RunResult {
+        assert_eq!(spec.tool, hirz_uv::runner::Tool::Zenity);
+        self.calls.borrow_mut().push((spec.args.clone(), None));
+        let args = &spec.args;
+        match args[0].as_str() {
+            "--question" if args.iter().any(|a| a.starts_with("--extra-button=")) => {
+                // The default answer is the Set up button.
+                match self.welcome {
+                    (0, "") => exited(1, b"Set up\n"),
+                    (code, out) => exited(code, out.as_bytes()),
+                }
+            }
+            "--question" => exited(i32::from(!self.open_firefox_page), b""),
+            "--entry" => {
+                let text = args.iter().find_map(|a| a.strip_prefix("--text=")).unwrap();
+                let n: usize = text
+                    .split_whitespace()
+                    .find_map(|w| w.parse().ok())
+                    .unwrap();
+                let phrases = self.phrases();
+                let words = phrase_words(phrases.last().unwrap());
+                if self.cancel_word {
+                    exited(1, b"")
+                } else if self.wrong_words {
+                    exited(0, b"zzzz\n")
+                } else {
+                    exited(0, format!("{}\n", words[n - 1].to_uppercase()).as_bytes())
+                }
+            }
+            _ => exited(0, b""),
+        }
+    }
+    fn run_with_input(
+        &self,
+        spec: &hirz_uv::runner::CommandSpec,
+        input: &[u8],
+    ) -> hirz_uv::runner::RunResult {
+        self.calls
+            .borrow_mut()
+            .push((spec.args.clone(), Some(input.to_vec())));
+        if let Some(runtime) = &self.gave_up {
+            hirz_uv::first_run::mark_waiter_gone(runtime);
+        }
+        if let Some((link, target)) = &self.plant_link {
+            let _ = std::os::unix::fs::symlink(target, link);
+        }
+        exited(i32::from(self.cancel_phrase), b"")
+    }
+    fn run_with_dialog(
+        &self,
+        _: &hirz_uv::runner::CommandSpec,
+        _: &hirz_uv::runner::CommandSpec,
+    ) -> hirz_uv::runner::Race {
+        panic!("the setup never races two windows")
+    }
+    fn tool_available(&self, tool: hirz_uv::runner::Tool) -> bool {
+        tool == hirz_uv::runner::Tool::Zenity
+    }
+    fn polkit_action_installed(&self) -> bool {
+        false
+    }
+    fn process_identity(&self) -> Option<hirz_uv::polkit::ProcessIdentity> {
+        None
+    }
+    fn username(&self) -> Option<String> {
+        None
+    }
+    fn zenity_major_version(&self) -> Option<u32> {
+        self.zenity_major
+    }
+}
+
+struct OpenSys {
+    opened: RefCell<Vec<String>>,
+    notices: RefCell<Vec<String>>,
+}
+
+impl System for OpenSys {
+    fn uv_methods(&self, env: &Env) -> Result<Vec<UvMethod>, String> {
+        FakeSys.uv_methods(env)
+    }
+    fn zenity(&self) -> bool {
+        true
+    }
+    fn hostname(&self) -> Option<String> {
+        FakeSys.hostname()
+    }
+    fn pairing_approver<'s>(&'s self, env: &Env) -> Box<dyn Approver + 's> {
+        FakeSys.pairing_approver(env)
+    }
+    fn now(&self) -> u64 {
+        1_700_000_000
+    }
+    fn open_url(&self, url: &str) -> bool {
+        self.opened.borrow_mut().push(url.to_string());
+        true
+    }
+    fn notify(&self, text: &str) {
+        self.notices.borrow_mut().push(text.to_string());
+    }
+}
+
+fn gui_machine(tag: &str) -> Machine {
+    let mut m = Machine::new(tag);
+    m.env.runtime_dir = Some(m.tmp.path("run"));
+    m
+}
+
+fn run_gui(m: &Machine, sys: &dyn System, zenity: &ScriptedZenity) -> Result<Exit, CliError> {
+    let mut out = SharedBuf::default();
+    let mut script = Script {
+        answers: VecDeque::new(),
+        out: out.clone(),
+        wrong_words: false,
+        prompts: Vec::new(),
+        notices: Vec::new(),
+    };
+    let mut ctx = Ctx {
+        out: &mut out,
+        prompt: &mut script,
+        env: &m.env,
+        sys,
+        kdf: FAST,
+        vault_flag: None,
+        program: "hirz".into(),
+        out_is_terminal: false,
+    };
+    let mut windows = crate::cmd_gui::ZenityWindows::with_runner(zenity);
+    let r = crate::cmd_gui::init_gui(&mut ctx, None, &mut windows);
+    assert!(script.prompts.is_empty(), "nothing is asked in a terminal");
+    r
+}
+
+fn add_firefox_profile(m: &Machine, with_addon: bool) {
+    let root = m.tmp.path(".mozilla/firefox");
+    let profile = root.join("abc.default-release");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(
+        root.join("profiles.ini"),
+        "[Profile0]\nName=default\nIsRelative=1\nPath=abc.default-release\n",
+    )
+    .unwrap();
+    let id = if with_addon {
+        hirz_uv::first_run::ADDON_ID
+    } else {
+        "other@example.com"
+    };
+    fs::write(
+        profile.join("extensions.json"),
+        format!(r#"{{"schemaVersion":36,"addons":[{{"id":"{id}","active":true}}]}}"#),
+    )
+    .unwrap();
+}
+
+#[test]
+fn gui_setup_creates_the_vault_and_shows_the_phrase_only_on_standard_input() {
+    let m = gui_machine("gui");
+    let zenity = ScriptedZenity::default();
+    let sys = OpenSys {
+        opened: RefCell::new(Vec::new()),
+        notices: RefCell::new(Vec::new()),
+    };
+    assert_eq!(run_gui(&m, &sys, &zenity), Ok(Exit::Ok));
+
+    let vault = m.default_vault();
+    assert!(vault.join(hirz_vault::HEADER_FILE).is_file());
+    assert_eq!(
+        fs::read(m.state().join("vault-path")).unwrap(),
+        vault.as_os_str().as_encoded_bytes()
+    );
+    let phrases = zenity.phrases();
+    assert_eq!(phrases.len(), 1);
+    let words = phrase_words(&phrases[0]);
+    assert!(RecoveryPhrase::parse(&words.join(" ")).is_ok());
+    assert!(phrases[0].contains("test-host"));
+    assert!(phrases[0].contains("Do not copy, paste or screenshot"));
+    let joined = words.join(" ");
+    for (args, input) in zenity.calls() {
+        let argv = args.join("\n");
+        if input.is_none() {
+            for pair in words.windows(2) {
+                assert!(!argv.contains(&pair.join(" ")), "{argv}");
+            }
+        } else {
+            assert_eq!(args[0], "--text-info");
+            assert!(args.iter().all(|a| !a.contains(&joined)));
+        }
+        assert!(!argv.contains(&words[..4].join("  ")));
+    }
+    assert_eq!(zenity.texts("--entry").len(), 3, "three words are checked");
+    assert!(zenity.texts("--question").len() == 1, "no Firefox here");
+    let done = zenity.texts("--info");
+    let done = done.last().unwrap();
+    assert!(done.contains(&vault.display().to_string()), "{done}");
+    assert!(done.contains("I already use hirz on another computer"));
+    for window in zenity
+        .texts("--info")
+        .iter()
+        .chain(&zenity.texts("--question"))
+    {
+        assert!(
+            !window.contains('`') && !window.contains("hirz join"),
+            "{window}"
+        );
+    }
+    let phrase = &zenity.phrases()[0];
+    assert!(phrase.contains("this phrase and a copy of the vault folder are the only way"));
+    for line in phrase.lines() {
+        let grid = line.trim_start().starts_with(|c: char| c.is_ascii_digit());
+        assert!(
+            !line.starts_with(' ') || grid,
+            "a hard-wrapped line: {line:?}"
+        );
+    }
+    assert!(sys.opened.borrow().is_empty());
+    assert!(!hirz_uv::first_run::window_open(&m.tmp.path("run")));
+    assert!(!hirz_uv::first_run::cancelled_recently(
+        &m.tmp.path("run"),
+        1_700_000_000
+    ));
+
+    let again = ScriptedZenity::default();
+    let r = run_gui(&m, &sys, &again);
+    assert_eq!(r.unwrap_err().exit, Exit::Failed);
+    assert!(again.texts("--error")[0].contains("already set up"));
+    assert!(again.phrases().is_empty());
+}
+
+#[test]
+fn a_completed_gui_setup_ends_an_earlier_quiet_period() {
+    let m = gui_machine("gui-clears");
+    let runtime = m.tmp.path("run");
+    hirz_uv::first_run::mark_cancelled(&runtime, 1_700_000_000).unwrap();
+    assert!(hirz_uv::first_run::claim_quiet_notice(
+        &runtime,
+        1_700_000_000
+    ));
+    let sys = OpenSys {
+        opened: RefCell::new(Vec::new()),
+        notices: RefCell::new(Vec::new()),
+    };
+    assert_eq!(run_gui(&m, &sys, &ScriptedZenity::default()), Ok(Exit::Ok));
+    assert!(!hirz_uv::first_run::cancelled_recently(
+        &runtime,
+        1_700_000_000
+    ));
+    assert!(!runtime.join("hirz").join("setup-quiet-noticed").exists());
+}
+
+#[test]
+fn gui_setup_tells_a_request_that_stopped_waiting_when_hirz_is_ready() {
+    for gave_up in [false, true] {
+        let m = gui_machine("gui-ready");
+        let runtime = m.tmp.path("run");
+        let sys = OpenSys {
+            opened: RefCell::new(Vec::new()),
+            notices: RefCell::new(Vec::new()),
+        };
+        hirz_uv::first_run::mark_waiter_gone(&runtime);
+        let zenity = ScriptedZenity {
+            gave_up: gave_up.then(|| runtime.clone()),
+            ..ScriptedZenity::default()
+        };
+        assert_eq!(run_gui(&m, &sys, &zenity), Ok(Exit::Ok));
+        if gave_up {
+            assert_eq!(
+                sys.notices.borrow().as_slice(),
+                [hirz_uv::first_run::READY_NOTICE]
+            );
+        } else {
+            assert!(sys.notices.borrow().is_empty(), "an old note is cleared");
+        }
+        assert!(!hirz_uv::first_run::take_waiter_gone(&runtime));
+    }
+}
+
+#[test]
+fn gui_setup_cancelled_or_joining_creates_nothing_and_stays_quiet() {
+    for (welcome, exit) in [
+        ((1, ""), Exit::Ok),
+        ((5, ""), Exit::Ok),
+        ((1, "Cancel\n"), Exit::Ok),
+        ((1, "I already use hirz on another computer\n"), Exit::Ok),
+    ] {
+        let m = gui_machine("gui-cancel");
+        let zenity = ScriptedZenity {
+            welcome,
+            ..ScriptedZenity::default()
+        };
+        let sys = OpenSys {
+            opened: RefCell::new(Vec::new()),
+            notices: RefCell::new(Vec::new()),
+        };
+        let r = run_gui(&m, &sys, &zenity);
+        assert_eq!(r.unwrap_or_else(|e| e.exit), exit, "{welcome:?}");
+        assert!(!m.default_vault().exists());
+        assert!(!m.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+        assert!(zenity.phrases().is_empty());
+        assert!(hirz_uv::first_run::cancelled_recently(
+            &m.tmp.path("run"),
+            1_700_000_000
+        ));
+        if !welcome.1.starts_with("I already") {
+            assert!(zenity.texts("--info").is_empty());
+        } else {
+            let info = zenity.texts("--info");
+            assert!(info[0].contains("hirz join --vault FOLDER --request"));
+            assert_eq!(info[0].matches("hirz ").count(), 1, "one command only");
+        }
+    }
+}
+
+fn rolled_back(m: &Machine) {
+    assert!(!m.default_vault().exists(), "the new vault folder is gone");
+    assert!(!m.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    assert!(!m.state().join("vault-path").exists());
+    assert!(
+        !m.state().exists(),
+        "the state folder this run made is gone too"
+    );
+    assert!(hirz_uv::first_run::cancelled_recently(
+        &m.tmp.path("run"),
+        1_700_000_000
+    ));
+}
+
+#[test]
+fn gui_setup_wrong_words_show_the_phrase_again_then_take_the_vault_back() {
+    let m = gui_machine("gui-wrong");
+    let zenity = ScriptedZenity {
+        wrong_words: true,
+        ..ScriptedZenity::default()
+    };
+    let sys = OpenSys {
+        opened: RefCell::new(Vec::new()),
+        notices: RefCell::new(Vec::new()),
+    };
+    let r = run_gui(&m, &sys, &zenity);
+    assert_eq!(r, Ok(Exit::Ok), "the unit the window runs in does not fail");
+    let phrases = zenity.phrases();
+    assert_eq!(phrases.len(), 3, "three rounds, as in the terminal");
+    assert!(!phrases[0].contains("That is not word"));
+    assert!(phrases[1].starts_with("That is not word"));
+    assert_eq!(
+        zenity.texts("--entry").len(),
+        3,
+        "a round ends at the first wrong word"
+    );
+    let info = zenity.texts("--info");
+    assert!(info[0].contains("not confirmed"), "{info:?}");
+    assert!(info[0].contains("the new vault was deleted"));
+    assert!(zenity.texts("--error").is_empty());
+    rolled_back(&m);
+
+    for (cancel_phrase, cancel_word) in [(true, false), (false, true)] {
+        let m = gui_machine("gui-cancel-phrase");
+        let zenity = ScriptedZenity {
+            cancel_phrase,
+            cancel_word,
+            ..ScriptedZenity::default()
+        };
+        assert_eq!(run_gui(&m, &sys, &zenity), Ok(Exit::Ok));
+        assert_eq!(zenity.texts("--entry").len(), usize::from(cancel_word));
+        assert!(zenity.texts("--info")[0].contains("the new vault was deleted"));
+        rolled_back(&m);
+    }
+}
+
+#[test]
+fn gui_setup_keeps_what_it_did_not_make_alone() {
+    let sys = OpenSys {
+        opened: RefCell::new(Vec::new()),
+        notices: RefCell::new(Vec::new()),
+    };
+    let m = gui_machine("gui-folder-there");
+    fs::create_dir_all(m.default_vault()).unwrap();
+    fs::create_dir_all(m.state()).unwrap();
+    fs::write(m.state().join("pin"), b"kept").unwrap();
+    let zenity = ScriptedZenity {
+        cancel_phrase: true,
+        ..ScriptedZenity::default()
+    };
+    assert_eq!(run_gui(&m, &sys, &zenity), Ok(Exit::Ok));
+    assert!(
+        m.default_vault().join(hirz_vault::HEADER_FILE).is_file(),
+        "a folder that was there before is never removed"
+    );
+    assert!(zenity.texts("--error")[0].contains("not confirmed"));
+
+    let m = gui_machine("gui-link");
+    let outside = m.tmp.path("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keep.txt"), b"x").unwrap();
+    let zenity = ScriptedZenity {
+        cancel_phrase: true,
+        plant_link: Some((m.default_vault().join("link"), outside.clone())),
+        ..ScriptedZenity::default()
+    };
+    assert_eq!(run_gui(&m, &sys, &zenity), Ok(Exit::Ok));
+    assert!(
+        outside.join("keep.txt").is_file(),
+        "a link is never followed"
+    );
+    assert!(m.default_vault().join(hirz_vault::HEADER_FILE).is_file());
+    assert!(zenity.texts("--error")[0].contains("not confirmed"));
+
+    let m = gui_machine("gui-state-kept");
+    fs::create_dir_all(m.state()).unwrap();
+    fs::write(m.state().join("pin"), b"kept").unwrap();
+    let zenity = ScriptedZenity {
+        cancel_phrase: true,
+        ..ScriptedZenity::default()
+    };
+    assert_eq!(run_gui(&m, &sys, &zenity), Ok(Exit::Ok));
+    assert!(!m.default_vault().exists());
+    assert_eq!(fs::read(m.state().join("pin")).unwrap(), b"kept");
+    assert!(!m.state().join(hirz_vault::DEVICE_STATE_FILE).exists());
+    assert!(!m.state().join("vault-path").exists());
+}
+
+#[test]
+fn terminal_init_keeps_an_unconfirmed_vault() {
+    let m = Machine::new("init-keeps");
+    let r = run_with(&m, &["init"], &[], true);
+    assert_eq!(r.exit(), Exit::Cancelled);
+    assert!(m.default_vault().join(hirz_vault::HEADER_FILE).is_file());
+}
+
+#[test]
+fn only_one_gui_setup_at_a_time_and_only_with_zenity_4() {
+    let m = gui_machine("gui-lock");
+    let held = hirz_uv::first_run::try_lock(&m.tmp.path("run"))
+        .unwrap()
+        .unwrap();
+    let zenity = ScriptedZenity::default();
+    let sys = OpenSys {
+        opened: RefCell::new(Vec::new()),
+        notices: RefCell::new(Vec::new()),
+    };
+    let r = run_gui(&m, &sys, &zenity);
+    assert!(r.unwrap_err().message.contains("already open"));
+    assert!(zenity.calls().is_empty());
+    drop(held);
+
+    let old = ScriptedZenity {
+        zenity_major: Some(3),
+        ..ScriptedZenity::default()
+    };
+    let r = run_gui(&m, &sys, &old);
+    assert!(r.unwrap_err().message.contains("too old"));
+    assert!(old.calls().is_empty());
+    assert!(!m.default_vault().exists());
+
+    let mut no_runtime = Machine::new("gui-no-runtime");
+    no_runtime.env.runtime_dir = None;
+    let r = run_gui(&no_runtime, &sys, &ScriptedZenity::default());
+    assert!(r.unwrap_err().message.contains("XDG_RUNTIME_DIR"));
+}
+
+#[test]
+fn gui_setup_offers_the_firefox_extension_when_it_is_missing() {
+    for (with_addon, answer) in [(false, true), (false, false), (true, true)] {
+        let m = gui_machine("gui-firefox");
+        add_firefox_profile(&m, with_addon);
+        let zenity = ScriptedZenity {
+            open_firefox_page: answer,
+            ..ScriptedZenity::default()
+        };
+        let sys = OpenSys {
+            opened: RefCell::new(Vec::new()),
+            notices: RefCell::new(Vec::new()),
+        };
+        assert_eq!(run_gui(&m, &sys, &zenity), Ok(Exit::Ok));
+        let asked = zenity
+            .texts("--question")
+            .iter()
+            .any(|t| t.contains("addons.mozilla.org"));
+        assert_eq!(asked, !with_addon);
+        let opened = sys.opened.borrow().clone();
+        if !with_addon && answer {
+            assert_eq!(opened, vec![hirz_uv::first_run::ADDON_PAGE.to_string()]);
+        } else {
+            assert!(opened.is_empty());
+        }
+    }
+}
+
+#[test]
+fn terminal_init_offers_the_firefox_extension_and_never_fails_on_it() {
+    for (with_addon, answer) in [(false, "y"), (false, "n"), (true, "y")] {
+        let m = Machine::new("init-firefox");
+        add_firefox_profile(&m, with_addon);
+        let sys = OpenSys {
+            opened: RefCell::new(Vec::new()),
+            notices: RefCell::new(Vec::new()),
+        };
+        let r = run_opts(
+            &m,
+            &["init"],
+            &[answer],
+            Opts {
+                sys: &sys,
+                program: "hirz",
+                terminal: false,
+                wrong_words: false,
+            },
+        );
+        r.ok();
+        let asked = r.prompts.iter().any(|p| p.contains("addons.mozilla.org"));
+        assert_eq!(asked, !with_addon);
+        let opened = sys.opened.borrow().clone();
+        if !with_addon && answer == "y" {
+            assert_eq!(opened, vec![hirz_uv::first_run::ADDON_PAGE.to_string()]);
+            assert!(r.out.contains("Add to Firefox"));
+        } else {
+            assert!(opened.is_empty());
+        }
+    }
+    let m = Machine::new("init-firefox-eof");
+    add_firefox_profile(&m, false);
+    let r = run(&m, &["init"], &[]);
+    r.ok();
+}
+
+#[test]
+fn status_tells_a_stale_broker_socket_from_a_live_one() {
+    let m = Machine::new("broker");
+    let socket = m.env.broker_socket.clone();
+    let status = |m: &Machine| {
+        let r = run(m, &["status", "--json"], &[]);
+        let v: Value = serde_json::from_str(&r.out).unwrap();
+        v["uhid_broker"]["state"].as_str().unwrap().to_string()
+    };
+    assert_eq!(status(&m), "missing");
+    fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let broker = |listener: &std::os::unix::net::UnixListener, reply: &'static [u8]| {
+        let listener = listener.try_clone().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut c, _) = listener.accept().unwrap();
+            let mut hello = [0u8; 8];
+            c.read_exact(&mut hello).unwrap();
+            assert_eq!(&hello, &hirz_sys::broker::HELLO_PROBE);
+            c.write_all(reply).unwrap();
+        })
+    };
+    let fake = broker(&listener, &hirz_sys::broker::ALIVE);
+    assert_eq!(status(&m), "answers");
+    fake.join().unwrap();
+    let fake = broker(&listener, &hirz_sys::broker::ALIVE);
+    assert!(run(&m, &["status"], &[]).out.contains("the broker answers"));
+    fake.join().unwrap();
+    let fake = broker(&listener, b"");
+    assert_eq!(status(&m), "error", "something else listens there");
+    fake.join().unwrap();
+    assert_eq!(
+        status(&m),
+        "no_answer",
+        "accepted by the kernel, never answered"
+    );
+    drop(listener);
+    assert_eq!(status(&m), "stale");
+    let out = run(&m, &["status"], &[]).out;
+    assert!(out.contains("is stale: nothing answers"), "{out}");
+    fs::remove_file(&socket).unwrap();
+    fs::write(&socket, b"").unwrap();
+    assert_eq!(status(&m), "missing");
 }

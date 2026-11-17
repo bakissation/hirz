@@ -24,8 +24,16 @@ The host validates every field again, including the origin and relying party id,
 WebAuthn client data itself and asks for the same approval window as
 .BR hirzd (1),
 showing the requesting origin too.
-Without a vault on the device, ceremonies are answered as not handled and Firefox runs them
-itself.
+Without a vault on the device, the first ceremony starts the setup window,
+.BR "hirz init \-\-gui" ,
+under the same conditions as
+.BR hirzd (1),
+and a sign-in is answered as not handled at once so Firefox offers other methods.
+A registration waits for the window (until the extension cancels, at most 600 seconds); when the
+window leaves a vault it goes on with the normal approval, otherwise it is answered as not
+handled and Firefox runs it itself.
+A sign-in that finds no passkey is handed to Firefox and shows a desktop notification at most
+once per site and minute.
 While the vault folder reports a fork, signing in still works, registrations are answered as
 not handled, and the fork is logged once on standard error.
 A request that ends before any window was shown (no way to verify the user, the prompt

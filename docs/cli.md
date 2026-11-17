@@ -107,6 +107,69 @@ Creates a new vault and sets up this computer to use it.
   hirz warns on standard error that whatever stores the output keeps the phrase.
 - Refuses when this computer is already set up, when DIR already holds a vault (use
   `join`), or when DIR is not empty.
+- At the end, when Firefox is installed and none of its profiles has the hirz extension
+  (read from each profile's `extensions.json` through `profiles.ini`, for the deb and rpm,
+  Snap and Flatpak builds; anything unreadable counts as not installed), hirz asks
+  whether to open the extension's page on addons.mozilla.org, and opens it with
+  `xdg-open` (or `gio open`) from a system directory, without a shell. You click
+  "Add to Firefox" there. Nothing in this step can make `init` fail.
+
+### `hirz init --gui [--vault DIR] [--name NAME]`
+
+The same setup in windows (zenity 4 or newer), for people who never open a terminal. hirzd
+and hirz-nmh start it by themselves the first time an app asks for a passkey and there is
+no vault ([approval.md](approval.md), "Setting up hirz"); it can also be run by hand.
+
+1. A first window says what hirz is, with three buttons, Set up on top: Set up, "I already
+   use hirz on another computer" (shows how to join with `hirz join --vault DIR --request` and
+   `hirz devices approve`, then ends) and Cancel. The buttons replace zenity's own
+   (`--question --switch`), so Enter alone chooses none of them.
+2. Set up creates the vault exactly as `hirz init` does: same folder (`--vault`,
+   `HIRZ_VAULT` or the default), same device name, same checks and the same messages, shown
+   in an error window.
+3. A window shows the 24 words numbered in four columns with the warnings of the terminal
+   screen. OK works once "I wrote down all 24 words" is ticked. The text reaches zenity only
+   on its standard input (`--text-info`), never in its arguments, its environment, a file or
+   a log, and hirz builds it in a buffer that is wiped afterwards.
+4. Three windows ask for three words chosen at random, as in the terminal (hidden while
+   typed; case does not matter, the first four letters are enough). A wrong word shows the
+   phrase again, saying which word was wrong.
+
+   When the phrase is not confirmed (three wrong rounds, Cancel or a closed window at the phrase
+   or at a word, a window that fails or times out), nobody has the phrase, so the setup takes the
+   new vault back: it deletes the vault folder and the device state files this run created and
+   counts as a cancel (a minute of quiet follows, as for Cancel in the first window). It
+   only does that when the vault folder did not exist before this run and still holds exactly
+   the files and folders it held right after it was created, with no link anywhere (links are
+   never followed); a recorded vault location that was there before is put back, and other files
+   in the state folder (a hirz PIN, for example) are kept. Otherwise a window says that the vault
+   was created but the phrase was not confirmed and what to do. `hirz init` in a terminal never
+   deletes a vault.
+5. The Firefox step of `hirz init`, as a question window.
+6. A last window gives the vault folder and a backup reminder in plain words: sync the folder
+   to another computer and set hirz up there with "I already use hirz on another computer".
+   When an app request that waited for the setup stopped waiting at any time before this
+   window closed, a desktop notification says "hirz is ready. Go back to the site and try
+   again." once it is closed. A completed setup also ends the quiet minute of an earlier
+   Cancel.
+
+The windows give no commands, with one exception: joining has no window yet, so the join
+answer names `hirz join --vault FOLDER --request`. The phrase window wraps each paragraph to
+its width; only the word grid has fixed lines.
+
+Only one setup window is open at a time for a user: the command holds a lock on
+`$XDG_RUNTIME_DIR/hirz/setup.lock` while it runs, and exits at once when another one holds
+it. Cancel in the first window, and the join answer, write the time to
+`$XDG_RUNTIME_DIR/hirz/setup-cancelled`, so requests do not open the window again for a
+minute (the first one in that minute shows a desktop notification instead). Without
+`XDG_RUNTIME_DIR`, or without a usable zenity, the command exits with status 1 and shows
+nothing. `--yes-i-saved-it` is refused with `--gui`.
+
+Exit status: 0 also when you cancel, choose to join, or do not confirm the phrase (the window
+said what happened, and the `hirz-setup.service` unit the daemons start it in is not marked as
+failed); 1 and the other statuses only for errors. Each window writes one line to standard
+error (the journal when a daemon started the setup): its kind, how it ended (exit status,
+timeout, signal, failure) and how long it was open, never any text or input.
 
 ### `hirz join --vault DIR --request [--name NAME]`
 
@@ -150,7 +213,9 @@ Shows:
 - the Firefox native messaging manifests found in the per-user, `$XDG_CONFIG_HOME` and
   system locations, and whether the program each one starts exists; whether Firefox is a
   Snap or a Flatpak;
-- whether the uhid broker socket exists.
+- whether something answers on the uhid broker socket: hirz connects to it and closes the
+  connection at once (waiting at most one second), so a socket file that nobody listens on
+  any more is reported as stale. With socket activation systemd answers for the broker.
 
 Exit status 3 when this computer is not set up or the vault folder is missing, 1 when the
 vault cannot be read or this device was removed from it.
@@ -174,11 +239,14 @@ vault cannot be read or this device was removed from it.
   "firefox": { "manifests": [{"path": "...", "scope": "your user", "state": "ok",
                               "program": "/usr/lib/hirz/hirz-nmh"}],
                "snap": false, "flatpak": false },
-  "uhid_broker": { "socket": "/run/hirz/uhid.sock", "present": false }
+  "uhid_broker": { "socket": "/run/hirz/uhid.sock", "present": true, "state": "answers" }
 }
 ```
 
-Manifest `state` is `ok`, `missing`, `program_missing` or `invalid`.
+Manifest `state` is `ok`, `missing`, `program_missing` or `invalid`. The broker `state` is
+`answers`, `missing`, `stale` (the socket file exists but the connection is refused),
+`no_answer` (no answer within one second) or `error`; `present` says whether a socket file
+exists.
 
 ### When another device removed this one
 

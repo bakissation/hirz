@@ -98,6 +98,26 @@ does not stay in scrollback, and three of its words must be typed back;
 .B \-\-yes\-i\-saved\-it
 skips that check and prints the phrase on standard output as it is (for scripts).
 Refuses when this computer is already set up or the folder already holds a vault.
+At the end, when Firefox is installed without the hirz extension, hirz offers to open the
+extension's page on addons.mozilla.org with
+.BR xdg\-open (1);
+this step never makes
+.B init
+fail.
+.TP
+.B init \-\-gui \fR[\fB\-\-name \fINAME\fR]
+The same setup in zenity windows:
+what hirz is (Set up, join from another computer, or Cancel), the 24 words numbered in a
+grid, three of them typed back, the Firefox extension, and the backup reminder.
+The phrase reaches zenity only on its standard input.
+.BR hirzd (1)
+and
+.BR hirz\-nmh (1)
+start it when an app asks for a passkey and there is no vault.
+Only one setup window runs at a time (a lock in
+.IR $XDG_RUNTIME_DIR/hirz );
+after Cancel, requests do not open it again for a minute.
+A cancel exits with status 0.
 .TP
 .B join \-\-vault \fIDIR\fB \-\-request \fR[\fB\-\-name \fINAME\fR]
 Use an existing vault that your sync tool copied to
@@ -124,7 +144,8 @@ The same without another device: type the vault's recovery phrase.
 .B status \fR[\fB\-\-json\fR]
 Show the vault and state folders, this device, the number of passkeys and devices, whether
 passkeys count as backed up, sync problems, the approval methods that work now, the Firefox
-native messaging manifests and whether the uhid broker socket exists.
+native messaging manifests and whether something answers on the uhid broker socket (a
+socket file that refuses connections is reported as stale).
 .TP
 .B list \fR[\fB\-\-site \fISITE\fR] [\fB\-\-json\fR]
 List passkeys: site, account, creation date (UTC) and the first 12 hex digits of the

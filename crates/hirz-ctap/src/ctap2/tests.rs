@@ -730,14 +730,92 @@ fn touch_probe_waits_for_a_gesture_then_reports_no_pin() {
         );
 
         for (err, expected) in [
-            (ApprovalError::Denied, Status::NotAllowed),
-            (ApprovalError::Timeout, Status::UserActionTimeout),
+            (ApprovalError::Denied, Status::OperationDenied),
+            (ApprovalError::Timeout, Status::OperationDenied),
         ] {
             let h = handler();
             with_engine(&h, |f| f.fail = Some(CoreError::Approval(err)));
             assert_eq!(status_of(&h, cmd, params), expected.code());
         }
     }
+}
+
+#[test]
+fn a_declined_request_sent_again_at_once_ends_without_asking() {
+    let declined = || {
+        let h = handler().with_decline_memory(Duration::from_millis(300));
+        with_engine(&h, |f| {
+            f.fail = Some(CoreError::Approval(ApprovalError::Denied))
+        });
+        h
+    };
+    let asked = |h: &Ctap2Handler<Fake>| with_engine(h, |f| f.makes.len() + f.gets.len());
+    let mc = make_params(|_| {});
+    let ga = get_params(|_| {});
+    for (cmd, params) in [
+        (command::MAKE_CREDENTIAL, &mc),
+        (command::GET_ASSERTION, &ga),
+    ] {
+        let h = declined();
+        assert_eq!(status_of(&h, cmd, params), Status::OperationDenied.code());
+        assert_eq!(asked(&h), 1);
+        assert_eq!(
+            status_of(&h, cmd, params),
+            Status::NotAllowed.code(),
+            "Firefox's resend"
+        );
+        assert_eq!(asked(&h), 1, "nobody was asked");
+        assert_eq!(status_of(&h, cmd, params), Status::OperationDenied.code());
+        assert_eq!(asked(&h), 2, "only one resend is refused");
+
+        let h = declined();
+        assert_eq!(status_of(&h, cmd, params), Status::OperationDenied.code());
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(status_of(&h, cmd, params), Status::OperationDenied.code());
+        assert_eq!(asked(&h), 2, "asked again after the memory time");
+    }
+
+    let h = declined();
+    assert_eq!(
+        status_of(&h, command::MAKE_CREDENTIAL, &mc),
+        Status::OperationDenied.code()
+    );
+    let other_challenge = make_params(|e| set(e, 1, Value::Bytes(vec![9; 32])));
+    let other_site = make_params(|e| set(e, 2, text_map(&[("id", Value::from("acme.example"))])));
+    for params in [&other_challenge, &other_site] {
+        assert_eq!(
+            status_of(&h, command::MAKE_CREDENTIAL, params),
+            Status::OperationDenied.code()
+        );
+    }
+    assert_eq!(asked(&h), 3, "different requests are asked");
+    assert_eq!(
+        status_of(&h, command::MAKE_CREDENTIAL, &mc),
+        Status::NotAllowed.code(),
+        "the first one is still remembered"
+    );
+
+    let h = declined();
+    with_engine(&h, |f| {
+        f.fail = Some(CoreError::Approval(ApprovalError::Unavailable))
+    });
+    for _ in 0..2 {
+        assert_eq!(
+            status_of(&h, command::MAKE_CREDENTIAL, &mc),
+            Status::NotAllowed.code()
+        );
+    }
+    assert_eq!(asked(&h), 2, "only a decline is remembered");
+
+    let h = declined();
+    let probe = get_params(|e| set(e, 5, text_map(&[("up", Value::Bool(false))])));
+    for _ in 0..2 {
+        assert_eq!(
+            status_of(&h, command::GET_ASSERTION, &probe),
+            Status::OperationDenied.code()
+        );
+    }
+    assert_eq!(asked(&h), 2, "silent probes are never remembered");
 }
 
 #[test]
@@ -1316,14 +1394,19 @@ fn other_commands() {
     });
     assert_eq!(
         h.process(&[command::SELECTION], &ctx),
-        vec![Status::NotAllowed.code()]
+        vec![Status::OperationDenied.code()]
     );
     with_engine(&h, |f| {
         f.fail = Some(CoreError::Approval(ApprovalError::Timeout))
     });
     assert_eq!(
         h.process(&[command::SELECTION], &ctx),
-        vec![Status::UserActionTimeout.code()]
+        vec![Status::OperationDenied.code()]
+    );
+    assert_eq!(
+        h.process(&[command::SELECTION], &ctx),
+        vec![Status::OperationDenied.code()],
+        "a key choice is not remembered"
     );
 }
 

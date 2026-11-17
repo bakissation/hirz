@@ -24,6 +24,8 @@ pub struct Env {
     /// Prefix for system paths that are probed (`/` outside tests).
     pub root: PathBuf,
     pub broker_socket: PathBuf,
+    /// `XDG_RUNTIME_DIR`, where the setup window keeps its lock.
+    pub runtime_dir: Option<PathBuf>,
     pub exe_dir: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
 }
@@ -63,6 +65,7 @@ impl Env {
             vault_override: abs(VAULT_ENV),
             root: PathBuf::from("/"),
             broker_socket,
+            runtime_dir: abs("XDG_RUNTIME_DIR"),
             exe_dir: None,
             cwd: None,
         })
@@ -230,6 +233,14 @@ pub trait System {
     }
     fn sleep(&self, d: std::time::Duration) {
         std::thread::sleep(d);
+    }
+    /// Opens `url` in the user's browser; false when no opener could be started.
+    fn open_url(&self, url: &str) -> bool {
+        hirz_uv::first_run::open_url(url)
+    }
+    /// A desktop notification, best effort.
+    fn notify(&self, text: &str) {
+        hirz_uv::first_run::notify_now(&hirz_uv::SystemRunner, text);
     }
 }
 

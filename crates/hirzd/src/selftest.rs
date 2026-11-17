@@ -26,6 +26,8 @@ const RP_ID: &str = "example.com";
 const CLIENT_DATA_HASH: [u8; 32] = [0x5a; 32];
 const STATUS_OK: u8 = 0x00;
 const STATUS_NOT_ALLOWED: u8 = 0x30;
+#[cfg(test)]
+const STATUS_NO_CREDENTIALS: u8 = 0x2e;
 
 #[derive(Debug)]
 struct ApproveAll;
@@ -382,13 +384,315 @@ pub fn run() -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::session::Hold;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn loopback_self_test_passes() {
         run().unwrap();
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct CountingLauncher(Arc<AtomicU32>, Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl crate::session::SetupLauncher for CountingLauncher {
+        fn can_draw(&self) -> bool {
+            true
+        }
+        fn launch(&self, _: &Path, _: &Path) -> io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn notify(&self, text: &str) {
+            self.1.lock().unwrap().push(text.to_owned());
+        }
+    }
+
+    /// Approves like [`ApproveAll`] and counts the approvals.
+    #[derive(Debug, Clone, Default)]
+    struct Counted(Arc<AtomicU32>);
+
+    impl UvProbe for Counted {
+        fn uv_available(&self) -> bool {
+            true
+        }
+    }
+
+    impl Approver for Counted {
+        fn approve(&self, ctx: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ApproveAll.approve(ctx)
+        }
+    }
+
+    const SHORT: Hold = Hold {
+        limit: Duration::from_millis(60),
+        poll: Duration::from_millis(10),
+    };
+    const LONG: Hold = Hold {
+        limit: Duration::from_secs(20),
+        poll: Duration::from_millis(10),
+    };
+
+    struct Setup {
+        dir: ScratchDir,
+        vault: PathBuf,
+        state: PathBuf,
+        runtime: PathBuf,
+    }
+
+    impl Setup {
+        fn new(tag: &str) -> Setup {
+            let dir = ScratchDir::new(tag).unwrap();
+            let (vault, state, runtime) = (
+                dir.path().join("vault"),
+                dir.path().join("state"),
+                dir.path().join("run"),
+            );
+            Setup {
+                dir,
+                vault,
+                state,
+                runtime,
+            }
+        }
+
+        fn handler(
+            &self,
+            l: &CountingLauncher,
+            approver: Counted,
+            hold: Hold,
+        ) -> Ctap2Handler<VaultAuthenticator<Counted, CountingLauncher>> {
+            let _ = self.dir.path();
+            let session = Session::new(settings_for(&self.vault, &self.state), approver);
+            let first_run = crate::session::FirstRun::new(
+                Some(self.runtime.clone()),
+                Some(self.state.clone()),
+                true,
+                Some(PathBuf::from("/usr/bin/hirz")),
+                l.clone(),
+            );
+            Ctap2Handler::new(
+                VaultAuthenticator::new(session, Notice::new(false))
+                    .with_first_run(first_run)
+                    .with_hold(hold),
+            )
+        }
+    }
+
+    fn request(cmd: u8, params: Option<Value>) -> Vec<u8> {
+        let mut r = vec![cmd];
+        if let Some(p) = params {
+            r.extend(cbor::encode(&p).unwrap());
+        }
+        r
+    }
+
+    fn probe() -> Vec<u8> {
+        request(0x02, Some(get_assertion_params(Some(&[1u8; 32]), false)))
+    }
+
+    fn make() -> Vec<u8> {
+        request(0x01, Some(make_credential_params()))
+    }
+
+    #[test]
+    fn without_a_vault_requests_that_ask_the_user_open_one_setup_window() {
+        let t = Setup::new("hirzd-first-run");
+        let launcher = CountingLauncher::default();
+        let get = request(0x02, Some(get_assertion_params(None, true)));
+        let select = request(0x0b, None);
+
+        let h = t.handler(&launcher, Counted::default(), SHORT);
+        for _ in 0..50 {
+            let ctx = hid::RequestContext::new();
+            assert_eq!(h.process(&probe(), &ctx), vec![STATUS_NOT_ALLOWED]);
+        }
+        assert_eq!(launcher.0.load(Ordering::SeqCst), 0, "silent probes");
+        for _ in 0..20 {
+            for (r, status) in [
+                (&make(), STATUS_NOT_ALLOWED),
+                (&get, STATUS_NO_CREDENTIALS),
+                (&select, STATUS_NOT_ALLOWED),
+            ] {
+                let ctx = hid::RequestContext::new();
+                assert_eq!(h.process(r, &ctx), vec![status]);
+            }
+        }
+        assert_eq!(launcher.0.load(Ordering::SeqCst), 1, "one window per burst");
+
+        for (cmd, status) in [
+            (&make(), STATUS_NOT_ALLOWED),
+            (&get, STATUS_NO_CREDENTIALS),
+            (&select, STATUS_NOT_ALLOWED),
+        ] {
+            let l = CountingLauncher::default();
+            let ctx = hid::RequestContext::new();
+            let h = t.handler(&l, Counted::default(), SHORT);
+            assert_eq!(h.process(cmd, &ctx), vec![status]);
+            assert_eq!(l.0.load(Ordering::SeqCst), 1, "request {:#04x}", cmd[0]);
+            assert!(l.1.lock().unwrap().is_empty(), "the window is the feedback");
+        }
+
+        let held = hirz_uv::first_run::try_lock(&t.runtime).unwrap().unwrap();
+        let l = CountingLauncher::default();
+        let ctx = hid::RequestContext::new();
+        let h = t.handler(&l, Counted::default(), SHORT);
+        assert_eq!(h.process(&make(), &ctx), vec![STATUS_NOT_ALLOWED]);
+        assert_eq!(l.0.load(Ordering::SeqCst), 0, "a setup window is open");
+        assert!(
+            hirz_uv::first_run::take_waiter_gone(&t.runtime),
+            "the registration waited"
+        );
+        let long = t.handler(&l, Counted::default(), LONG);
+        let started = std::time::Instant::now();
+        assert_eq!(long.process(&get, &ctx), vec![STATUS_NO_CREDENTIALS]);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a sign-in never waits"
+        );
+        assert!(!hirz_uv::first_run::take_waiter_gone(&t.runtime));
+        assert!(l.1.lock().unwrap().is_empty());
+        drop(held);
+        hirz_uv::first_run::mark_cancelled(&t.runtime, hirz_proto::time::unix_now()).unwrap();
+        assert_eq!(h.process(&make(), &ctx), vec![STATUS_NOT_ALLOWED]);
+        assert_eq!(
+            l.0.load(Ordering::SeqCst),
+            0,
+            "the user cancelled a moment ago"
+        );
+    }
+
+    #[test]
+    fn a_held_request_goes_on_with_the_normal_approval_once_setup_is_done() {
+        let t = Setup::new("hirzd-hold");
+        let held = hirz_uv::first_run::try_lock(&t.runtime).unwrap().unwrap();
+        let approvals = Counted::default();
+        let h = Arc::new(t.handler(&CountingLauncher::default(), approvals.clone(), LONG));
+        let started = std::time::Instant::now();
+        let ctx = hid::RequestContext::new();
+        assert_eq!(h.process(&probe(), &ctx)[0], STATUS_NOT_ALLOWED);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "probes never hold"
+        );
+        // Like an approval, a held request keeps the engine; the transport runs one request at a
+        // time, so nothing else waits behind it.
+        let worker = {
+            let h = Arc::clone(&h);
+            std::thread::spawn(move || h.process(&make(), &hid::RequestContext::new()))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        Vault::create(&t.vault, &t.state, "laptop").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !worker.is_finished(),
+            "nothing is used before the window closes"
+        );
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+        drop(held);
+        let response = worker.join().unwrap();
+        assert_eq!(response[0], STATUS_OK);
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 1, "approved as usual");
+        let stored = Vault::open(&t.vault, &t.state).unwrap();
+        assert_eq!(stored.list_all().len(), 1);
+        assert!(!hirz_uv::first_run::take_waiter_gone(&t.runtime));
+    }
+
+    #[test]
+    fn a_held_request_fails_on_cancel_or_time_and_the_window_tells_later() {
+        let t = Setup::new("hirzd-hold-end");
+        let held = hirz_uv::first_run::try_lock(&t.runtime).unwrap().unwrap();
+        let approvals = Counted::default();
+        let h = Arc::new(t.handler(&CountingLauncher::default(), approvals.clone(), LONG));
+        let ctx = hid::RequestContext::new();
+        let worker = {
+            let (h, ctx) = (Arc::clone(&h), ctx.clone());
+            std::thread::spawn(move || h.process(&make(), &ctx))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        ctx.cancel();
+        let started = std::time::Instant::now();
+        assert_eq!(worker.join().unwrap(), vec![0x2d], "KEEPALIVE_CANCEL");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(hirz_uv::first_run::take_waiter_gone(&t.runtime));
+
+        let h = t.handler(&CountingLauncher::default(), approvals.clone(), SHORT);
+        let ctx = hid::RequestContext::new();
+        assert_eq!(h.process(&make(), &ctx), vec![STATUS_NOT_ALLOWED]);
+        assert!(
+            hirz_uv::first_run::take_waiter_gone(&t.runtime),
+            "timed out"
+        );
+        drop(held);
+        assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_sign_in_without_a_passkey_for_the_site_is_told_once_a_minute() {
+        let t = Setup::new("hirzd-no-passkey");
+        Vault::create(&t.vault, &t.state, "laptop").unwrap();
+        let l = CountingLauncher::default();
+        let h = t.handler(&l, Counted::default(), SHORT);
+        let sign_in = request(0x02, Some(get_assertion_params(Some(&[9u8; 32]), true)));
+        for _ in 0..5 {
+            let ctx = hid::RequestContext::new();
+            assert_eq!(h.process(&sign_in, &ctx), vec![0x2e], "NO_CREDENTIALS");
+            assert_eq!(h.process(&probe(), &ctx), vec![0x2e]);
+        }
+        assert_eq!(
+            l.1.lock().unwrap().as_slice(),
+            ["hirz has no passkey for example.com."]
+        );
+    }
+
+    /// Declines every approval and counts them.
+    #[derive(Debug, Clone, Default)]
+    struct Declines(Arc<AtomicU32>);
+
+    impl UvProbe for Declines {
+        fn uv_available(&self) -> bool {
+            true
+        }
+    }
+
+    impl Approver for Declines {
+        fn approve(&self, _: &ApprovalContext<'_>) -> Result<Approval, ApprovalError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ApprovalError::Denied)
+        }
+    }
+
+    #[test]
+    fn a_decline_ends_the_ceremony_in_chrome_and_in_firefox() {
+        let dir = ScratchDir::new("hirzd-decline").unwrap();
+        let (vault_dir, state_dir) = (dir.path().join("vault"), dir.path().join("state"));
+        Vault::create(&vault_dir, &state_dir, "test").unwrap();
+        let asked = Declines::default();
+        let session = Session::new(settings_for(&vault_dir, &state_dir), asked.clone());
+        let h = Ctap2Handler::new(VaultAuthenticator::new(session, Notice::new(false)));
+        let make = request(0x01, Some(make_credential_params()));
+        let ctx = hid::RequestContext::new();
+        assert_eq!(h.process(&make, &ctx), vec![0x27], "OPERATION_DENIED");
+        assert_eq!(
+            h.process(&make, &ctx),
+            vec![STATUS_NOT_ALLOWED],
+            "Firefox resends the same request at once"
+        );
+        assert_eq!(
+            asked.0.load(Ordering::SeqCst),
+            1,
+            "and nobody is asked again"
+        );
+        assert!(
+            Vault::open(&vault_dir, &state_dir)
+                .unwrap()
+                .list_all()
+                .is_empty()
+        );
     }
 
     #[test]

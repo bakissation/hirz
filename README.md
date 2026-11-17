@@ -68,16 +68,12 @@ These steps are for Ubuntu. Debian, Fedora, Arch and other routes are in [docs/i
    sudo add-apt-repository ppa:bakissation/hirz
    sudo apt install hirz
    ```
-2. Create your passkey vault. Write the 24 recovery words on paper when hirz shows them. To sync with your other computers, create it inside a folder you already sync, for example `hirz init --vault ~/Sync/hirz`.
+2. Open a site that offers passkeys and try to register one. The first time, hirz opens a setup window: click Set up, write the 24 recovery words on paper when hirz shows them, and type the two it asks for. Then try the site again. To sync with your other computers, create the vault in a terminal instead, inside a folder you already sync:
    ```
-   hirz init
+   hirz init --vault ~/Sync/hirz
    ```
-3. Start hirz in the background, now and at every login:
-   ```
-   systemctl --user enable --now hirzd
-   ```
-4. Optional, for passkey suggestions in sign-in boxes: install the hirz add-on for Firefox. The package already connected Firefox to hirz for every user, so do not run `hirz setup firefox` (that command is for builds from source and would override the packaged connection).
-5. Check that everything is ready:
+3. Optional, for passkey suggestions in sign-in boxes: at the end of setup, hirz offers to open the page of its Firefox add-on. The package already connected Firefox to hirz for every user, so do not run `hirz setup firefox` (that command is for builds from source and would override the packaged connection).
+4. Check that everything is ready:
    ```
    hirz status
    ```

@@ -223,7 +223,8 @@ vault, so credentials another frontend or the folder sync tool wrote meanwhile a
   `hirz init` / `hirz join` record in `$XDG_STATE_HOME/hirz/vault-path`. hirzd and
   hirz-nmh resolve it the same way (`crates/hirz-session`, shared by both), with
   `HIRZ_VAULT` and `HIRZ_STATE` as overrides for tests. Without a vault, hirzd refuses
-  every ceremony and hirz-nmh hands every ceremony back to Firefox.
+  every ceremony and hirz-nmh hands every ceremony back to Firefox; both start the setup
+  window, `hirz init --gui` (docs/approval.md, "Setting up hirz").
 - Device state (never synced): `$XDG_STATE_HOME/hirz/` holds the device secret, the
   wrapped vault key, PIN verifier, retry counters and rate-limit state (files 0600, dir 0700).
 

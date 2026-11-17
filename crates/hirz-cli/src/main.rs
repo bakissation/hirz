@@ -4,6 +4,7 @@
 mod app;
 mod args;
 mod cmd_cxf;
+mod cmd_gui;
 mod cmd_pair;
 mod cmd_pin;
 mod cmd_repair;
@@ -14,8 +15,10 @@ mod cxf;
 mod env;
 mod envelope;
 mod error;
+mod firefox;
 mod foreign;
 mod prompt;
+mod rollback;
 mod ui;
 
 #[cfg(test)]

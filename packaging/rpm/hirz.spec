@@ -87,10 +87,11 @@ sed -E 's#^ExecStart=[^ ]*/hirzd( |$)#ExecStart=%{_bindir}/hirzd\1#' \
   packaging/systemd/hirzd.service > %{buildroot}%{_userunitdir}/hirzd.service
 grep -Eq '^ExecStart=%{_bindir}/hirzd( |$)' %{buildroot}%{_userunitdir}/hirzd.service
 
-# Third-party package: a preset enables the broker socket on install. A package inside
-# Fedora would ask for an entry in the distribution presets instead.
-install -d %{buildroot}%{_presetdir}
+# Third-party package: presets enable the broker socket and, for every user, hirzd on install. A
+# package inside Fedora would ask for entries in the distribution presets instead.
+install -d %{buildroot}%{_presetdir} %{buildroot}%{_userpresetdir}
 echo 'enable hirz-uhid-broker.socket' > %{buildroot}%{_presetdir}/80-hirz.preset
+echo 'enable hirzd.service' > %{buildroot}%{_userpresetdir}/80-hirz.preset
 
 install -Dm0644 packaging/udev/70-hirz.rules %{buildroot}%{_udevrulesdir}/70-hirz.rules
 install -Dm0644 packaging/udev/72-hirz.rules %{buildroot}%{_udevrulesdir}/72-hirz.rules
@@ -130,7 +131,20 @@ if [ $1 -eq 1 ] && [ -d /run/systemd/system ]; then
   if systemctl is-enabled --quiet hirz-uhid-broker.socket; then
     systemctl start hirz-uhid-broker.socket || :
   fi
-  echo "hirz is installed. Each user sets it up with: hirz init; systemctl --user enable --now hirzd"
+  # hirzd has Requisite=graphical-session.target, so it starts only in a graphical session.
+  for dir in /run/user/*; do
+    [ -d "$dir" ] || continue
+    user=$(getent passwd "${dir##*/}" | cut -d: -f1)
+    [ -n "$user" ] || continue
+    systemctl --user --machine="$user@.host" daemon-reload >/dev/null 2>&1 || continue
+    state=$(systemctl --user --machine="$user@.host" is-enabled hirzd.service 2>/dev/null || :)
+    if [ "$state" = enabled ]; then
+      systemctl --user --machine="$user@.host" start --no-block hirzd.service >/dev/null 2>&1 || :
+    fi
+  done
+  echo "hirz is installed and starts with every desktop session."
+  echo "The first time a site asks for a passkey, hirz opens a setup window."
+  echo "To set it up in a terminal instead, run: hirz init"
 fi
 
 %preun
@@ -155,6 +169,7 @@ fi
 %{_unitdir}/hirz-uhid-broker.socket
 %{_userunitdir}/hirzd.service
 %{_presetdir}/80-hirz.preset
+%{_userpresetdir}/80-hirz.preset
 %{_udevrulesdir}/70-hirz.rules
 %{_udevrulesdir}/72-hirz.rules
 %{_udevrulesdir}/99-zzz-hirz.rules

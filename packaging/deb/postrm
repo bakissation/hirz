@@ -3,16 +3,20 @@
 set -e
 
 UNIT=hirz-uhid-broker.socket
+USER_UNIT=hirzd.service
 
 if command -v deb-systemd-helper >/dev/null 2>&1; then
     case "$1" in
         remove)
-            # Keeps the enablement state for a reinstall, and stops the unit from starting.
+            # Keeps the enablement state for a reinstall, and stops the units from starting.
             deb-systemd-helper mask "$UNIT" >/dev/null || true
+            deb-systemd-helper --user mask "$USER_UNIT" >/dev/null || true
             ;;
         purge)
             deb-systemd-helper purge "$UNIT" >/dev/null || true
             deb-systemd-helper unmask "$UNIT" >/dev/null || true
+            deb-systemd-helper --user purge "$USER_UNIT" >/dev/null || true
+            deb-systemd-helper --user unmask "$USER_UNIT" >/dev/null || true
             ;;
     esac
 fi
@@ -21,6 +25,9 @@ case "$1" in
     remove|purge)
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
+            if command -v deb-systemd-invoke >/dev/null 2>&1; then
+                deb-systemd-invoke --user --no-dbus daemon-reload >/dev/null 2>&1 || true
+            fi
         fi
         if command -v udevadm >/dev/null 2>&1; then
             udevadm control --reload || true

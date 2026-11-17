@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod device;
+mod hello;
 mod policy;
 mod relay;
 mod slots;
@@ -17,9 +18,10 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use hello::{Handshakes, Hello};
 use policy::HostPolicy;
 use slots::{RefusalLog, SlotGuard, Slots};
 
@@ -33,6 +35,11 @@ const DEFAULT_MAX_CONNECTIONS: usize = 8;
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often a running device re-checks that its user still has an active session.
 const SESSION_RECHECK: Duration = Duration::from_secs(5);
+/// The whole hello must arrive within this time.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connections that may wait for their hello at the same time, in total and per uid.
+const MAX_HANDSHAKES: usize = 16;
+const MAX_HANDSHAKES_PER_UID: usize = 2;
 
 const USAGE: &str =
     "usage: hirz-uhid-broker [--listen PATH] [--uhid PATH] [--min-uid N] [--max-uid N]
@@ -345,13 +352,55 @@ fn admit(
     slots.try_acquire_at(uid, now).map_err(Refused::Slot)
 }
 
-fn accept_loop(
-    listener: &UnixListener,
-    slots: &Arc<Slots>,
-    policy: &Arc<HostPolicy>,
-    uhid_path: &Path,
-) {
-    let mut refusals = RefusalLog::default();
+/// What every connection thread shares.
+struct Shared {
+    slots: Arc<Slots>,
+    policy: Arc<HostPolicy>,
+    refusals: Mutex<RefusalLog>,
+    uhid_path: PathBuf,
+}
+
+/// One connection after its peer credentials were read: the hello, then a probe answer or a
+/// device. A probe never reaches admission, so it creates nothing, spends no budget and logs
+/// nothing; anything that is not a hello closes the connection.
+fn handle(mut client: UnixStream, uid: u32, pid: i32, pending: hello::Pending, shared: &Shared) {
+    let hello = hello::read(&mut client, HELLO_TIMEOUT);
+    drop(pending);
+    match hello {
+        Some(Hello::Probe) => {
+            if client.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT)).is_ok() {
+                use std::io::Write;
+                let _ = client.write_all(&hirz_sys::broker::ALIVE);
+            }
+        }
+        Some(Hello::Device) => {
+            let now = Instant::now();
+            match admit(&shared.slots, &shared.policy, uid, now) {
+                Ok(guard) => {
+                    serve(client, &shared.uhid_path, &shared.policy, uid, pid);
+                    drop(guard);
+                }
+                Err(refused) => {
+                    let skipped = shared
+                        .refusals
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .note(uid, now);
+                    if let Some(skipped) = skipped {
+                        log(format_args!(
+                            "refused uid {uid} pid {pid}: {} ({skipped} similar refusals not logged)",
+                            refused.reason()
+                        ));
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+fn accept_loop(listener: &UnixListener, shared: &Arc<Shared>) {
+    let handshakes = Handshakes::new(MAX_HANDSHAKES, MAX_HANDSHAKES_PER_UID);
     for conn in listener.incoming() {
         let client = match conn {
             Ok(c) => c,
@@ -369,31 +418,15 @@ fn accept_loop(
                 continue;
             }
         };
-        let now = Instant::now();
-        let guard = match admit(slots, policy, cred.uid, now) {
-            Ok(g) => g,
-            Err(refused) => {
-                if let Some(skipped) = refusals.note(cred.uid, now) {
-                    log(format_args!(
-                        "refused uid {} pid {}: {} ({skipped} similar refusals not logged)",
-                        cred.uid,
-                        cred.pid,
-                        refused.reason()
-                    ));
-                }
-                continue;
-            }
+        let Some(pending) = handshakes.try_start(cred.uid) else {
+            continue;
         };
-        let path = uhid_path.to_path_buf();
-        let policy = Arc::clone(policy);
+        let shared = Arc::clone(shared);
         let spawned = std::thread::Builder::new()
-            .name("relay".into())
-            .spawn(move || {
-                serve(client, &path, &policy, cred.uid, cred.pid);
-                drop(guard);
-            });
+            .name("client".into())
+            .spawn(move || handle(client, cred.uid, cred.pid, pending, &shared));
         if let Err(e) = spawned {
-            log(format_args!("cannot start relay thread: {e}"));
+            log(format_args!("cannot start a client thread: {e}"));
         }
     }
 }
@@ -458,13 +491,18 @@ fn main() -> ExitCode {
         "ready (uid {} to {}, max {} devices, active seat sessions only)",
         args.min_uid, args.max_uid, args.max_connections
     ));
-    let slots = Slots::new(args.min_uid, args.max_uid, args.max_connections);
-    accept_loop(&listener, &slots, &policy, &args.uhid);
+    let shared = Arc::new(Shared {
+        slots: Slots::new(args.min_uid, args.max_uid, args.max_connections),
+        policy,
+        refusals: Mutex::new(RefusalLog::default()),
+        uhid_path: args.uhid,
+    });
+    accept_loop(&listener, &shared);
     ExitCode::SUCCESS
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -786,6 +824,61 @@ mod tests {
                 "uid {uid}"
             );
         }
+        let _ = fs::remove_dir_all(&host.root);
+    }
+
+    #[test]
+    fn a_probe_is_answered_without_a_device_a_budget_or_a_log_line() {
+        use std::io::{Read, Write};
+        let host = host("probe");
+        login(&host, 1000, "active", "seat0");
+        let shared = Shared {
+            slots: Slots::new(DEFAULT_MIN_UID, DEFAULT_MAX_UID, 8),
+            policy: Arc::clone(&host.policy),
+            refusals: Mutex::new(RefusalLog::default()),
+            uhid_path: host.root.join("no-uhid"),
+        };
+        let handshakes = Handshakes::new(MAX_HANDSHAKES, MAX_HANDSHAKES_PER_UID);
+        let connect = |hello: &[u8], uid: u32| {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            client.write_all(hello).unwrap();
+            handle(server, uid, 1, handshakes.try_start(uid).unwrap(), &shared);
+            let mut answer = Vec::new();
+            // Closing with unread bytes (a 64-byte report sent as hello) resets the connection.
+            match client.read_to_end(&mut answer) {
+                Ok(_) => answer,
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => Vec::new(),
+                Err(e) => panic!("{e}"),
+            }
+        };
+        for uid in [1000, 1001, 0, 65_534] {
+            for _ in 0..20 {
+                assert_eq!(connect(&hirz_sys::broker::HELLO_PROBE, uid), b"hirzok01");
+            }
+        }
+        assert_eq!(shared.slots.active(), 0);
+        let now = Instant::now() + Duration::from_secs(60);
+        drop(admit(&shared.slots, &shared.policy, 1000, now).unwrap());
+        let mut log = shared.refusals.lock().unwrap();
+        assert_eq!(
+            log.note(1001, Instant::now()),
+            Some(0),
+            "no refusal was logged"
+        );
+        drop(log);
+
+        assert!(connect(&hirz_sys::broker::HELLO_DEVICE, 1001).is_empty());
+        let mut log = shared.refusals.lock().unwrap();
+        assert_eq!(
+            log.note(1001, Instant::now()),
+            None,
+            "a device refusal is logged"
+        );
+        drop(log);
+        for other in [&[0u8; 64][..], b"hirzok01", b"HIRZPRB1", b""] {
+            assert!(connect(other, 1000).is_empty(), "{other:?}");
+        }
+        assert_eq!(shared.slots.active(), 0);
         let _ = fs::remove_dir_all(&host.root);
     }
 

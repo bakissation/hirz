@@ -19,6 +19,7 @@ use hirz_vault::Vault;
 use std::ffi::OsString;
 use std::io::{PipeReader, PipeWriter, pipe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
@@ -114,10 +115,29 @@ impl Harness {
         state_dir: PathBuf,
         approver: TestApprover,
     ) -> Harness {
+        Harness::start_full(
+            dir,
+            vault_dir,
+            state_dir,
+            approver,
+            FirstRun::disabled(),
+            NMH_HOLD,
+        )
+    }
+
+    fn start_full<L: SetupLauncher + Send + 'static>(
+        dir: TempDir,
+        vault_dir: PathBuf,
+        state_dir: PathBuf,
+        approver: TestApprover,
+        first_run: FirstRun<L>,
+        hold: Hold,
+    ) -> Harness {
         let session = Session::new(settings(&vault_dir, &state_dir), approver);
         let (stdin_r, stdin_w) = pipe().unwrap();
         let (stdout_r, mut stdout_w) = pipe().unwrap();
-        let worker = std::thread::spawn(move || run(stdin_r, &mut stdout_w, session, true));
+        let worker =
+            std::thread::spawn(move || run(stdin_r, &mut stdout_w, session, first_run, hold, true));
         Harness {
             to_host: stdin_w,
             from_host: stdout_r,
@@ -348,6 +368,136 @@ fn without_a_vault_firefox_handles_everything() {
     h.finish().unwrap();
 }
 
+#[derive(Debug, Clone, Default)]
+struct CountingLauncher(Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>);
+
+impl SetupLauncher for CountingLauncher {
+    fn can_draw(&self) -> bool {
+        true
+    }
+    fn launch(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn notify(&self, text: &str) {
+        self.1.lock().unwrap().push(text.to_owned());
+    }
+}
+
+const SHORT: Hold = Hold {
+    limit: std::time::Duration::from_millis(60),
+    poll: std::time::Duration::from_millis(10),
+};
+
+fn first_run_harness(
+    with_vault: bool,
+    launcher: &CountingLauncher,
+    hold: Hold,
+) -> (Harness, PathBuf) {
+    let dir = TempDir::new();
+    let (vault_dir, state_dir) = (dir.0.join("vault"), dir.0.join("state"));
+    let runtime = dir.0.join("run");
+    if with_vault {
+        Vault::create(&vault_dir, &state_dir, "test").unwrap();
+    }
+    let first_run = FirstRun::new(
+        Some(runtime.clone()),
+        Some(state_dir.clone()),
+        true,
+        Some(PathBuf::from("/usr/bin/hirz")),
+        launcher.clone(),
+    );
+    let h = Harness::start_full(dir, vault_dir, state_dir, plain(), first_run, hold);
+    (h, runtime)
+}
+
+#[test]
+fn without_a_vault_a_ceremony_opens_one_setup_window() {
+    let launcher = CountingLauncher::default();
+    let (mut h, runtime) = first_run_harness(false, &launcher, SHORT);
+    h.send(r#"{"v":1,"id":1,"type":"capabilities"}"#);
+    h.recv();
+    h.send(&list_msg(2, &[]));
+    h.recv();
+    assert_eq!(launcher.0.load(Ordering::SeqCst), 0, "reads open nothing");
+    h.send(&create_msg(3, &[1u8; 32]));
+    let r = h.recv();
+    assert_eq!(r.get("error").and_then(Json::as_str), Some("NotHandled"));
+    assert!(
+        hirz_uv::first_run::take_waiter_gone(&runtime),
+        "the wait ran out while the window was starting"
+    );
+    for id in 4..40 {
+        if id % 2 == 0 {
+            h.send(&get_msg(id, &[1u8; 32], None));
+        } else {
+            h.send(&create_msg(id, &[1u8; 32]));
+        }
+        let r = h.recv();
+        assert_eq!(r.get("error").and_then(Json::as_str), Some("NotHandled"));
+    }
+    assert_eq!(launcher.0.load(Ordering::SeqCst), 1);
+    h.finish().unwrap();
+}
+
+#[test]
+fn a_ceremony_waits_for_the_setup_window_and_then_asks_as_usual() {
+    let launcher = CountingLauncher::default();
+    let long = Hold {
+        limit: std::time::Duration::from_secs(20),
+        ..SHORT
+    };
+    let (mut h, runtime) = first_run_harness(false, &launcher, long);
+    let held = hirz_uv::first_run::try_lock(&runtime).unwrap().unwrap();
+    h.send(&create_msg(1, &[1u8; 32]));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    Vault::create(&h.vault_dir, &h.state_dir, "test").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    drop(held);
+    let r = h.recv();
+    assert_eq!(r.get("ok"), Some(&Json::Bool(true)), "{r}");
+    let vault = Vault::open(&h.vault_dir, &h.state_dir).unwrap();
+    assert_eq!(vault.list_all().len(), 1);
+
+    let (mut h, runtime) = first_run_harness(false, &launcher, long);
+    let held = hirz_uv::first_run::try_lock(&runtime).unwrap().unwrap();
+    h.send(&create_msg(1, &[1u8; 32]));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    h.send(r#"{"v":1,"id":1,"type":"cancel"}"#);
+    let r = h.recv();
+    assert_eq!(r.get("error").and_then(Json::as_str), Some("AbortError"));
+    assert!(hirz_uv::first_run::take_waiter_gone(&runtime));
+
+    let started = std::time::Instant::now();
+    h.send(&get_msg(2, &[1u8; 32], None));
+    let r = h.recv();
+    assert_eq!(r.get("error").and_then(Json::as_str), Some("NotHandled"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "a sign-in never waits"
+    );
+    assert!(!hirz_uv::first_run::take_waiter_gone(&runtime));
+    assert!(launcher.1.lock().unwrap().is_empty(), "no notice either");
+    drop(held);
+    h.finish().unwrap();
+}
+
+#[test]
+fn a_sign_in_without_a_passkey_is_told_once_and_handed_to_firefox() {
+    let launcher = CountingLauncher::default();
+    let (mut h, _runtime) = first_run_harness(true, &launcher, SHORT);
+    for id in 1..4 {
+        h.send(&get_msg(id, &[1u8; 32], Some(&[9u8; 32])));
+        let r = h.recv();
+        assert_eq!(r.get("error").and_then(Json::as_str), Some("NotHandled"));
+    }
+    assert_eq!(
+        launcher.1.lock().unwrap().as_slice(),
+        ["hirz has no passkey for example.com."]
+    );
+    h.finish().unwrap();
+}
+
 #[test]
 fn cancel_while_the_prompt_is_open() {
     let (approver, open_rx, gate_tx) = gated();
@@ -488,6 +638,7 @@ fn imported_credential_with_a_16_byte_id_signs_through_handle() {
         uv: true,
         cancelled: &cancelled,
         commit: None,
+        no_passkey: &|_: &str| {},
     };
     for (n, allow) in [(1, Some(id.as_slice())), (2, None)] {
         let challenge = [n; 32];
@@ -914,7 +1065,13 @@ fn a_registration_nobody_can_be_asked_about_goes_to_firefox() {
     h.finish().unwrap();
 }
 
-fn host_for(dir: &TempDir) -> (Host<TestApprover>, PathBuf, PathBuf) {
+fn host_for(
+    dir: &TempDir,
+) -> (
+    Host<TestApprover, session::SystemLauncher>,
+    PathBuf,
+    PathBuf,
+) {
     let (vault_dir, state_dir) = (dir.0.join("vault"), dir.0.join("state"));
     Vault::create(&vault_dir, &state_dir, "test").unwrap();
     let session = Session::new(settings(&vault_dir, &state_dir), plain());
@@ -922,6 +1079,8 @@ fn host_for(dir: &TempDir) -> (Host<TestApprover>, PathBuf, PathBuf) {
         session,
         pending: Arc::new(Mutex::new(Pending::default())),
         removed_told: false,
+        first_run: FirstRun::disabled(),
+        hold: NMH_HOLD,
     };
     (host, vault_dir, state_dir)
 }
@@ -1003,6 +1162,7 @@ fn a_cancel_that_lands_after_the_credential_was_stored_deletes_it_and_keeps_the_
         uv: false,
         cancelled: &never,
         commit: Some(&commit),
+        no_passkey: &|_: &str| {},
     };
     let request = hirz_core::MakeCredentialRequest {
         client_data_hash: [5; 32],

@@ -6,6 +6,7 @@
 pub mod approver;
 pub mod config;
 pub mod display;
+pub mod first_run;
 pub mod fprint;
 pub mod pin;
 pub mod polkit;

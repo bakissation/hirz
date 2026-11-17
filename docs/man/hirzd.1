@@ -18,8 +18,26 @@ PIN, or a click for sites listed for click\-to\-allow.
 .PP
 The vault is opened on the first request and reloaded for every ceremony, so passkeys
 created by the Firefox extension path or synced from another device are seen at once.
-Without a vault, requests are refused with CTAP2_ERR_NOT_ALLOWED, and hirzd logs a message
+Without a vault, requests are refused with CTAP2_ERR_NOT_ALLOWED (a sign-in with
+CTAP2_ERR_NO_CREDENTIALS), and hirzd logs a message
 and shows a desktop notification at most once every 10 minutes.
+A request that would ask the user (makeCredential, getAssertion with user presence,
+authenticatorSelection; never a silent probe) also starts the setup window,
+.BR "hirz init \-\-gui" ,
+from the
+.B hirz
+next to hirzd or
+.IR /usr/bin/hirz ,
+when a graphical session is visible, no setup window is open, the user did not cancel one
+in the last minute and hirzd did not start one in the last 30 seconds.
+Within a minute of a cancelled setup the first such request shows a desktop notification
+instead.
+A sign-in or touch request is then answered with CTAP2_ERR_NO_CREDENTIALS at once.
+A registration that started the setup window, or finds one open, waits for it (at most 115
+seconds, keepalives keep flowing) and, when the window leaves a vault, goes on with the normal
+approval.
+A getAssertion with user presence that finds no passkey shows a desktop notification at most
+once per site and minute.
 .PP
 When the broker closes the connection or cannot be reached, hirzd retries after 1 second,
 doubling up to 60 seconds; a connection that lasted 30 seconds resets the delay.

@@ -66,10 +66,11 @@ impl Status {
 impl From<&ApprovalError> for Status {
     fn from(e: &ApprovalError) -> Self {
         match e {
-            // Firefox treats OPERATION_DENIED as a failed verification and resends at once, looping forever on
-            // a user refusal; NOT_ALLOWED ends the ceremony (docs/uhid.md, "Refusals end the ceremony").
-            ApprovalError::Denied => Status::NotAllowed,
-            ApprovalError::Timeout => Status::UserActionTimeout,
+            // CTAP 2.2 6.1 and 6.2: a user who declines, or a consent that times out, ends with
+            // OPERATION_DENIED, the only refusal Chromium ends the ceremony on (any other code drops
+            // the key and its dialog waits). Firefox resends such a request at once; the handler
+            // answers that resend with NOT_ALLOWED (docs/uhid.md, "Refusals end the ceremony").
+            ApprovalError::Denied | ApprovalError::Timeout => Status::OperationDenied,
             // No clientPin: PIN_BLOCKED would point the platform at a PIN it cannot see.
             ApprovalError::Locked => Status::UvBlocked,
             // UV_INVALID and OPERATION_DENIED make platforms retry built-in UV in a loop.
@@ -145,11 +146,11 @@ mod tests {
             (CoreError::UvRequiredUnavailable, Status::NotAllowed),
             (
                 CoreError::Approval(ApprovalError::Denied),
-                Status::NotAllowed,
+                Status::OperationDenied,
             ),
             (
                 CoreError::Approval(ApprovalError::Timeout),
-                Status::UserActionTimeout,
+                Status::OperationDenied,
             ),
             (
                 CoreError::Approval(ApprovalError::Locked),

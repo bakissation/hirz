@@ -1541,7 +1541,7 @@ mod tests {
         let cl = calls(&a);
         assert_eq!(cl.len(), 1);
         assert!(cl[0].args.contains(&"--default-cancel".to_owned()));
-        assert!(cl[0].args.contains(&"--ok-label=Allow".to_owned()));
+        assert!(cl[0].args.contains(&"--ok-label=Sign in".to_owned()));
         assert_eq!(cl[0].env, EnvPolicy::Desktop);
     }
 
@@ -1777,7 +1777,7 @@ mod tests {
         assert_eq!(cl.len(), 2);
         assert_eq!(cl[0].args[0], "--list");
         assert_eq!(cl[1].args[0], "--question");
-        assert!(cl[1].args.contains(&"--ok-label=Allow".to_owned()));
+        assert!(cl[1].args.contains(&"--ok-label=Sign in".to_owned()));
         assert!(cl[1].args.contains(&"--default-cancel".to_owned()));
         assert!(texts(&a)[1].contains("Account: alice"));
 

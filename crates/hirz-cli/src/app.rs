@@ -143,6 +143,9 @@ pub fn run(inv: Invocation, ctx: &mut Ctx<'_>) -> CliResult<Exit> {
             Ok(Exit::Ok)
         }
         Command::Init { name, saved } => crate::cmd_vault::init(ctx, name, saved),
+        Command::InitGui { name } => {
+            crate::cmd_gui::init_gui(ctx, name, &mut crate::cmd_gui::ZenityWindows::new())
+        }
         Command::Join { name, request } => crate::cmd_vault::join(ctx, name, request),
         Command::Status { json } => crate::cmd_status::status(ctx, json),
         Command::List { site, json } => crate::cmd_vault::list(ctx, site, json),
@@ -169,7 +172,7 @@ hirz keeps your passkeys in an encrypted folder that you can sync between comput
 Usage: hirz [--vault DIR] COMMAND [OPTIONS]
 
 Getting started:
-  init                 Create a new vault on this computer
+  init                 Create a new vault on this computer (--gui: in windows)
   join --vault DIR     Use an existing (synced) vault on this computer
                        (--request: get approval from another device)
   setup firefox        Connect hirz to Firefox
@@ -203,6 +206,7 @@ Exit status: 0 done, 1 failed, 2 wrong arguments, 3 not set up, 4 cancelled,
 
 const HELP_INIT: &str = "\
 Usage: hirz init [--vault DIR] [--name NAME] [--yes-i-saved-it]
+       hirz init --gui [--vault DIR] [--name NAME]
 
 Creates a new, empty vault and sets up this computer to use it.
 
@@ -211,10 +215,16 @@ Creates a new, empty vault and sets up this computer to use it.
   --name NAME         Name of this computer as other devices see it
                       (default: the computer's host name)
   --yes-i-saved-it    Do not ask to retype words of the recovery phrase (scripts)
+  --gui               Do the same in windows instead of the terminal. hirz starts this
+                      itself the first time an app asks it for a passkey and there is
+                      no vault yet.
 
 hirz shows a 24-word recovery phrase once, on the terminal's alternate screen so it
 does not stay in scrollback. Write it down: it is the only way to get your passkeys
 back if you lose every device, and you need it to add a computer.
+
+When Firefox is installed without the hirz extension, hirz offers at the end to open
+the extension's page on addons.mozilla.org.
 ";
 
 const HELP_JOIN: &str = "\
