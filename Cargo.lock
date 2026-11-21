@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "hirz-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "hirz-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-crypto",
  "hirz-proto",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "hirz-crypto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "aws-lc-rs",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "hirz-ctap"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "hirz-nmh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
@@ -218,14 +218,14 @@ dependencies = [
 
 [[package]]
 name = "hirz-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "hirz-session"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
@@ -235,21 +235,21 @@ dependencies = [
 
 [[package]]
 name = "hirz-sys"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "hirz-uhid-broker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-sys",
 ]
 
 [[package]]
 name = "hirz-uv"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "hirz-vault"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-crypto",
  "hirz-proto",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "hirz-webauthn"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "hirzd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hirz-core",
  "hirz-crypto",
