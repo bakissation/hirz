@@ -8,9 +8,8 @@ or Chromium. Commands that start with `sudo` ask for your password.
 
 ## 1. Install the package
 
-Pick one route. The package repositories below are available from the first release; until
-then, build the package yourself (see
-[Building the package yourself](#building-the-package-yourself)).
+Pick one route. To build the package from source instead, see
+[Building the package yourself](#building-the-package-yourself).
 
 | Route | Updates | Distributions |
 |---|---|---|
@@ -18,7 +17,7 @@ then, build the package yourself (see
 | [Ubuntu PPA](#ubuntu-ppa) | with `apt upgrade` | Ubuntu 24.04 and 26.04 |
 | [hirz dnf repository](#dnf-repository-fedora) | with `dnf upgrade` | Fedora, x86_64 and aarch64 |
 | [Fedora COPR](#fedora-copr) | with `dnf upgrade` | the Fedora releases the COPR project builds for |
-| [AUR](#arch-linux) | with your AUR helper | Arch Linux |
+| [AUR](#arch-linux) (not published yet) | with your AUR helper | Arch Linux |
 | [Download from GitHub Releases](#download-from-github-releases) | by hand | Debian, Ubuntu, Fedora |
 
 Every route installs the same files. hirz is not offered as a snap or a Flatpak (see
@@ -40,8 +39,8 @@ report it (see [SECURITY.md](../SECURITY.md)).
 
 ### apt repository (Debian and Ubuntu)
 
-Available from the first release. The repository's `Release` file is signed with the hirz
-archive key, and apt checks every package against the hashes in it.
+The repository's `Release` file is signed with the hirz archive key, and apt checks every
+package against the hashes in it.
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -70,13 +69,18 @@ a new one: it is served over HTTPS from GitHub Pages only.
 
 ### Ubuntu PPA
 
-Available from the first release. Built by Launchpad from the release sources, for Ubuntu
-24.04 (noble) and 26.04 (resolute):
+Built by Launchpad from the release sources, for Ubuntu 24.04 (noble) and 26.04 (resolute):
 
 ```sh
 sudo add-apt-repository ppa:bakissation/hirz
 sudo apt install hirz
 ```
+
+Launchpad builds each new version itself after the release, which usually takes a few hours
+and can take longer. Until it has finished, `apt install hirz` finds nothing (or keeps the
+version you have). The [hirz apt repository](#apt-repository-debian-and-ubuntu) has every new
+version right away. If `add-apt-repository` stops with an error from Launchpad (for example
+"HTTP Error 500"), wait a few minutes and run it again.
 
 Launchpad builds the packages and signs the PPA archive with its own key, which
 `add-apt-repository` installs and which the PPA's page shows; apt trusts that key, not ours.
@@ -86,8 +90,7 @@ page ("View package details") and run `gpg --verify` on it to see which key sign
 
 ### dnf repository (Fedora)
 
-Available from the first release. The repository metadata and the packages are signed;
-dnf checks both.
+The repository metadata and the packages are signed; dnf checks both.
 
 ```sh
 sudo curl -fsSL -o /etc/yum.repos.d/hirz.repo https://bakissation.github.io/hirz/hirz.repo
@@ -111,7 +114,7 @@ the archive key fingerprint above (it is the same key as for apt).
 
 ### Fedora COPR
 
-Available from the first release. Built by COPR from the release sources:
+Built by COPR from the release sources:
 
 ```sh
 sudo dnf copr enable bakissation/hirz
@@ -121,8 +124,8 @@ sudo dnf install hirz
 ### Download from GitHub Releases
 
 Packages are attached to each release on
-[github.com/bakissation/hirz/releases](https://github.com/bakissation/hirz/releases),
-available from the first release. Each file has a GitHub attestation and a Sigstore
+[github.com/bakissation/hirz/releases](https://github.com/bakissation/hirz/releases).
+Each file has a GitHub attestation and a Sigstore
 signature; [release.md](release.md#verifying-a-release) shows how to check them.
 
 #### Ubuntu and Debian
@@ -151,8 +154,8 @@ signature; [release.md](release.md#verifying-a-release) shows how to check them.
 
 ### Arch Linux
 
-1. Install the `hirz` package from the AUR (available from the first release) with your
-   AUR helper, or by hand:
+1. The `hirz` package is not on the AUR yet. Once it is, install it with your AUR helper, or
+   by hand:
 
    ```sh
    git clone https://aur.archlinux.org/hirz.git
@@ -234,29 +237,30 @@ that choice.
 The extension lets Firefox use hirz as a passkey provider instead of a security key, so
 sites see a regular passkey prompt. The virtual security key works without it.
 
-Once Mozilla has reviewed it (submitted with each release, available from the first
-release), install it from addons.mozilla.org: hirz offers to open its page
+Install it from addons.mozilla.org: hirz offers to open its page
 (https://addons.mozilla.org/firefox/addon/hirz/) at the end of setup, or search for "hirz"
-in Firefox's add-ons manager. Check that the developer link points to
+in Firefox's add-ons manager. It needs Firefox 142 or later on a computer; Firefox for
+Android is not supported. Check that the developer link points to
 github.com/bakissation/hirz.
-
-Until then the extension is unsigned, so regular Firefox only loads it until the next
-restart:
-
-1. Download `hirz-*.xpi` from the release, or use the `extension` folder of the source.
-2. Open `about:debugging#/runtime/this-firefox` in Firefox.
-3. Click "Load Temporary Add-on" and choose the `.xpi` file (or `extension/manifest.json`).
-
-Firefox Developer Edition and Nightly can install it permanently: set
-`xpinstall.signatures.required` to `false` in `about:config`, then open the `.xpi` file
-with Firefox. That setting turns off Firefox's check that add-ons are signed, for every
-add-on, so any add-on you or a web page installs afterwards loads unchecked: use it only in a
-profile you keep for trying hirz, and set it back to `true` when you are done.
 
 Do not run `hirz setup firefox` when you installed a package: the package already installed
 the Firefox connection system-wide, and a copy in your home folder would take precedence.
 The command refuses while the packaged manifest exists; `--force` overrides that for a
 build from source.
+
+### Extension built from source
+
+The `.xpi` file on the release page and the `extension` folder of the source are not signed
+by Mozilla, so regular Firefox only loads them until the next restart:
+
+1. Open `about:debugging#/runtime/this-firefox` in Firefox.
+2. Click "Load Temporary Add-on" and choose the `.xpi` file (or `extension/manifest.json`).
+
+Firefox Developer Edition and Nightly can keep it after a restart: set
+`xpinstall.signatures.required` to `false` in `about:config`, then open the `.xpi` file
+with Firefox. That setting turns off Firefox's check that add-ons are signed, for every
+add-on, so any add-on you or a web page installs afterwards loads unchecked: use it only in a
+profile you keep for trying hirz, and set it back to `true` when you are done.
 
 ### Firefox from Snap (Ubuntu's default)
 

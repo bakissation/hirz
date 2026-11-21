@@ -17,17 +17,27 @@ for_each_user() {
     done
 }
 
-restart_hirzd() {
-    systemctl --user --machine="$1@.host" try-restart "$USER_UNIT" >/dev/null 2>&1
-}
+restarted=
+failed=
 
-# The unit has Requisite=graphical-session.target, so it only starts in a graphical session. A
-# user who masked it, or an administrator who disabled it globally, is skipped.
-start_hirzd() {
+# Reloads the user's manager first: after "apt remove" and a reinstall, postrm had masked the unit
+# and the running manager still sees it masked until it reloads. A running hirzd is restarted, so
+# an upgrade (a security fix) applies at once. A stopped one is started when enabled; the unit has
+# Requisite=graphical-session.target, so it only starts in a graphical session. A user who masked
+# it, or an administrator who disabled it globally, is skipped.
+refresh_hirzd() {
     systemctl --user --machine="$1@.host" daemon-reload >/dev/null 2>&1 || return 0
+    if systemctl --user --machine="$1@.host" --quiet is-active "$USER_UNIT" 2>/dev/null; then
+        if systemctl --user --machine="$1@.host" restart "$USER_UNIT" >/dev/null 2>&1; then
+            restarted=yes
+        else
+            failed=yes
+        fi
+        return 0
+    fi
     state=$(systemctl --user --machine="$1@.host" is-enabled "$USER_UNIT" 2>/dev/null || true)
     [ "$state" = enabled ] || return 0
-    systemctl --user --machine="$1@.host" start --no-block "$USER_UNIT" >/dev/null 2>&1
+    systemctl --user --machine="$1@.host" start --no-block "$USER_UNIT" >/dev/null 2>&1 || true
 }
 
 case "$1" in
@@ -67,22 +77,24 @@ case "$1" in
         fi
 
         if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-            if [ -n "$2" ]; then
-                # A running hirzd keeps the old binary until it restarts, which would leave a
-                # security fix unapplied until the next login.
-                for_each_user restart_hirzd
-                echo "hirz was upgraded. If hirzd still runs the old version, restart it: systemctl --user restart hirzd"
-            else
-                for_each_user start_hirzd
-            fi
+            for_each_user refresh_hirzd
         fi
         ;;
 esac
 
-if [ "$1" = "configure" ] && [ -z "$2" ]; then
-    echo "hirz is installed and starts with every desktop session."
-    echo "The first time a site asks for a passkey, hirz opens a setup window."
-    echo "To set it up in a terminal instead, run: hirz init"
+# $2 is also set on a reinstall after "apt remove", so only a restart proves an upgrade.
+if [ "$1" = "configure" ]; then
+    if [ -n "$failed" ]; then
+        echo "hirz was upgraded, but hirzd could not restart. Restart it: systemctl --user restart hirzd"
+    elif [ -n "$restarted" ]; then
+        echo "hirz was upgraded and hirzd restarted."
+    else
+        echo "hirz is installed and starts with every desktop session."
+        if [ -z "$2" ]; then
+            echo "The first time a site asks for a passkey, hirz opens a setup window."
+            echo "To set it up in a terminal instead, run: hirz init"
+        fi
+    fi
 fi
 
 exit 0

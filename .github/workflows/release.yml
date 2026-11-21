@@ -3,7 +3,7 @@ name: release
 # Runs for a tag vX.Y.Z (created by release-plz) or vX.Y.Z-rc.N (pushed on main by a maintainer):
 # reproducible builds, signing and the GitHub Release; stable tags then update each package
 # channel listed in the RELEASE_CHANNELS variable (docs/release.md). Every job that signs or holds a
-# publishing secret runs in the "release" environment, which allows only v* tags and needs a reviewer.
+# publishing secret runs in the "release" environment, which allows only v* tags.
 # Signing (cosign, attestations) happens only in jobs that run no project or dependency code:
 # "publish" and "snap-attest". The jobs that run build scripts as root have no id-token permission.
 
