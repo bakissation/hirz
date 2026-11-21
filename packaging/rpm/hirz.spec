@@ -3,7 +3,7 @@
 #   rpmbuild -ba hirz.spec                   plain cargo build (COPR, local)
 #   rpmbuild -ba --with auditable hirz.spec  cargo auditable build (release workflow)
 
-%global upstream_version 0.1.0
+%global upstream_version 0.1.1
 # AWS-LC is C code built by aws-lc-sys; Fedora's LTO flags are not meant for it.
 %global _lto_cflags %{nil}
 # The release profile strips the binaries, so there is no debug information to package.

@@ -1,7 +1,7 @@
 # Maintainer: Abdelbaki Berkati <bakissation@users.noreply.github.com>
 
 pkgname=hirz
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Passkey authenticator for Linux: a virtual security key and a Firefox extension host'
 arch=('x86_64' 'aarch64')
