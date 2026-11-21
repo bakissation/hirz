@@ -115,6 +115,6 @@ local path is still found in a binary.
 - `flatpak/`: how hirz works with Firefox installed as a Flatpak. hirz itself is not a
   Flatpak.
 - `snap/`: a draft `snapcraft.yaml` and why hirz needs classic confinement as a snap.
-- `amo/`: listing metadata for the first submission of the Firefox extension to
-  addons.mozilla.org.
+- `amo/`: the Firefox extension's listing details (category, summary, links, license and
+  notes for Mozilla's reviewers) that each release sends to addons.mozilla.org.
 - `systemd/`, `udev/`, `polkit/`, `native-messaging/`: the source files above.

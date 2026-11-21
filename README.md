@@ -10,10 +10,8 @@ Sign in to websites with a passkey on Linux, using your fingerprint or your comp
 
 <p align="center">
   <a href="https://github.com/bakissation/hirz/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/bakissation/hirz"></a>
-  <!-- Enable once the add-on is public on addons.mozilla.org: -->
-  <!-- <a href="https://addons.mozilla.org/firefox/addon/hirz/"><img alt="Firefox add-on" src="https://img.shields.io/amo/v/hirz"></a> -->
+  <a href="https://addons.mozilla.org/firefox/addon/hirz/"><img alt="Firefox add-on" src="https://img.shields.io/amo/v/hirz"></a>
   <img alt="License: MIT or Apache 2.0" src="https://img.shields.io/badge/license-MIT%20or%20Apache%202.0-0F766E">
-  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-F59E0B">
 </p>
 
 ## Passkeys on Linux, finally
