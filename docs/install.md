@@ -237,29 +237,30 @@ that choice.
 The extension lets Firefox use hirz as a passkey provider instead of a security key, so
 sites see a regular passkey prompt. The virtual security key works without it.
 
-Once Mozilla has reviewed it (submitted with each release, available from the first
-release), install it from addons.mozilla.org: hirz offers to open its page
+Install it from addons.mozilla.org: hirz offers to open its page
 (https://addons.mozilla.org/firefox/addon/hirz/) at the end of setup, or search for "hirz"
-in Firefox's add-ons manager. Check that the developer link points to
+in Firefox's add-ons manager. It needs Firefox 142 or later on a computer; Firefox for
+Android is not supported. Check that the developer link points to
 github.com/bakissation/hirz.
-
-Until then the extension is unsigned, so regular Firefox only loads it until the next
-restart:
-
-1. Download `hirz-*.xpi` from the release, or use the `extension` folder of the source.
-2. Open `about:debugging#/runtime/this-firefox` in Firefox.
-3. Click "Load Temporary Add-on" and choose the `.xpi` file (or `extension/manifest.json`).
-
-Firefox Developer Edition and Nightly can install it permanently: set
-`xpinstall.signatures.required` to `false` in `about:config`, then open the `.xpi` file
-with Firefox. That setting turns off Firefox's check that add-ons are signed, for every
-add-on, so any add-on you or a web page installs afterwards loads unchecked: use it only in a
-profile you keep for trying hirz, and set it back to `true` when you are done.
 
 Do not run `hirz setup firefox` when you installed a package: the package already installed
 the Firefox connection system-wide, and a copy in your home folder would take precedence.
 The command refuses while the packaged manifest exists; `--force` overrides that for a
 build from source.
+
+### Extension built from source
+
+The `.xpi` file on the release page and the `extension` folder of the source are not signed
+by Mozilla, so regular Firefox only loads them until the next restart:
+
+1. Open `about:debugging#/runtime/this-firefox` in Firefox.
+2. Click "Load Temporary Add-on" and choose the `.xpi` file (or `extension/manifest.json`).
+
+Firefox Developer Edition and Nightly can keep it after a restart: set
+`xpinstall.signatures.required` to `false` in `about:config`, then open the `.xpi` file
+with Firefox. That setting turns off Firefox's check that add-ons are signed, for every
+add-on, so any add-on you or a web page installs afterwards loads unchecked: use it only in a
+profile you keep for trying hirz, and set it back to `true` when you are done.
 
 ### Firefox from Snap (Ubuntu's default)
 
