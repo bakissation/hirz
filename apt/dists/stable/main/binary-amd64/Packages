@@ -1,19 +1,19 @@
 Package: hirz
-Version: 0.1.0-1
+Version: 0.1.1-1
 Architecture: amd64
 Maintainer: Abdelbaki Berkati <bakissation@users.noreply.github.com>
-Installed-Size: 13065
+Installed-Size: 13068
 Depends: libc6 (>= 2.39), libgcc-s1, polkitd, zenity (>= 4)
 Recommends: fprintd
 Suggests: xdg-native-messaging-proxy
 Homepage: https://github.com/bakissation/hirz
 Priority: optional
 Section: utils
-Filename: pool/main/h/hirz/hirz_0.1.0-1_amd64.deb
-Size: 2015904
-SHA256: 617eee75a38ebe2859dc99bbf96c37f5f36e7c9fe9b4b6a0ed570a1119ab07ff
-SHA1: 482325a7bc152b7730c34a93f634d646b98aa6df
-MD5sum: 6e8c6652e137421eac403bd02ed1feb9
+Filename: pool/main/h/hirz/hirz_0.1.1-1_amd64.deb
+Size: 2023916
+SHA256: 1d1e4137c78ca199ca1e1ec149556fc04cc790df442de0a81e40c6744a6301d0
+SHA1: e74f7a411fb137428e1b79a92a2286dc01b3d5ec
+MD5sum: 9280d627190b8dcaac598bbf738c58af
 Description: passkey authenticator for Linux
  hirz keeps your passkeys (WebAuthn / FIDO2) in an encrypted vault folder that
  your own folder sync can copy between your computers. It appears to browsers
