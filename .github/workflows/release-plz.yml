@@ -284,10 +284,37 @@ jobs:
           "$GITHUB_WORKSPACE/trusted/scripts/ci/commit-via-api.sh" "$GITHUB_REPOSITORY" "$BRANCH" \
             "chore: set version $VERSION in packaging files" "${files[@]}"
 
+  # A regular job, not a call to backmerge.yml: a called workflow did not get the secrets of the
+  # release-plz environment, so the back-merge after 0.1.0 and 0.1.1 found no App key.
   backmerge:
     name: back-merge main into dev
     needs: release
     if: needs.release.outputs.releases_created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release-plz
     permissions:
       contents: read
-    uses: ./.github/workflows/backmerge.yml
+    env:
+      HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A pull request opened with GITHUB_TOKEN starts no workflow, so the required ci check would
+      # never run on it: the release GitHub App is required here.
+      - name: GitHub App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open and auto-merge the pull request
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: scripts/ci/backmerge.sh "$GITHUB_REPOSITORY"

@@ -1,10 +1,10 @@
 name: backmerge
 
-# After a release, dev must contain the release commit from main or the next release PR conflicts:
-# opens a main -> dev pull request with auto-merge (merge commit). Called by release-plz.yml.
+# Started by hand (Actions, backmerge, Run workflow, branch main) when the back-merge after a
+# release did not run: opens a main -> dev pull request with auto-merge (merge commit). After a
+# release, the backmerge job of release-plz.yml does the same on its own.
 
 on:
-  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -20,8 +20,10 @@ jobs:
     env:
       HAS_APP: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' && vars.RELEASE_APP_CLIENT_ID != '' }}
     steps:
-      # A pull request opened with GITHUB_TOKEN starts no workflow, so the required check would never
-      # run on it: the release GitHub App is required here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: GitHub App token
         id: app
         if: env.HAS_APP == 'true'
@@ -35,22 +37,4 @@ jobs:
       - name: Open and auto-merge the pull request
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::no release GitHub App: open a pull request main -> dev by hand"
-            exit 0
-          fi
-          ahead=$(gh api "repos/$REPO/compare/dev...main" --jq .ahead_by)
-          if [ "$ahead" = 0 ]; then
-            echo "dev already contains main"
-            exit 0
-          fi
-          url=$(gh pr list --repo "$REPO" --base dev --head main --state open --json url --jq '.[0].url')
-          if [ -z "$url" ]; then
-            url=$(gh pr create --repo "$REPO" --base dev --head main \
-              --title "chore: back-merge main into dev" \
-              --body "Automated after a release: brings the release commit (version and CHANGELOG.md) from main into dev. No other change.")
-          fi
-          gh pr merge "$url" --repo "$REPO" --auto --merge
-          echo "auto-merge enabled: $url"
+        run: scripts/ci/backmerge.sh "$GITHUB_REPOSITORY"
