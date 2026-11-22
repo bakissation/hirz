@@ -208,7 +208,9 @@ Before the first release, set the version once in a normal pull request into `de
      checks every file against it, before the job uses a secret. The sums that pass are
      byte for byte the `SHA256SUMS` that `publish` signed and attested.
 7. The `backmerge` job of `release-plz.yml` opens a pull request `main` into `dev` and
-   enables auto-merge (merge commit), so `dev` gets the release commit.
+   enables auto-merge (merge commit), so `dev` gets the release commit. If it did not (it
+   warns when the App is missing), run `backmerge.yml` by hand on `main` (Actions, backmerge,
+   Run workflow); both use `scripts/ci/backmerge.sh`.
 
 release-plz runs in git-only mode (`git_only = true`): nothing is published to crates.io
 (every crate has `publish = false`), and the last release is found from the `vX.Y.Z` tags.
